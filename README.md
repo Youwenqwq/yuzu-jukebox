@@ -153,6 +153,10 @@ yuzu-cli provider qrlogin ncm
 | `room top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
 | `policy set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
 | `policy show <room>` | 已认证 | 查看房间策略 |
+| `player list` | `room_admin` | 在线播放端清单 |
+| `player volume <id> <0-100>` | `room_admin` | 远程调音量 |
+| `player mute <id> on\|off` | `room_admin` | 远程静音 |
+| `player join <id> <room>` | `room_admin` | 迁移播放端到指定房间 |
 | `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
@@ -289,6 +293,9 @@ go test ./... -race
 - 房间治理策略（max_queue / 按 kind/role 的点歌限额，热更新）
 - 播放历史与热度统计 API（首播时间、播放次数）
 - 代理断线重连（指数退避 + 自动恢复渲染）、重启后房间自动续播队首
+- 播放端管理平面（player.hello/command/state，远程音量/静音/换房，服务端迁移连接）
+- 富元数据（album/cover/source_url/contributors 曲目层 + size/bitrate 物理层、
+  封面代理、歌词端点；local 支持 tag/内嵌封面提取）
 - 凭据热更新、扫码登录（ncm / bili）、凭据定期健康检查（credmon）
 - 流式缓存（tee + 后台续传 + LRU）、下载进度可观测、票据化出流
 - MPV 播放代理（防抖渲染）、控制 CLI（子命令帮助）、端到端冒烟测试

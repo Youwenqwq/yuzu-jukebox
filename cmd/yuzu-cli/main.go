@@ -407,6 +407,48 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdWhoami(ctx) })
 			},
 		},
+		"player list": {
+			usage:  "player list",
+			desc:   "列出在线播放端（管理员）",
+			detail: "显示所有已注册的可管理播放端：设备名、身份、所在房间、音量、能力。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				return withCtx(func(ctx context.Context) error { return cmdPlayers(ctx) })
+			},
+		},
+		"player volume": {
+			usage:  "player volume <player_id> <0-100>",
+			desc:   "远程设置播放端音量（管理员）",
+			detail: "向指定播放端下发音量指令，立即生效。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("player volume")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerVolume(ctx, args[0], args[1]) })
+			},
+		},
+		"player mute": {
+			usage: "player mute <player_id> on|off",
+			desc:  "远程静音/取消静音播放端（管理员）",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("player mute")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerMute(ctx, args[0], args[1]) })
+			},
+		},
+		"player join": {
+			usage: "player join <player_id> <room>",
+			desc:  "把播放端迁移到指定房间（管理员）",
+			detail: `服务端直接把播放端的连接迁入目标房间并推送快照，
+agent 自动重新渲染——无需房间密码，无需重启 agent。
+嵌入式音箱远程换房间的入口。`,
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("player join")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerJoin(ctx, args[0], args[1]) })
+			},
+		},
 		"queue del": {
 			usage:  "queue del <room> <entry_id>",
 			desc:   "移除队列条目（本人或管理员）",
@@ -529,6 +571,7 @@ var groupMeta = map[string]struct {
 	"room":     {"房间管理与统计", "list"},
 	"provider": {"Provider 与凭据管理", "list"},
 	"media":    {"媒体与缓存", ""},
+	"player":   {"播放端管理", "list"},
 }
 
 // groupChildren 收集某组的全部子命令名（排序）。

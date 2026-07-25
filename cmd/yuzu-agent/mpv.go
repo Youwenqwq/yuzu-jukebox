@@ -147,6 +147,42 @@ func (m *mpvClient) SetSpeed(speed float64) {
 	m.command("set_property", "speed", speed)
 }
 
+// SetVolume 设置音量（0-100，可超 100 但不建议）。
+func (m *mpvClient) SetVolume(v float64) {
+	m.command("set_property", "volume", v)
+}
+
+// Volume 读取当前音量。
+func (m *mpvClient) Volume() (float64, error) {
+	resp, err := m.command("get_property", "volume")
+	if err != nil {
+		return 0, err
+	}
+	var v float64
+	if err := json.Unmarshal(resp.Data, &v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+// SetMute 设置静音。
+func (m *mpvClient) SetMute(muted bool) {
+	m.command("set_property", "mute", muted)
+}
+
+// Muted 读取静音状态。
+func (m *mpvClient) Muted() (bool, error) {
+	resp, err := m.command("get_property", "mute")
+	if err != nil {
+		return false, err
+	}
+	var v bool
+	if err := json.Unmarshal(resp.Data, &v); err != nil {
+		return false, err
+	}
+	return v, nil
+}
+
 func (m *mpvClient) SeekTo(seconds float64) {
 	m.command("set_property", "time-pos", seconds)
 }

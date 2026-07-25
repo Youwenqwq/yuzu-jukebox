@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -21,6 +22,9 @@ import (
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 )
+
+// agentVersion 上报给管理面的版本号。
+const agentVersion = "1.0.0"
 
 func main() {
 	var (
@@ -104,6 +108,26 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 	}
 	log.Printf("joined room %q as %s (%s)", roomID, id.Name, id.ID)
 
+	// 注册为可管理播放端（音量/静音远程可调；换房由服务端迁移连接）
+	device := name
+	if h, err := os.Hostname(); err == nil && h != "" {
+		device = h
+	}
+	playerID, err := cli.PlayerHello(ctx, device, agentVersion, []string{"volume", "mute", "join_room"})
+	if err != nil {
+		log.Printf("player.hello: %v (管理面不可用，继续播放)", err)
+	} else {
+		log.Printf("registered as player %s", playerID)
+	}
+	reportState := func() {
+		vol, verr := mpv.Volume()
+		muted, merr := mpv.Muted()
+		if verr == nil && merr == nil {
+			_ = cli.SendPlayerState(int(vol+0.5), muted)
+		}
+	}
+	reportState()
+
 	// 3. 状态渲染 + 周期校偏
 	var (
 		cur       client.Playback // 最近一次服务器播放状态
@@ -163,11 +187,32 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 			if !ok {
 				return fmt.Errorf("connection lost")
 			}
-			if m.Type == "playback.changed" {
+			switch m.Type {
+			case "playback.changed":
 				pb, err := client.ParsePlayback(m)
 				if err == nil {
 					scheduleApply(pb)
 				}
+			case "player.command":
+				op, value, err := client.ParsePlayerCommand(m)
+				if err != nil {
+					break
+				}
+				switch op {
+				case "set_volume":
+					var v float64
+					if json.Unmarshal(value, &v) == nil {
+						mpv.SetVolume(v)
+						log.Printf("player.command: volume -> %.0f", v)
+					}
+				case "set_mute":
+					var v bool
+					if json.Unmarshal(value, &v) == nil {
+						mpv.SetMute(v)
+						log.Printf("player.command: mute -> %v", v)
+					}
+				}
+				reportState()
 			}
 		case pb := <-applyCh:
 			apply(pb)

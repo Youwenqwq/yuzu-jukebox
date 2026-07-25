@@ -11,6 +11,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -24,10 +25,13 @@ type Server struct {
 	authm *auth.Manager
 	rooms *room.Manager
 	reg   *provider.Registry
+
+	playersMu sync.Mutex
+	players   map[string]*client // 已注册的播放端（player.hello）
 }
 
 func NewServer(authm *auth.Manager, rooms *room.Manager, reg *provider.Registry) *Server {
-	return &Server{authm: authm, rooms: rooms, reg: reg}
+	return &Server{authm: authm, rooms: rooms, reg: reg, players: map[string]*client{}}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +60,7 @@ type client struct {
 	id       string
 	identity *auth.Identity
 	room     *room.Room
+	player   *playerState // 非 nil = 已注册播放端
 	send     chan any
 
 	closeOnce chan struct{}
@@ -117,6 +122,9 @@ func (c *client) readLoop() {
 	defer func() {
 		if c.room != nil {
 			c.room.Leave(c)
+		}
+		if c.player != nil {
+			c.server.unregisterPlayer(c)
 		}
 		c.conn.Close(websocket.StatusNormalClosure, "")
 		close(c.send)
@@ -187,6 +195,15 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			"type": "auth.ok", "ref": ref,
 			"data": map[string]any{"identity": id, "session_token": token},
 		})
+
+	case "player.hello":
+		if !c.requireAuth(ref) {
+			return
+		}
+		c.handlePlayerHello(ref, data)
+
+	case "player.state":
+		c.handlePlayerState(data)
 
 	case "room.join":
 		var d struct {

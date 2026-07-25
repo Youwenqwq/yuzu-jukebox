@@ -72,6 +72,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /stream/v1/{ref}", s.stream)
 	mux.HandleFunc("GET /api/v1/cover/{ref}", s.cover)
 	mux.HandleFunc("GET /api/v1/lyrics", s.lyrics)
+	mux.HandleFunc("GET /api/v1/players", s.listPlayers)
+	mux.HandleFunc("POST /api/v1/players/{id}/command", s.playerCommand)
 	mux.Handle("/ws/v1", s.ws)
 	return mux
 }
@@ -411,6 +413,66 @@ func (s *Server) roomStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
 }
 
+// listPlayers 在线播放端清单（room_admin）。
+func (s *Server) listPlayers(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"players": s.ws.Players()})
+}
+
+// playerCommand 向播放端下发指令（room_admin）。
+// op: set_volume(0-100) | set_mute(bool) | join_room(room_id)。
+func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
+	if !ok {
+		return
+	}
+	playerID := r.PathValue("id")
+	var body struct {
+		Op    string          `json:"op"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	var err error
+	switch body.Op {
+	case "set_volume":
+		var v int
+		if json.Unmarshal(body.Value, &v) != nil || v < 0 || v > 100 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "volume must be 0-100")
+			return
+		}
+		err = s.ws.CommandPlayer(playerID, body.Op, v)
+	case "set_mute":
+		var v bool
+		if json.Unmarshal(body.Value, &v) != nil {
+			writeErr(w, http.StatusBadRequest, "bad_request", "mute must be bool")
+			return
+		}
+		err = s.ws.CommandPlayer(playerID, body.Op, v)
+	case "join_room":
+		var v string
+		if json.Unmarshal(body.Value, &v) != nil || v == "" {
+			writeErr(w, http.StatusBadRequest, "bad_request", "join_room needs room id string")
+			return
+		}
+		err = s.ws.JoinPlayerRoom(playerID, v)
+	default:
+		writeErr(w, http.StatusBadRequest, "bad_request", "unknown op "+body.Op)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), id.ID, "player.command", playerID, `{"op":`+strconv.Quote(body.Op)+`}`)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// listProviders 已注册 Provider 清单。
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
 		return

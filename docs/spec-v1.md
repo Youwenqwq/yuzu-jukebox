@@ -237,6 +237,22 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
 - 电台补充不经过限额检查（补充只在队列 <3 时触发，天然有界）。
 - 播放历史与统计见 6 节 REST；`play_history` 只记**播放**（结束原因 `finished`/`skipped`），不记点歌意图。
 
+### 4.8 播放端管理平面（player plane）
+
+无头渲染端（嵌入式播放器）可注册为**可管理播放端**，管理员远程调节，无需 SSH：
+
+```
+agent: → {"type": "player.hello", "data": {"device": "speaker-01", "caps": ["volume","mute","join_room"]}}
+       ← {"type": "player.hello.ok", "data": {"player_id": "c_…"}}
+agent: → {"type": "player.state", "data": {"volume": 42, "muted": false}}   // 变更时上报
+server:← {"type": "player.command", "data": {"op": "set_volume", "value": 42}}  // 服务端下发
+```
+
+- 注册要求已认证身份；连接断开自动注销。
+- **换房间不收房间密码**：`join_room` 由服务端直接迁移连接（房间 actor 自动推送快照，agent 原样重渲染）。
+- 管理入口是 REST：`GET /api/v1/players`、`POST /api/v1/players/{id}/command {op, value}`（op: `set_volume` 0-100 / `set_mute` bool / `join_room` 房间 id），均需 `room_admin`。
+- 面向用户的交互式客户端 SHOULD NOT 实现该平面（本地 UI 自己管音量）。
+
 ## 5. 房间状态机
 
 ### 5.1 状态字段（权威，存于房间 actor 内，不落库）
@@ -309,6 +325,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `GET /api/v1/rooms/{id}/stats?limit=` | 已认证 | 曲目热度榜：播放次数、首播/最近播放时间（默认 20，上限 100） |
 | `GET /api/v1/cover/{track_ref}` | 已认证 | 统一封面代理（local 内嵌封面 / 源站带 Referer 转发），Cache-Control 1 天 |
 | `GET /api/v1/lyrics?track_ref=` | 已认证 | 歌词（`{type:"lrc", lrc, tlrc?}`）；provider 无此能力返回 501 |
+| `GET /api/v1/players` | `room_admin` | 在线播放端清单 |
+| `POST /api/v1/players/{id}/command` | `room_admin` | 播放端指令：set_volume / set_mute / join_room |
 | `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | 热更新 Provider 凭据（如 ncm 的 MUSIC_U cookie）；服务端先校验再生效，凭据存 credentials 表，永不下发 |
