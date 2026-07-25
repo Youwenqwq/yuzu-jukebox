@@ -280,6 +280,27 @@ func (s *Store) UpsertCredential(ctx context.Context, providerID, payload, statu
 	return err
 }
 
+// UpdateCredentialStatus 更新最新一条凭据记录的校验状态与时间戳（健康检查用）。
+func (s *Store) UpdateCredentialStatus(ctx context.Context, providerID, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE credentials SET status = ?, last_check_at = ?
+		 WHERE id = (SELECT id FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1)`,
+		status, nowMs(), providerID)
+	return err
+}
+
+// GetCredentialStatus 返回最新一条凭据记录的状态；未设置返回 "unset"。
+func (s *Store) GetCredentialStatus(ctx context.Context, providerID string) (string, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1`,
+		providerID).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "unset", nil
+	}
+	return status, err
+}
+
 func (s *Store) ListCacheRows(ctx context.Context) ([]CacheRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT track_ref, file_path, size_bytes, last_accessed_at, created_at FROM media_cache

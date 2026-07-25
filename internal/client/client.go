@@ -320,6 +320,19 @@ func RESTListRooms(ctx context.Context, server, token string) ([]RoomInfo, error
 	return out.Rooms, err
 }
 
+type ProviderInfo struct {
+	ID               string `json:"id"`
+	CredentialStatus string `json:"credential_status,omitempty"`
+}
+
+func RESTListProviders(ctx context.Context, server, token string) ([]ProviderInfo, error) {
+	var out struct {
+		Providers []ProviderInfo `json:"providers"`
+	}
+	err := restCall(ctx, server, "GET", "/api/v1/providers", token, nil, &out)
+	return out.Providers, err
+}
+
 type Track struct {
 	Ref        string `json:"track_ref"`
 	Title      string `json:"title"`

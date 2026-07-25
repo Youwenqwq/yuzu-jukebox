@@ -211,11 +211,18 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type info struct {
-		ID string `json:"id"`
+		ID               string `json:"id"`
+		CredentialStatus string `json:"credential_status,omitempty"` // 仅 CredentialAware provider 有此字段
 	}
 	out := []info{}
 	for _, p := range s.reg.All() {
-		out = append(out, info{ID: p.ID()})
+		entry := info{ID: p.ID()}
+		if _, ok := p.(provider.CredentialAware); ok {
+			if status, err := s.st.GetCredentialStatus(r.Context(), p.ID()); err == nil {
+				entry.CredentialStatus = status
+			}
+		}
+		out = append(out, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": out})
 }

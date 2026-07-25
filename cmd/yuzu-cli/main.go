@@ -211,6 +211,15 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 			})
 		},
 	},
+	"providers": {
+		usage: "providers",
+		desc:  "列出已注册的 Provider 及凭据状态",
+		detail: `显示服务器上注册的全部 Provider；支持凭据的 Provider 附带
+凭据健康状态（unset / ok / invalid）。状态由服务端定期探活维护。`,
+		run: func(args []string) error {
+			return withCtx(cmdProviders)
+		},
+	},
 	"qrlogin": {
 		usage: "qrlogin <provider>",
 		desc:  "扫码登录 provider（管理员）",
@@ -514,6 +523,25 @@ func cmdCredential(ctx context.Context, providerID, payload string) error {
 		return err
 	}
 	return client.RESTSetCredential(ctx, *server, token, providerID, payload)
+}
+
+func cmdProviders(ctx context.Context) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	providers, err := client.RESTListProviders(ctx, *server, token)
+	if err != nil {
+		return err
+	}
+	for _, p := range providers {
+		status := p.CredentialStatus
+		if status == "" {
+			status = "-"
+		}
+		fmt.Printf("%-12s %s\n", p.ID, status)
+	}
+	return nil
 }
 
 func cmdCache(ctx context.Context) error {

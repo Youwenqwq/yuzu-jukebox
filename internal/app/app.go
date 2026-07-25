@@ -10,6 +10,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/config"
+	"github.com/youwenqwq/yuzu-jukebox/internal/credmon"
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/bili"
@@ -54,6 +55,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err := rooms.Load(); err != nil {
 		return nil, err
 	}
+
+	mon := credmon.New(reg, st)
+	go mon.Run(ctx)
 
 	ws := wsapi.NewServer(authm, rooms, reg)
 	api := httpapi.NewServer(st, authm, rooms, reg, lp, c, ws)
