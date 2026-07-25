@@ -223,24 +223,24 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				return withCtx(cmdProviders)
 			},
 		},
-		"playlists": {
-			usage:  "playlists",
+		"playlist list": {
+			usage:  "playlist list",
 			desc:   "列出全部歌单",
-			detail: "列出服务器上的歌单（含曲目数）。查看歌单内容用 playlist-show。",
+			detail: "列出服务器上的歌单（含曲目数）。查看歌单内容用 playlist show。",
 			run: func(args []string) error {
 				return withCtx(cmdPlaylists)
 			},
 		},
-		"playlist-show": {
-			usage: "playlist-show <id> [offset] [-limit 50]",
+		"playlist show": {
+			usage: "playlist show <id> [offset] [-limit 50]",
 			desc:  "查看歌单内容（分页）",
 			detail: `分页显示歌单条目（序号、track_ref、标题、艺术家、时长）。
 
 示例：
-  yuzu-cli playlist-show pl_a1b2c3 0 -limit 20`,
+  yuzu-cli playlist show pl_a1b2c3 0 -limit 20`,
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("playlist-show")
+					return errUsage("playlist show")
 				}
 				offset := 0
 				if len(args) > 1 {
@@ -251,13 +251,13 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				})
 			},
 		},
-		"playlist-create": {
-			usage:  "playlist-create <名称> [描述]",
+		"playlist create": {
+			usage:  "playlist create <名称> [描述]",
 			desc:   "创建歌单（管理员）",
 			detail: "创建一张空的通用歌单。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("playlist-create")
+					return errUsage("playlist create")
 				}
 				desc := ""
 				if len(args) > 1 {
@@ -268,21 +268,21 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				})
 			},
 		},
-		"playlist-delete": {
-			usage:  "playlist-delete <id>",
+		"playlist delete": {
+			usage:  "playlist delete <id>",
 			desc:   "删除歌单（管理员）",
 			detail: "删除歌单及其全部条目。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("playlist-delete")
+					return errUsage("playlist delete")
 				}
 				return withCtx(func(ctx context.Context) error {
 					return cmdPlaylistDelete(ctx, args[0])
 				})
 			},
 		},
-		"playlist-add": {
-			usage: "playlist-add <id> <track_ref>...",
+		"playlist add": {
+			usage: "playlist add <id> <track_ref>...",
 			desc:  "向歌单追加曲目（管理员）",
 			detail: `把一个或多个 track_ref 追加到歌单尾部（单次最多 100 首）。
 元数据快照自各 provider 实时获取。
@@ -290,20 +290,20 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 需要 media_admin 角色。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("playlist-add")
+					return errUsage("playlist add")
 				}
 				return withCtx(func(ctx context.Context) error {
 					return cmdPlaylistAdd(ctx, args[0], args[1:])
 				})
 			},
 		},
-		"playlist-delitem": {
-			usage:  "playlist-delitem <id> <ord>",
+		"playlist delitem": {
+			usage:  "playlist delitem <id> <ord>",
 			desc:   "删除歌单中的指定条目（管理员）",
-			detail: "按序号（ord，playlist-show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
+			detail: "按序号（ord，playlist show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("playlist-delitem")
+					return errUsage("playlist delitem")
 				}
 				ord, err := strconv.Atoi(args[1])
 				if err != nil {
@@ -314,17 +314,17 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				})
 			},
 		},
-		"playlist-import": {
-			usage: "playlist-import <ncm:歌单id|URL|ncm:daily> [名称]",
+		"playlist import": {
+			usage: "playlist import <ncm:歌单id|URL|ncm:daily> [名称]",
 			desc:  "导入外部歌单或曲目源快照（管理员）",
 			detail: `两种用法：
-  playlist-import ncm:24381616     导入 ncm 歌单（也接受完整 URL）
-  playlist-import ncm:daily        把每日推荐物化成歌单
+  playlist import ncm:24381616     导入 ncm 歌单（也接受完整 URL）
+  playlist import ncm:daily        把每日推荐物化成歌单
 
 需要 media_admin 角色。长歌单分页拉取，可能需要几秒。`,
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("playlist-import")
+					return errUsage("playlist import")
 				}
 				name := ""
 				if len(args) > 1 {
@@ -335,13 +335,13 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				})
 			},
 		},
-		"radio-play": {
-			usage: "radio-play <room> <source> [-shuffle] [-once]",
+		"radio play": {
+			usage: "radio play <room> <source> [-shuffle] [-once]",
 			desc:  "房间进入电台模式：绑定曲目源自动续播（管理员）",
 			detail: `让房间绑定一个曲目源，队列见底时自动批量补充，实现无人值守续播。
 
 source 取值：
-  playlist:<id>       通用歌单（playlist-show 可查 id）
+  playlist:<id>       通用歌单（playlist show 可查 id）
   ncm:daily            网易云每日推荐
   ncm:fm               网易云私人FM（无限流，不接受 -shuffle/-once）
   ncm:simi:<song_id>  相似歌曲电台（种子=当前播放曲目）
@@ -351,24 +351,24 @@ source 取值：
 需要 room_admin 角色。
 
 示例：
-  yuzu-cli radio-play lobby playlist:pl_a1b2c3 -shuffle
-  yuzu-cli radio-play lobby ncm:fm`,
+  yuzu-cli radio play lobby playlist:pl_a1b2c3 -shuffle
+  yuzu-cli radio play lobby ncm:fm`,
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("radio-play")
+					return errUsage("radio play")
 				}
 				return withCtx(func(ctx context.Context) error {
 					return cmdRadioPlay(ctx, args[0], args[1])
 				})
 			},
 		},
-		"radio-stop": {
-			usage:  "radio-stop <room>",
+		"radio stop": {
+			usage:  "radio stop <room>",
 			desc:   "退出电台模式（管理员）",
 			detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("radio-stop")
+					return errUsage("radio stop")
 				}
 				return withCtx(func(ctx context.Context) error {
 					return cmdRadioStop(ctx, args[0])
@@ -376,35 +376,35 @@ source 取值：
 			},
 		},
 		"status": {
-		usage: "status <room>",
-		desc:  "房间总览：播放状态、电台绑定、队列规模、听众",
-		detail: `一眼看清房间当前状态：正在放什么、是否绑定曲目源（电台）、
+			usage: "status <room>",
+			desc:  "房间总览：播放状态、电台绑定、队列规模、听众",
+			detail: `一眼看清房间当前状态：正在放什么、是否绑定曲目源（电台）、
 队列里还压着几首、谁在线。想看队列明细用 queue。`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("status")
-			}
-			return withCtx(func(ctx context.Context) error { return cmdStatus(ctx, args[0]) })
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("status")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdStatus(ctx, args[0]) })
+			},
 		},
-	},
-	"queue-del": {
-			usage:  "queue-del <room> <entry_id>",
+		"queue del": {
+			usage:  "queue del <room> <entry_id>",
 			desc:   "移除队列条目（本人或管理员）",
 			detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；room_admin 可移除任意。\n\nentry_id 见 queue 输出第一列。",
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("queue-del")
+					return errUsage("queue del")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdQueueDel(ctx, args[0], args[1]) })
 			},
 		},
-		"queue-move": {
-			usage:  "queue-move <room> <entry_id> <位置>",
+		"queue move": {
+			usage:  "queue move <room> <entry_id> <位置>",
 			desc:   "移动队列条目到指定位置（管理员）",
 			detail: "把队列条目移动到目标序号（0 起）。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 3 {
-					return errUsage("queue-move")
+					return errUsage("queue move")
 				}
 				to, err := strconv.Atoi(args[2])
 				if err != nil {
@@ -439,8 +439,8 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdTop(ctx, args[0]) })
 			},
 		},
-		"policy-set": {
-			usage: "policy-set <room> <JSON>",
+		"policy set": {
+			usage: "policy set <room> <JSON>",
 			desc:  "设置房间治理策略（管理员）",
 			detail: `热更新房间策略，JSON 结构：
   {"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}
@@ -450,18 +450,18 @@ max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 k
 需要 room_admin 角色。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("policy-set")
+					return errUsage("policy set")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdPolicySet(ctx, args[0], args[1]) })
 			},
 		},
-		"policy-show": {
-			usage:  "policy-show <room>",
+		"policy show": {
+			usage:  "policy show <room>",
 			desc:   "查看房间当前治理策略",
 			detail: "显示房间的 policy JSON。",
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("policy-show")
+					return errUsage("policy show")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdPolicyShow(ctx, args[0]) })
 			},
@@ -486,6 +486,29 @@ max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 k
 	}
 }
 
+// groupMeta 子命令组元数据：desc 为组描述，def 为裸组名时的默认子命令（空 = 打印组帮助）。
+var groupMeta = map[string]struct {
+	desc string
+	def  string
+}{
+	"playlist": {"通用歌单管理", "list"},
+	"queue":    {"队列操作（queue <room> 为查看）", ""},
+	"radio":    {"电台模式", ""},
+	"policy":   {"房间治理策略", ""},
+}
+
+// groupChildren 收集某组的全部子命令名（排序）。
+func groupChildren(prefix string) []string {
+	var out []string
+	for n := range commands {
+		if strings.HasPrefix(n, prefix+" ") {
+			out = append(out, strings.TrimPrefix(n, prefix+" "))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ---------- main ----------
 
 func main() {
@@ -502,15 +525,31 @@ func main() {
 		printHelp(args[1:])
 		os.Exit(0)
 	}
-	cmd, ok := commands[args[0]]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown command: %s (see 'yuzu-cli help')\n", args[0])
-		os.Exit(2)
+	run := func(c command, rest []string) {
+		if err := c.run(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
-	if err := cmd.run(args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	// 两级优先：playlist add / queue del / radio play / policy set
+	if len(args) >= 2 {
+		if cmd, ok := commands[args[0]+" "+args[1]]; ok {
+			run(cmd, args[2:])
+		}
 	}
+	if cmd, ok := commands[args[0]]; ok {
+		run(cmd, args[1:])
+	}
+	if meta, ok := groupMeta[args[0]]; ok {
+		if meta.def != "" {
+			run(commands[args[0]+" "+meta.def], args[1:])
+		}
+		printGroupHelp(args[0])
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "unknown command: %s (see 'yuzu-cli help')\n", args[0])
+	os.Exit(2)
 }
 
 // parseFlagsAnywhere 允许 flag 出现在子命令前后任意位置。
@@ -553,15 +592,22 @@ func isBoolFlag(name string) bool {
 // ---------- 帮助 ----------
 
 func printHelp(args []string) {
-	if len(args) > 0 {
-		if cmd, ok := commands[args[0]]; ok {
-			fmt.Printf("用法: yuzu-cli %s\n\n%s\n%s", cmd.usage, cmd.desc, cmd.detail)
-			if !strings.HasSuffix(cmd.detail, "\n") {
-				fmt.Println()
-			}
+	if len(args) >= 2 {
+		if cmd, ok := commands[args[0]+" "+args[1]]; ok {
+			printCommandHelp(cmd)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", args[0])
+	}
+	if len(args) > 0 {
+		if cmd, ok := commands[args[0]]; ok {
+			printCommandHelp(cmd)
+			return
+		}
+		if _, ok := groupMeta[args[0]]; ok {
+			printGroupHelp(args[0])
+			return
+		}
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", strings.Join(args, " "))
 	}
 	fmt.Println(`yuzu-cli — yuzu-jukebox 控制端
 
@@ -570,12 +616,29 @@ func printHelp(args []string) {
 命令:`)
 	names := make([]string, 0, len(commands))
 	for n := range commands {
-		names = append(names, n)
+		if !strings.Contains(n, " ") {
+			names = append(names, n)
+		}
 	}
 	sort.Strings(names)
 	for _, n := range names {
 		c := commands[n]
-		fmt.Printf("  %-28s %s\n", c.usage, c.desc)
+		note := ""
+		if children := groupChildren(n); len(children) > 0 {
+			note = "（子命令: " + strings.Join(children, ", ") + "）"
+		}
+		fmt.Printf("  %-20s %s%s\n", c.usage, c.desc, note)
+	}
+	groups := make([]string, 0, len(groupMeta))
+	for g := range groupMeta {
+		if _, isCmd := commands[g]; !isCmd {
+			groups = append(groups, g)
+		}
+	}
+	sort.Strings(groups)
+	for _, g := range groups {
+		fmt.Printf("  %-20s %s（子命令: %s）\n", g+" <子命令>", groupMeta[g].desc,
+			strings.Join(groupChildren(g), ", "))
 	}
 	fmt.Println(`
 全局 flag（可放任意位置，括号内为对应环境变量）:
@@ -584,7 +647,24 @@ func printHelp(args []string) {
   -password        全局管理员口令 (YUZU_PASSWORD)
   -room-password   房间访客密码 (YUZU_ROOM_PASSWORD)
 
-查看单个命令的详细帮助: yuzu-cli help <命令>`)
+查看详细帮助: yuzu-cli help <命令>，如 yuzu-cli help playlist add`)
+}
+
+func printCommandHelp(cmd command) {
+	fmt.Printf("用法: yuzu-cli %s\n\n%s\n%s", cmd.usage, cmd.desc, cmd.detail)
+	if !strings.HasSuffix(cmd.detail, "\n") {
+		fmt.Println()
+	}
+}
+
+func printGroupHelp(prefix string) {
+	meta := groupMeta[prefix]
+	fmt.Printf("yuzu-cli %s <子命令> — %s\n\n子命令:\n", prefix, meta.desc)
+	for _, sub := range groupChildren(prefix) {
+		c := commands[prefix+" "+sub]
+		fmt.Printf("  %-26s %s\n", c.usage, c.desc)
+	}
+	fmt.Printf("\n查看子命令详细帮助: yuzu-cli help %s <子命令>\n", prefix)
 }
 
 func errUsage(cmdName string) error {
@@ -932,7 +1012,7 @@ func cmdPlaylists(ctx context.Context) error {
 		return err
 	}
 	if len(playlists) == 0 {
-		fmt.Println("(no playlists — create one with: yuzu-cli playlist-create <name>)")
+		fmt.Println("(no playlists — create one with: yuzu-cli playlist create <name>)")
 		return nil
 	}
 	for _, p := range playlists {

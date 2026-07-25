@@ -138,30 +138,30 @@ yuzu-cli qrlogin ncm
 | `seek <room> <秒>` | `room_admin` | 跳转进度 |
 | `mkroom <id> <名称>` | `room_admin` | 创建持久房间 |
 | `upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
-| `playlists` | `requester` | 歌单列表 |
-| `playlist-show <id> [offset]` | `requester` | 歌单条目分页（`-limit`） |
-| `playlist-create / playlist-delete` | `media_admin` | 歌单创建 / 删除 |
-| `playlist-add <id> <ref>...` | `media_admin` | 追加条目（≤100/次） |
-| `playlist-delitem <id> <ord>` | `media_admin` | 删除条目 |
-| `playlist-import <ncm:id|URL|ncm:daily>` | `media_admin` | 导入外部歌单或曲目源快照 |
-| `radio-play <room> <source>` | `room_admin` | 电台模式（`-shuffle` / `-once`） |
-| `radio-stop <room>` | `room_admin` | 退出电台 |
-| `queue-del <room> <entry_id>` | 本人/`room_admin` | 移除队列条目 |
-| `queue-move <room> <entry_id> <位置>` | `room_admin` | 移动队列条目 |
+| `playlist list` | `requester` | 歌单列表 |
+| `playlist show <id> [offset]` | `requester` | 歌单条目分页（`-limit`） |
+| `playlist create / delete` | `media_admin` | 歌单创建 / 删除 |
+| `playlist add <id> <ref>...` | `media_admin` | 追加条目（≤100/次） |
+| `playlist delitem <id> <ord>` | `media_admin` | 删除条目 |
+| `playlist import <ncm:id|URL|ncm:daily>` | `media_admin` | 导入外部歌单或曲目源快照 |
+| `radio play <room> <source>` | `room_admin` | 电台模式（`-shuffle` / `-once`） |
+| `radio stop <room>` | `room_admin` | 退出电台 |
+| `queue del <room> <entry_id>` | 本人/`room_admin` | 移除队列条目 |
+| `queue move <room> <entry_id> <位置>` | `room_admin` | 移动队列条目 |
 | `history <room> [offset] [-limit]` | 已认证 | 播放历史（最新在前） |
 | `top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
-| `policy-set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
-| `policy-show <room>` | 已认证 | 查看房间策略 |
+| `policy set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
+| `policy show <room>` | 已认证 | 查看房间策略 |
 | `credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
 
 ### 房间治理策略
 
-每房间可配置点歌限制（`policy-set`，热生效）：
+每房间可配置点歌限制（`policy set`，热生效）：
 
 ```bash
-yuzu-cli policy-set lobby '{"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}'
+yuzu-cli policy set lobby '{"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}'
 ```
 
 `max_queue` 为队列总上限；`queue_limits` 按身份 kind/role 限待播数
@@ -178,12 +178,12 @@ yuzu-agent 内置断线重连：指数退避 1s→30s，重连后自动重走
 房间可绑定**曲目源**实现无人值守续播（队列见底自动批量补充）：
 
 ```bash
-yuzu-cli radio-play lobby playlist:pl_xxx -shuffle   # 通用歌单，洗牌袋
-yuzu-cli radio-play lobby ncm:daily                  # 每日推荐（跨日自动刷新）
-yuzu-cli radio-play lobby ncm:fm                     # 私人FM（无限流）
-yuzu-cli radio-play lobby ncm:simi:347230            # 相似歌曲电台（跟随当前曲目）
-yuzu-cli radio-play lobby ncm:heart:347230           # 心动模式
-yuzu-cli radio-stop lobby                            # 退出电台
+yuzu-cli radio play lobby playlist:pl_xxx -shuffle   # 通用歌单，洗牌袋
+yuzu-cli radio play lobby ncm:daily                  # 每日推荐（跨日自动刷新）
+yuzu-cli radio play lobby ncm:fm                     # 私人FM（无限流）
+yuzu-cli radio play lobby ncm:simi:347230            # 相似歌曲电台（跟随当前曲目）
+yuzu-cli radio play lobby ncm:heart:347230           # 心动模式
+yuzu-cli radio stop lobby                            # 退出电台
 ```
 
 无限源（fm/simi/heart）不接受 `-shuffle`/`-once`；链式源有 seen 去重防绕圈。
