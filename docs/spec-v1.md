@@ -60,9 +60,14 @@ should_be = position_ms                                        (paused 时)
 
 - 对齐策略（客户端尽力而为，协议不强制）：
   - |偏差| > 150ms → seek
-  - 30–150ms → 微调 playbackRate（0.98–1.02）
-  - < 30ms → 不动
-  - **输出延迟区分**：播放器位置读数可能系统性少报（蓝牙等输出链路延迟被播放器从 time-pos 中扣除，典型 200–300ms）。参考实现 yuzu-agent 的处理：(a) loadfile 带 `start` 选项开播即定位，避免“从 0 播一秒再大跳”；(b) 播放速率 1:1 时，对齐 seek 生效后的第一个漂移样本即为该偏差，学为基线后只纠正超出基线的变化——校准开销为一次 seek，而非反复拽恒定读数差造成的 seek 风暴。
+  - ≤ 150ms → 不动
+  - **输出延迟区分**：播放器位置读数可能系统性少报（蓝牙等输出链路延迟被播放器从读数中扣除，典型 200–300ms；MPV time-pos 与蓝牙输出下的浏览器 HTMLAudioElement 均有实测）。推荐处理（yuzu-agent 与 WebUI 一致）：
+    - (a) 开播即定位（loadfile 带 `start` / 元数据就绪即 seek 至 should_be），避免"从 0 播一秒再大跳"；
+    - (b) 对齐 seek 生效后的首个**有效**漂移样本即为该偏差，学为基线 `drift_baseline`，此后只纠正超出基线的变化——校准开销为一次 seek，而非反复拽恒定读数差造成的 seek 风暴。细则：
+      - 基线为每曲目状态：换曲目时清零并重新进入待学习；开播定位（a）即首次对齐 seek；
+      - 学习样本须在 seek 落定且缓冲健康时采集（Web：`!seeking && readyState >= HAVE_FUTURE_DATA`；MPV：seek 完成且未 buffering），否则暂缓学习——缓冲冻结期的读数不是延迟偏差；
+      - 待学习期间 |样本| > 1s 视为初始定位未生效而非输出延迟：先按无基线对齐一次，保持待学习；
+      - 纠正性 seek 目标为 `should_be + drift_baseline`（补偿读数差，听觉位置一次到位）；该 seek 生效后重新学习基线，残余抖动被基线吸收而非触发新 seek。
 
 ### 2.3 TrackRef 扩展（provider 自定义 id 段）
 

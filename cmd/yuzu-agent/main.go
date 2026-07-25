@@ -4,7 +4,7 @@
 // 同步策略（spec-v1 §2.2）：
 //
 //	|漂移| > 150ms  → 直接 seek
-//	30–150ms        → 调 speed（0.98–1.02）缓追
+//	// 30–150ms        → 调 speed（0.98–1.02）缓追  // REMOVED: 变速影响听感，见 spec-v1 讨论。纯 seek 方案
 //	< 30ms          → 不动
 package main
 
@@ -240,10 +240,11 @@ func (s *driftSyncer) reset() { s.hasBaseline, s.awaitSample = false, false }
 
 const (
 	seekThreshold  = 150 // 超过即 seek（校准后同样适用）
-	speedThreshold = 30
+	// speedThreshold = 30  // REMOVED: 变速影响听感，不再使用。纯 seek 方案
 )
 
-// correct 按漂移量分级纠正；未校准时先做一次绝对对齐再学基线。
+// correct 按漂移量纠正；未校准时先做一次绝对对齐再学基线。
+// 仅 seek，不调速（变速影响听感）。
 func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *driftSyncer) {
 	if pb.Current == nil {
 		return
@@ -287,12 +288,10 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *dri
 		mpv.SetSpeed(1.0)
 		syncer.reset()
 		syncer.awaitSample = true
-	case corrected > speedThreshold:
-		mpv.SetSpeed(0.98) // 本地超前，放慢
-	case corrected < -speedThreshold:
-		mpv.SetSpeed(1.02) // 本地落后，加快
 	default:
 		mpv.SetSpeed(1.0)
+		// REMOVED: 变速缓追分支（corrected > speedThreshold → 0.98, < -speedThreshold → 1.02）。
+		// 变速影响听感，改为仅 seek 方案。偏差未达 seekThreshold 时保持正常速度。
 	}
 }
 
