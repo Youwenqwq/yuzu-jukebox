@@ -74,5 +74,5 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	ws := wsapi.NewServer(authm, rooms, reg)
 	api := httpapi.NewServer(st, authm, rooms, reg, lp, c, ws, oidcValidator, cfg.OIDC.RoleMapping)
 
-	return &App{Handler: api.Handler(), Store: st}, nil
+	return &App{Handler: httpapi.CORSMiddleware(cfg.CORS, api.Handler()), Store: st}, nil
 }

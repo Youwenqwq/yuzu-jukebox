@@ -9,6 +9,21 @@ import (
 	"os"
 )
 
+type CORSConfig struct {
+	// 是否启用 CORS。关闭时后端完全不处理跨域头。
+	Enabled bool `json:"enabled"`
+	// 允许的 Origin。设置 ["*"] 允许任意来源；生产环境应限定具体域名。
+	AllowedOrigins []string `json:"allowed_origins"`
+	// 允许的 HTTP 方法。默认 GET/POST/PATCH/DELETE/OPTIONS。
+	AllowedMethods []string `json:"allowed_methods"`
+	// 允许的请求头。默认包含 Content-Type/Authorization/X-Session-Token。
+	AllowedHeaders []string `json:"allowed_headers"`
+	// 是否允许携带凭据（cookies、Authorization 头）。为 true 时 AllowedOrigins 不可为 "*"。
+	AllowCredentials bool `json:"allow_credentials"`
+	// 预检请求缓存时间（秒）。默认 0。
+	MaxAge int `json:"max_age"`
+}
+
 type Config struct {
 	// 监听地址，如 ":8080"
 	Addr string `json:"addr"`
@@ -29,6 +44,8 @@ type Config struct {
 	// OIDC 认证（Zitadel 等 IdP）。enabled 且配置完整时
 	// 开放 POST /api/v1/auth/oidc。
 	OIDC OIDCConfig `json:"oidc"`
+	// CORS 跨域配置
+	CORS CORSConfig `json:"cors"`
 	// NCM Provider（NeteaseCloudMusicApi 实例）
 	NCM NCMConfig `json:"ncm"`
 	// Bili Provider（bilibili-api sidecar 实例）
@@ -67,6 +84,14 @@ func Default() Config {
 			BaseURL: "http://127.0.0.1:3000",
 			Level:   "exhigh",
 		},
+		CORS: CORSConfig{
+			Enabled:        false,
+			AllowedOrigins: []string{"*"},
+			AllowedMethods: []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
+			AllowedHeaders: []string{"Content-Type", "Authorization", "X-Session-Token"},
+			AllowCredentials: false,
+			MaxAge:         0,
+ 		},
 		Bili: BiliConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3002",
