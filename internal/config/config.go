@@ -23,12 +23,19 @@ type Config struct {
 	AdminPassword string `json:"admin_password"`
 	// NCM Provider（NeteaseCloudMusicApi 实例）
 	NCM NCMConfig `json:"ncm"`
+	// Bili Provider（bilibili-api sidecar 实例）
+	Bili BiliConfig `json:"bili"`
 }
 
 type NCMConfig struct {
 	Enabled bool   `json:"enabled"`
 	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3000
 	Level   string `json:"level"`    // 音质等级，默认 exhigh
+}
+
+type BiliConfig struct {
+	Enabled bool   `json:"enabled"`
+	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3002
 }
 
 func Default() Config {
@@ -42,6 +49,10 @@ func Default() Config {
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3000",
 			Level:   "exhigh",
+		},
+		Bili: BiliConfig{
+			Enabled: false,
+			BaseURL: "http://127.0.0.1:3002",
 		},
 	}
 }

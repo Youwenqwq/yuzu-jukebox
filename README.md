@@ -57,6 +57,10 @@ go build -o bin/yuzu-cli    ./cmd/yuzu-cli
     "enabled": true,
     "base_url": "http://127.0.0.1:3000",
     "level": "exhigh"
+  },
+  "bili": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:3002"
   }
 }
 ```
@@ -66,6 +70,7 @@ go build -o bin/yuzu-cli    ./cmd/yuzu-cli
 | `admin_password` | 全局管理员口令；guest 认证时携带即获 `room_admin`/`media_admin` 角色 |
 | `cache_max_bytes` | 流式缓存容量上限，超出按 LRU 清理 |
 | `ncm` | 网易云 Provider，对接 [NeteaseCloudMusicApi](https://github.com/neteasecloudmusicapienhanced/api-enhanced) 实例；`level` 为音质等级 |
+| `bili` | B 站 Provider，对接 bilibili-api sidecar（封装 WBI 签名 / DASH 音频选轨 / 风控）；无 cookie 可匿名 Resolve（320kbps 上限），Search 需扫码登录 |
 
 创建一个房间并上传一首本地音乐：
 
@@ -185,14 +190,14 @@ go test ./... -race
 已实现：
 
 - 房间 actor 模型（持久房间、队列持久化、服务端权威时钟、自然结束检测）
-- local Provider（上传、WAV/ffprobe 时长探测）与 ncm Provider（搜索/详情/Resolve）
-- 凭据热更新（先校验再生效）、流式缓存、票据化出流
-- MPV 播放代理、控制 CLI、端到端冒烟测试
+- local Provider（上传、WAV/ffprobe 时长探测）、ncm Provider、bili Provider
+- 凭据热更新（先校验再生效）、扫码登录（ncm / bili）、流式缓存、票据化出流
+- MPV 播放代理、控制 CLI（含子命令帮助）、端到端冒烟测试
 
 规划中（spec §8 也列了明确不做的）：
 
-- 更多 Provider（B 站等）
+- 更多 Provider
 - 账号密码 / OIDC 登录（Roles 模型已预留）
 - WebUI 客户端
 - 投票切歌、DJ 模式等房间治理策略（`policy_json` 字段已预留）
-- 凭据加密存储
+- 凭据加密存储、凭据定期健康检查

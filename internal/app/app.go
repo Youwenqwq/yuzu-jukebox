@@ -12,6 +12,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/config"
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
+	"github.com/youwenqwq/yuzu-jukebox/internal/provider/bili"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/ncm"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
@@ -42,6 +43,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	reg.Register(lp)
 	if cfg.NCM.Enabled {
 		reg.Register(ncm.New(cfg.NCM.BaseURL, cfg.NCM.Level, st))
+	}
+	if cfg.Bili.Enabled {
+		reg.Register(bili.New(cfg.Bili.BaseURL, st))
 	}
 
 	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, st, reg)
