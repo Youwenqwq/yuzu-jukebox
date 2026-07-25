@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -34,12 +35,16 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		}
 	}
 
-	st, err := store.Open(cfg.DBPath)
+	key, err := cfg.SecretKeyBytes()
+	if err != nil {
+		return nil, fmt.Errorf("secret_key: %w", err)
+	}
+	st, err := store.Open(cfg.DBPath, key)
 	if err != nil {
 		return nil, err
 	}
 
-	authm := auth.NewManager(cfg.AdminPassword)
+	authm := auth.NewManager(cfg.AdminPassword, st)
 	reg := provider.NewRegistry()
 	lp := local.New(cfg.MediaDir, st)
 	reg.Register(lp)

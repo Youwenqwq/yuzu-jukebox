@@ -5,12 +5,16 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
 const (
@@ -52,26 +56,41 @@ type ticket struct {
 	expiresAt  time.Time
 }
 
-// Manager 管理会话与票据，内存实现。会话随进程重启失效，
-// 客户端重连后重新认证即可，无需持久化。
+// Manager 管理会话与票据。会话可持久化到 store（重启不失效）；
+// st 为 nil 时退化为纯内存（测试用）。
 type Manager struct {
 	adminPassword string
 	sessionTTL    time.Duration
 	ticketTTL     time.Duration
+	st            *store.Store
 
 	mu       sync.Mutex
 	sessions map[string]session
 	tickets  map[string]ticket
 }
 
-func NewManager(adminPassword string) *Manager {
-	return &Manager{
+func NewManager(adminPassword string, st *store.Store) *Manager {
+	m := &Manager{
 		adminPassword: adminPassword,
 		sessionTTL:    24 * time.Hour,
 		ticketTTL:     5 * time.Minute,
 		sessions:      map[string]session{},
 		tickets:       map[string]ticket{},
 	}
+	if st != nil {
+		m.st = st
+		// 恢复未过期会话；失败的行静默跳过（可能是旧格式）
+		if rows, err := st.LoadSessions(context.Background(), time.Now().UnixMilli()); err == nil {
+			for _, r := range rows {
+				var id Identity
+				if json.Unmarshal([]byte(r.IdentityJSON), &id) == nil {
+					m.sessions[r.Token] = session{identity: id, expiresAt: time.UnixMilli(r.ExpiresAt)}
+				}
+			}
+		}
+		_ = st.PruneSessions(context.Background(), time.Now().UnixMilli())
+	}
+	return m
 }
 
 // GuestAuth 访客认证。adminPassword 命中全局管理员口令时授予管理角色。
@@ -100,10 +119,27 @@ func (m *Manager) GuestAuth(name, adminPassword string) (Identity, string, error
 // 供 guest 之外的认证路径（OIDC 等）复用。
 func (m *Manager) IssueSession(id Identity) string {
 	token := randHex(16)
+	expiresAt := time.Now().Add(m.sessionTTL)
 	m.mu.Lock()
-	m.sessions[token] = session{identity: id, expiresAt: time.Now().Add(m.sessionTTL)}
+	m.sessions[token] = session{identity: id, expiresAt: expiresAt}
 	m.mu.Unlock()
+	if m.st != nil {
+		if data, err := json.Marshal(id); err == nil {
+			// 落库失败不阻断登录（内存仍有效），仅丧失重启恢复
+			_ = m.st.SaveSession(context.Background(), token, string(data), expiresAt.UnixMilli())
+		}
+	}
 	return token
+}
+
+// Revoke 吊销会话（logout）。幂等。
+func (m *Manager) Revoke(token string) {
+	m.mu.Lock()
+	delete(m.sessions, token)
+	m.mu.Unlock()
+	if m.st != nil {
+		_ = m.st.DeleteSession(context.Background(), token)
+	}
 }
 
 // Session 按 token 取身份。

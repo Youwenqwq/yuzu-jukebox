@@ -569,6 +569,16 @@ func RESTUpdateRoomPolicy(ctx context.Context, server, token, roomID, policy str
 	}, &struct{}{})
 }
 
+// RESTDeleteRoom 删除房间（room_admin）。队列与历史级联清理。
+func RESTDeleteRoom(ctx context.Context, server, token, roomID string) error {
+	return restCall(ctx, server, "DELETE", "/api/v1/rooms/"+roomID, token, nil, &struct{}{})
+}
+
+// RESTLogout 服务端吊销会话。幂等。
+func RESTLogout(ctx context.Context, server, token string) error {
+	return restCall(ctx, server, "DELETE", "/api/v1/auth/session", token, nil, &struct{}{})
+}
+
 // HistoryEntry 播放历史条目。
 type HistoryEntry struct {
 	TrackRef    string `json:"track_ref"`

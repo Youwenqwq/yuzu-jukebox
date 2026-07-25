@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,9 @@ type Config struct {
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
 	// v1 没有账号体系，这是唯一的管理员入口。
 	AdminPassword string `json:"admin_password"`
+	// 凭据加密主密钥（64 位 hex = 32 字节）。缺省时 LoadOrCreate 自动生成并回写。
+	// 用于 credentials 表 AES-GCM 加密；丢失则已存凭据不可解密。
+	SecretKey string `json:"secret_key"`
 	// OIDC 认证（Zitadel 等 IdP）。enabled 且配置完整时
 	// 开放 POST /api/v1/auth/oidc。
 	OIDC OIDCConfig `json:"oidc"`
@@ -84,21 +89,54 @@ func Load(path string) (Config, error) {
 
 // LoadOrCreate 加载配置；文件不存在时以默认值生成一份并返回。
 // created 为 true 表示本次是新建。
+// secret_key 缺失时自动生成并回写文件（凭据落盘加密需要）。
 func LoadOrCreate(path string) (cfg Config, created bool, err error) {
 	cfg, err = Load(path)
 	if err == nil {
+		if cfg.SecretKey == "" {
+			if werr := ensureSecretKey(path, &cfg); werr != nil {
+				return cfg, false, werr
+			}
+		}
 		return cfg, false, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return cfg, false, err
 	}
 	cfg = Default()
+	cfg.SecretKey = generateSecretKey()
 	data, merr := json.MarshalIndent(cfg, "", "  ")
 	if merr != nil {
 		return cfg, false, merr
 	}
-	if werr := os.WriteFile(path, append(data, '\n'), 0o644); werr != nil {
+	if werr := os.WriteFile(path, append(data, '\n'), 0o600); werr != nil {
 		return cfg, false, fmt.Errorf("write default config: %w", werr)
 	}
 	return cfg, true, nil
+}
+
+// ensureSecretKey 为已有配置补生成 secret_key 并回写。
+func ensureSecretKey(path string, cfg *Config) error {
+	cfg.SecretKey = generateSecretKey()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+func generateSecretKey() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// SecretKeyBytes 解码 hex 形式的 secret_key。
+func (c Config) SecretKeyBytes() ([]byte, error) {
+	if c.SecretKey == "" {
+		return nil, nil
+	}
+	return hex.DecodeString(c.SecretKey)
 }

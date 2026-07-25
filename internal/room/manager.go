@@ -20,12 +20,14 @@ type Manager struct {
 	cache *cache.Cache
 	reg   *provider.Registry
 
-	ctx   context.Context // actor 生命周期绑定进程，而非任何请求
-	rooms map[string]*Room
+	ctx     context.Context // actor 生命周期绑定进程，而非任何请求
+	rooms   map[string]*Room
+	cancels map[string]context.CancelFunc
 }
 
 func NewManager(ctx context.Context, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Manager {
-	return &Manager{ctx: ctx, st: st, authm: authm, cache: c, reg: reg, rooms: map[string]*Room{}}
+	return &Manager{ctx: ctx, st: st, authm: authm, cache: c, reg: reg,
+		rooms: map[string]*Room{}, cancels: map[string]context.CancelFunc{}}
 }
 
 // Load 从 DB 加载全部房间并启动 actor。
@@ -48,8 +50,19 @@ func (m *Manager) Spawn(row store.Room) *Room {
 func (m *Manager) spawn(row store.Room) *Room {
 	r := New(row.ID, row.Name, row.PasswordHash, row.PolicyJSON, m.st, m.authm, m.cache, m.reg)
 	m.rooms[row.ID] = r
-	go r.Run(m.ctx)
+	rctx, cancel := context.WithCancel(m.ctx)
+	m.cancels[row.ID] = cancel
+	go r.Run(rctx)
 	return r
+}
+
+// Delete 停止并移除房间 actor（DB 清理由调用方负责）。
+func (m *Manager) Delete(id string) {
+	if cancel, ok := m.cancels[id]; ok {
+		cancel()
+		delete(m.cancels, id)
+	}
+	delete(m.rooms, id)
 }
 
 func (m *Manager) Get(id string) (*Room, error) {

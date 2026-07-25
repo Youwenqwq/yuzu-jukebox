@@ -40,6 +40,18 @@ func cmdMkRoom(ctx context.Context, id, roomName string) error {
 	return nil
 }
 
+func cmdRoomDelete(ctx context.Context, roomID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTDeleteRoom(ctx, *server, token, roomID); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
 func cmdHistory(ctx context.Context, roomID string, offset int) error {
 	token, err := restToken(ctx)
 	if err != nil {

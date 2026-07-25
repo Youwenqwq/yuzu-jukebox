@@ -86,7 +86,18 @@ func (v *OIDCValidator) Validate(ctx context.Context, idToken string) (OIDCClaim
 		return OIDCClaims{}, fmt.Errorf("%w: bad signature encoding", ErrOIDCToken)
 	}
 	digest := sha256.Sum256([]byte(signed))
-	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig); err != nil {
+	verifyErr := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig)
+	if verifyErr != nil {
+		// 验签失败可能是 IdP 同 kid 轮换密钥：强制刷新 JWKS 重试一次
+		if rerr := v.refreshKeys(ctx); rerr == nil {
+			v.mu.Lock()
+			if key2, ok := v.keys[header.Kid]; ok {
+				verifyErr = rsa.VerifyPKCS1v15(key2, crypto.SHA256, digest[:], sig)
+			}
+			v.mu.Unlock()
+		}
+	}
+	if verifyErr != nil {
 		return OIDCClaims{}, fmt.Errorf("%w: signature mismatch", ErrOIDCToken)
 	}
 

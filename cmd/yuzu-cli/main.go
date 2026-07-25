@@ -433,6 +433,17 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdQueueMove(ctx, args[0], args[1], to) })
 			},
 		},
+		"room delete": {
+			usage:  "room delete <id>",
+			desc:   "删除房间（管理员）",
+			detail: "删除房间并级联清理其队列与播放历史。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("room delete")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdRoomDelete(ctx, args[0]) })
+			},
+		},
 		"room history": {
 			usage:  "room history <room> [offset] [-limit 20]",
 			desc:   "查看房间播放历史（最新在前）",

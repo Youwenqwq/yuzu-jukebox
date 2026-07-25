@@ -47,9 +47,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/guest", s.guestAuth)
 	mux.HandleFunc("POST /api/v1/auth/oidc", s.oidcAuth)
 	mux.HandleFunc("GET /api/v1/auth/oidc/config", s.oidcConfig)
+	mux.HandleFunc("DELETE /api/v1/auth/session", s.logout)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
+	mux.HandleFunc("DELETE /api/v1/rooms/{id}", s.deleteRoom)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/history", s.roomHistory)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/stats", s.roomStats)
 	mux.HandleFunc("GET /api/v1/search", s.search)
@@ -211,6 +213,17 @@ func zitadelRolesFrom(info map[string]any) []string {
 	return out
 }
 
+// logout 吊销当前会话（服务端侧）。幂等。
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "missing token")
+		return
+	}
+	s.authm.Revoke(token)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
 		return
@@ -333,6 +346,26 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	s.st.Audit(r.Context(), id.ID, "room.update", roomID, "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"room": map[string]any{"id": roomID, "name": name}})
+}
+
+// deleteRoom 删除房间：停 actor、清 DB（队列与历史级联）。
+func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
+	if !ok {
+		return
+	}
+	roomID := r.PathValue("id")
+	if _, err := s.st.GetRoom(r.Context(), roomID); err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "room not found")
+		return
+	}
+	s.rooms.Delete(roomID)
+	if err := s.st.DeleteRoom(r.Context(), roomID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), id.ID, "room.delete", roomID, "{}")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // roomHistory 房间播放历史（最新在前）。

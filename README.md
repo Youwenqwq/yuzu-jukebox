@@ -137,6 +137,7 @@ yuzu-cli provider qrlogin ncm
 | `pause / resume <room>` | `room_admin` | 暂停 / 恢复 |
 | `seek <room> <秒>` | `room_admin` | 跳转进度 |
 | `room create <id> <名称>` | `room_admin` | 创建持久房间 |
+| `room delete <id>` | `room_admin` | 删除房间（队列与历史级联） |
 | `media upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
 | `playlist list` | `requester` | 歌单列表 |
 | `playlist show <id> [offset]` | `requester` | 歌单条目分页（`-limit`） |
@@ -209,7 +210,8 @@ yuzu-cli logout    # 清除本地会话缓存
 ```
 
 登录后会话缓存于 `~/.config/yuzu-cli/session.json`（0600），之后所有命令自动
-携带该身份；未登录时回退 guest（`-name`/`-password`）。
+携带该身份；未登录时回退 guest（`-name`/`-password`）。会话服务端持久化，
+服务器重启不掉登录；`logout` 同时在服务端吊销会话。
 
 ### 电台模式
 
@@ -262,6 +264,11 @@ internal/
 docs/
   spec-v1.md          # 协议与房间状态机权威规格
 ```
+
+## 部署
+
+生产部署（TLS 反代、systemd、备份、secret_key 注意）见 [docs/deploy.md](docs/deploy.md)。
+凭据（ncm/bili cookie）使用 config 的 `secret_key` AES-GCM 加密落盘，历史明文记录自动兼容。
 
 ## 测试
 

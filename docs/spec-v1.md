@@ -82,7 +82,7 @@ should_be = position_ms                                        (paused 时)
 - **房间访客密码不在此处传递**——它是每房间一个的进门凭证，在 `room.join` 时校验（见 4.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
 - guest 身份 ID 由名字确定性派生（`g_` + sha256(name) 前 12 hex），同名重连仍是同一人。
-- 会话存于服务端内存：**连接断开后必须重新 `auth`**。
+- 会话**持久化于 sessions 表**：重启不失效（TTL 24h，过期自动清理）；`DELETE /api/v1/auth/session` 吊销。
 - 所有操作的服务端鉴权 MUST 只检查 `roles`，不检查 `kind`。
 
 ### 3.2 会话 token 认证（OIDC 等 REST 登录后的 WS 接入）
@@ -293,6 +293,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `POST /api/v1/auth/oidc` | — | OIDC 认证，body `{"id_token"}`（IdP 签发的 ID token）；服务端验签 + 角色映射后返回 `{identity, session_token}`；未启用 404 |
 | `GET /api/v1/rooms` | 已认证 | 房间列表（大厅目录） |
 | `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 后台建/改房间（名称、访客密码、policy） |
+| `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
+| `DELETE /api/v1/auth/session` | 已认证 | 吊销当前会话（logout） |
 | `GET /api/v1/rooms/{id}/history?offset=&limit=` | 已认证 | 播放历史，最新在前（默认 50，上限 200） |
 | `GET /api/v1/rooms/{id}/stats?limit=` | 已认证 | 曲目热度榜：播放次数、首播/最近播放时间（默认 20，上限 100） |
 | `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |

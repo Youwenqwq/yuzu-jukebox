@@ -34,7 +34,7 @@ func (f *fakeProvider) CredentialStatus(ctx context.Context) string {
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

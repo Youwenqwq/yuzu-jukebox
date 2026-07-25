@@ -116,6 +116,12 @@ func cmdLogin(ctx context.Context) error {
 }
 
 func cmdLogout() error {
+	if s := loadSession(*server); s != nil {
+		// 服务端吊销（尽力而为：服务器不可达也照常清本地）
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = client.RESTLogout(ctx, *server, s.Token)
+		cancel()
+	}
 	clearSession()
 	fmt.Println("ok")
 	return nil

@@ -112,6 +112,7 @@ type Room struct {
 	reg   *provider.Registry
 
 	inbound chan action
+	done    chan struct{} // Run 退出时关闭，阻断后续调用
 }
 
 func New(id, name, passwordHash, policyRaw string, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Room {
@@ -119,6 +120,7 @@ func New(id, name, passwordHash, policyRaw string, st *store.Store, authm *auth.
 		ID: id, Name: name, passwordHash: passwordHash, policyRaw: policyRaw,
 		st: st, authm: authm, cache: c, reg: reg,
 		inbound: make(chan action, 64),
+		done:    make(chan struct{}),
 	}
 }
 
@@ -133,14 +135,37 @@ func (r *Room) CheckPassword(password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(r.passwordHash), []byte(password)) == nil
 }
 
+// ErrRoomClosed 房间 actor 已停止（房间被删除）。
+var ErrRoomClosed = errors.New("room closed")
+
 func (r *Room) call(a action) error {
 	a.result = make(chan error, 1)
-	r.inbound <- a
-	return <-a.result
+	select {
+	case r.inbound <- a:
+	case <-r.done:
+		return ErrRoomClosed
+	}
+	select {
+	case err := <-a.result:
+		return err
+	case <-r.done:
+		return ErrRoomClosed
+	}
 }
 
-func (r *Room) Join(c ClientConn)  { r.inbound <- action{kind: actJoin, client: c} }
-func (r *Room) Leave(c ClientConn) { r.inbound <- action{kind: actLeave, client: c} }
+func (r *Room) Join(c ClientConn) {
+	select {
+	case r.inbound <- action{kind: actJoin, client: c}:
+	case <-r.done:
+	}
+}
+
+func (r *Room) Leave(c ClientConn) {
+	select {
+	case r.inbound <- action{kind: actLeave, client: c}:
+	case <-r.done:
+	}
+}
 
 // AddFor 带策略校验的点歌：队列总上限与按身份（kind/role）的待播上限
 // 在 actor 内检查，与队列状态读取天然串行。电台补充不经过此路径。
@@ -177,8 +202,9 @@ func (r *Room) SetPolicy(raw string) error {
 	return r.call(action{kind: actSetPolicy, policyRaw: raw})
 }
 
-// Run 是 actor 主循环。阻塞直到进程退出。
+// Run 是 actor 主循环。阻塞直到 ctx 取消（进程退出或房间被删除）。
 func (r *Room) Run(ctx context.Context) {
+	defer close(r.done)
 	queue := r.loadQueue()
 	var playback *Playback
 	var radio *radioState

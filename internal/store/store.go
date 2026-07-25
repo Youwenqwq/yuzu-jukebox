@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,13 +18,14 @@ import (
 var migrationsFS embed.FS
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	cipher *aesCipher // nil = 明文（未配置 secret_key）
 }
 
 func nowMs() int64 { return time.Now().UnixMilli() }
 
 // Open 打开（必要时创建）SQLite 数据库并执行迁移。
-func Open(path string) (*Store, error) {
+func Open(path string, secretKey []byte) (*Store, error) {
 	// WAL：读写不互斥；busy_timeout：写锁竞争时等待而非立刻报错；
 	// foreign_keys：SQLite 默认不开外键约束。
 	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", path)
@@ -40,7 +43,16 @@ func Open(path string) (*Store, error) {
 	if err := goose.Up(db, "migrations"); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if len(secretKey) > 0 {
+		c, err := newAESCipher(secretKey)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("secret key: %w", err)
+		}
+		s.cipher = c
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -226,6 +238,74 @@ func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]Trac
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// DeleteRoom 删除房间及其队列与播放历史。
+func (s *Store) DeleteRoom(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM room_queue WHERE room_id = ?`,
+		`DELETE FROM play_history WHERE room_id = ?`,
+		`DELETE FROM rooms WHERE id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ---------- 会话持久化 ----------
+
+// SaveSession 写入（或覆盖）一条会话。
+func (s *Store) SaveSession(ctx context.Context, token, identityJSON string, expiresAt int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (token, identity_json, expires_at) VALUES (?,?,?)
+		 ON CONFLICT(token) DO UPDATE SET identity_json=excluded.identity_json, expires_at=excluded.expires_at`,
+		token, identityJSON, expiresAt)
+	return err
+}
+
+// SessionRow 一条持久化会话。
+type SessionRow struct {
+	Token        string
+	IdentityJSON string
+	ExpiresAt    int64
+}
+
+// LoadSessions 读出全部未过期会话（启动恢复用）。
+func (s *Store) LoadSessions(ctx context.Context, now int64) ([]SessionRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT token, identity_json, expires_at FROM sessions WHERE expires_at > ?`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		var r SessionRow
+		if err := rows.Scan(&r.Token, &r.IdentityJSON, &r.ExpiresAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSession 吊销一条会话。
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	return err
+}
+
+// PruneSessions 清理过期会话（定期调用）。
+func (s *Store) PruneSessions(ctx context.Context, now int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now)
+	return err
 }
 
 // ---------- 审计 ----------
@@ -466,6 +546,7 @@ func (s *Store) DeletePlaylistItem(ctx context.Context, playlistID string, ord i
 // ---------- 凭据 ---------
 
 // GetCredential 取某 provider 的凭据原文；未设置返回空串。
+// 存储层自动解密；历史明文行（无 enc1: 前缀）原样返回。
 func (s *Store) GetCredential(ctx context.Context, providerID string) (string, error) {
 	var payload string
 	err := s.db.QueryRowContext(ctx,
@@ -474,16 +555,40 @@ func (s *Store) GetCredential(ctx context.Context, providerID string) (string, e
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return payload, err
+	if err != nil {
+		return "", err
+	}
+	return s.decrypt(payload)
 }
 
 // UpsertCredential 写入凭据并记录校验状态。
-// v1 明文存储——加密需要引入密钥管理，待凭据种类变多时再做。
+// 配置了 secret_key 时 AES-GCM 加密落盘（enc1: 前缀）。
 func (s *Store) UpsertCredential(ctx context.Context, providerID, payload, status string) error {
-	_, err := s.db.ExecContext(ctx,
+	enc, err := s.encrypt(payload)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO credentials (provider, payload, status, last_check_at) VALUES (?,?,?,?)`,
-		providerID, payload, status, nowMs())
+		providerID, enc, status, nowMs())
 	return err
+}
+
+func (s *Store) encrypt(plain string) (string, error) {
+	if s.cipher == nil || plain == "" {
+		return plain, nil
+	}
+	return s.cipher.encrypt(plain)
+}
+
+func (s *Store) decrypt(stored string) (string, error) {
+	if s.cipher == nil {
+		if strings.HasPrefix(stored, "enc1:") {
+			return "", errors.New("credential encrypted but no secret_key configured")
+		}
+		return stored, nil
+	}
+	return s.cipher.decrypt(stored)
 }
 
 // UpdateCredentialStatus 更新最新一条凭据记录的校验状态与时间戳（健康检查用）。
