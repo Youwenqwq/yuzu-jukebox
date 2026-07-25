@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -56,4 +57,25 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 	return cfg, nil
+}
+
+// LoadOrCreate 加载配置；文件不存在时以默认值生成一份并返回。
+// created 为 true 表示本次是新建。
+func LoadOrCreate(path string) (cfg Config, created bool, err error) {
+	cfg, err = Load(path)
+	if err == nil {
+		return cfg, false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return cfg, false, err
+	}
+	cfg = Default()
+	data, merr := json.MarshalIndent(cfg, "", "  ")
+	if merr != nil {
+		return cfg, false, merr
+	}
+	if werr := os.WriteFile(path, append(data, '\n'), 0o644); werr != nil {
+		return cfg, false, fmt.Errorf("write default config: %w", werr)
+	}
+	return cfg, true, nil
 }

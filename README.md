@@ -39,7 +39,7 @@ go build -o bin/yuzu-server ./cmd/yuzu-server
 go build -o bin/yuzu-agent  ./cmd/yuzu-agent
 go build -o bin/yuzu-cli    ./cmd/yuzu-cli
 
-# 启动服务器（无 config.json 时用默认配置，数据落在 ./data/）
+# 启动服务器（首次启动自动生成默认 config.json，按需修改后重启）
 ./bin/yuzu-server -config config.json
 ```
 

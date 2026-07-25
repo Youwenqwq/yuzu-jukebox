@@ -18,13 +18,12 @@ func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfg, created, err := config.LoadOrCreate(*configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("config %s not found, using defaults", *configPath)
-		} else {
-			log.Fatalf("load config: %v", err)
-		}
+		log.Fatalf("load config: %v", err)
+	}
+	if created {
+		log.Printf("generated default config at %s — edit it (admin_password, ncm, ...) and restart", *configPath)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
