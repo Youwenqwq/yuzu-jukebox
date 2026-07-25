@@ -21,10 +21,22 @@ type Config struct {
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
 	// v1 没有账号体系，这是唯一的管理员入口。
 	AdminPassword string `json:"admin_password"`
+	// OIDC 认证（Zitadel 等 IdP）。enabled 且配置完整时
+	// 开放 POST /api/v1/auth/oidc。
+	OIDC OIDCConfig `json:"oidc"`
 	// NCM Provider（NeteaseCloudMusicApi 实例）
 	NCM NCMConfig `json:"ncm"`
 	// Bili Provider（bilibili-api sidecar 实例）
 	Bili BiliConfig `json:"bili"`
+}
+
+type OIDCConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Issuer   string `json:"issuer"`    // IdP issuer，如 https://id.example.org
+	ClientID string `json:"client_id"` // Native 应用的 client_id（aud 校验）
+	// Zitadel project role → yuzu roles。命中任一 key 即授予对应 value。
+	// 未命中者保持 listener/requester 基础角色。
+	RoleMapping map[string][]string `json:"role_mapping"`
 }
 
 type NCMConfig struct {

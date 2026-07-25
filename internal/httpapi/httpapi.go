@@ -32,15 +32,20 @@ type Server struct {
 	local *local.Provider
 	cache *cache.Cache
 	ws    *wsapi.Server
+
+	oidc        *auth.OIDCValidator // nil = OIDC 未启用
+	oidcRoleMap map[string][]string
 }
 
-func NewServer(st *store.Store, authm *auth.Manager, rooms *room.Manager, reg *provider.Registry, lp *local.Provider, c *cache.Cache, ws *wsapi.Server) *Server {
-	return &Server{st: st, authm: authm, rooms: rooms, reg: reg, local: lp, cache: c, ws: ws}
+func NewServer(st *store.Store, authm *auth.Manager, rooms *room.Manager, reg *provider.Registry, lp *local.Provider, c *cache.Cache, ws *wsapi.Server, oidc *auth.OIDCValidator, oidcRoleMap map[string][]string) *Server {
+	return &Server{st: st, authm: authm, rooms: rooms, reg: reg, local: lp, cache: c, ws: ws,
+		oidc: oidc, oidcRoleMap: oidcRoleMap}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/guest", s.guestAuth)
+	mux.HandleFunc("POST /api/v1/auth/oidc", s.oidcAuth)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
@@ -109,6 +114,41 @@ func (s *Server) guestAuth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
+}
+
+// oidcAuth OIDC 登录：客户端递来 IdP 签发的 id_token，
+// 服务端验签 + 角色映射后签发 yuzu 会话。未启用 OIDC 时 404。
+func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
+	if s.oidc == nil {
+		writeErr(w, http.StatusNotFound, "not_found", "oidc not enabled")
+		return
+	}
+	var body struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IDToken == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "id_token required")
+		return
+	}
+	claims, err := s.oidc.Validate(r.Context(), body.IDToken)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", err.Error())
+		return
+	}
+	roles := []string{auth.RoleListener, auth.RoleRequester}
+	seen := map[string]bool{auth.RoleListener: true, auth.RoleRequester: true}
+	for _, zr := range claims.Roles {
+		for _, mapped := range s.oidcRoleMap[zr] {
+			if !seen[mapped] {
+				seen[mapped] = true
+				roles = append(roles, mapped)
+			}
+		}
+	}
+	id := auth.OIDCIdentity(claims, roles)
+	token := s.authm.IssueSession(id)
+	s.st.Audit(r.Context(), id.ID, "auth.oidc", "", `{"name":`+strconv.Quote(id.Name)+`}`)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
 }
 

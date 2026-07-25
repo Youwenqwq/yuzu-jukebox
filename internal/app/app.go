@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 
@@ -59,8 +60,14 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	mon := credmon.New(reg, st)
 	go mon.Run(ctx)
 
+	var oidcValidator *auth.OIDCValidator
+	if cfg.OIDC.Enabled && cfg.OIDC.Issuer != "" {
+		oidcValidator = auth.NewOIDCValidator(cfg.OIDC.Issuer, cfg.OIDC.ClientID)
+		log.Printf("oidc: issuer %s (client_id %s)", cfg.OIDC.Issuer, cfg.OIDC.ClientID)
+	}
+
 	ws := wsapi.NewServer(authm, rooms, reg)
-	api := httpapi.NewServer(st, authm, rooms, reg, lp, c, ws)
+	api := httpapi.NewServer(st, authm, rooms, reg, lp, c, ws, oidcValidator, cfg.OIDC.RoleMapping)
 
 	return &App{Handler: api.Handler(), Store: st}, nil
 }

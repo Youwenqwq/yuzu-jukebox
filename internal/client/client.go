@@ -209,6 +209,21 @@ func (c *Client) Auth(ctx context.Context, name, password string) (Identity, err
 	return out.Identity, nil
 }
 
+// AuthToken 用已有 session token（REST 登录所得，如 OIDC）完成 WS 认证。
+func (c *Client) AuthToken(ctx context.Context, sessionToken string) (Identity, error) {
+	m, err := c.call(ctx, "auth", map[string]any{"session_token": sessionToken})
+	if err != nil {
+		return Identity{}, err
+	}
+	var out struct {
+		Identity Identity `json:"identity"`
+	}
+	if err := json.Unmarshal(m.Data, &out); err != nil {
+		return Identity{}, err
+	}
+	return out.Identity, nil
+}
+
 // Join 加入房间。成功后快照经 Events() 推送。
 func (c *Client) Join(ctx context.Context, roomID, password string) error {
 	_, err := c.call(ctx, "room.join", map[string]any{"room_id": roomID, "password": password})
@@ -392,6 +407,18 @@ func RESTAuth(ctx context.Context, server, name, password string) (token string,
 		"name": name, "password": password,
 	}, &out)
 	return out.SessionToken, err
+}
+
+// RESTOIDCAuth 用 IdP 签发的 id_token 换 yuzu session token。
+func RESTOIDCAuth(ctx context.Context, server, idToken string) (identity Identity, token string, err error) {
+	var out struct {
+		Identity     Identity `json:"identity"`
+		SessionToken string   `json:"session_token"`
+	}
+	err = restCall(ctx, server, "POST", "/api/v1/auth/oidc", "", map[string]any{
+		"id_token": idToken,
+	}, &out)
+	return out.Identity, out.SessionToken, err
 }
 
 type RoomInfo struct {

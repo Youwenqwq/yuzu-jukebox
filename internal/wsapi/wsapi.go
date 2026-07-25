@@ -155,11 +155,26 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 
 	case "auth":
 		var d struct {
-			Name     string `json:"name"`
-			Password string `json:"password"` // 全局管理员口令（可选）
+			Name         string `json:"name"`
+			Password     string `json:"password"`      // 全局管理员口令（可选）
+			SessionToken string `json:"session_token"` // 已有会话（REST 登录所得，可选）
 		}
 		if err := json.Unmarshal(data, &d); err != nil {
 			c.replyErr(ref, "bad_request", "invalid auth payload")
+			return
+		}
+		// 两条路径：session_token（REST 登录过，如 OIDC）或 guest 现场认证
+		if d.SessionToken != "" {
+			id, err := c.server.authm.Session(d.SessionToken)
+			if err != nil {
+				c.replyErr(ref, "unauthorized", "invalid or expired session_token")
+				return
+			}
+			c.identity = &id
+			c.Send(map[string]any{
+				"type": "auth.ok", "ref": ref,
+				"data": map[string]any{"identity": id, "session_token": d.SessionToken},
+			})
 			return
 		}
 		id, token, err := c.server.authm.GuestAuth(d.Name, d.Password)

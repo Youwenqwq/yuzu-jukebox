@@ -173,6 +173,32 @@ yuzu-agent 内置断线重连：指数退避 1s→30s，重连后自动重走
 校时→认证→进房并恢复渲染。服务端重启后，各房间自动续播队首
 （当前曲目不持久化，队列保留）。
 
+### OIDC 登录（Zitadel 等 IdP）
+
+服务端可对接 OIDC IdP，组织成员用已有账号登录，权限授予/回收全部在 IdP 侧完成：
+
+```jsonc
+// config.json
+"oidc": {
+  "enabled": true,
+  "issuer": "https://id.example.org",   // Zitadel 实例域名
+  "client_id": "…",                     // Native 应用的 client_id
+  "role_mapping": {                     // Zitadel project role → yuzu roles
+    "jukebox-admin": ["room_admin", "media_admin"]
+  }
+}
+```
+
+流程：客户端从 IdP 拿到 ID token（CLI/agent 推荐 Device Authorization Grant，
+WebUI 推荐 Authorization Code + PKCE）→ `POST /api/v1/auth/oidc` 换 yuzu
+session_token → 之后与 guest 完全同构（REST Bearer / WS `auth{session_token}`）。
+服务端只验证 ID token（JWKS 本地验签，缓存 + kid 轮换刷新），显示名取
+`preferred_username`，身份 ID 由 `sub` 确定性派生（改名不影响权限归属）。
+
+Zitadel console 一次性配置：Native 类型应用；Project 勾
+"Assert Roles on Authentication"；Application Token Settings 勾
+"User Roles Inside ID Token"。
+
 ### 电台模式
 
 房间可绑定**曲目源**实现无人值守续播（队列见底自动批量补充）：

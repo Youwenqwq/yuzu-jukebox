@@ -92,11 +92,18 @@ func (m *Manager) GuestAuth(name, adminPassword string) (Identity, string, error
 		Kind:  "guest",
 		Roles: roles,
 	}
+	token := m.IssueSession(id)
+	return id, token, nil
+}
+
+// IssueSession 为一个已认证身份签发会话 token。
+// 供 guest 之外的认证路径（OIDC 等）复用。
+func (m *Manager) IssueSession(id Identity) string {
 	token := randHex(16)
 	m.mu.Lock()
 	m.sessions[token] = session{identity: id, expiresAt: time.Now().Add(m.sessionTTL)}
 	m.mu.Unlock()
-	return id, token, nil
+	return token
 }
 
 // Session 按 token 取身份。

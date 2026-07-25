@@ -65,7 +65,7 @@ should_be = position_ms                                        (paused 时)
 
 ## 3. 认证
 
-### 3.1 访客登录（当前唯一实现）
+### 3.1 访客登录
 
 ```json
 → { "type": "auth", "ref": "1", "data": { "name": "阿柚", "password": "" } }
@@ -80,9 +80,35 @@ should_be = position_ms                                        (paused 时)
   roles 追加 `room_admin` 与 `media_admin`；不传或错误则为普通访客（`listener` + `requester`）。
 - **房间访客密码不在此处传递**——它是每房间一个的进门凭证，在 `room.join` 时校验（见 4.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
+- guest 身份 ID 由名字确定性派生（`g_` + sha256(name) 前 12 hex），同名重连仍是同一人。
 - 会话存于服务端内存：**连接断开后必须重新 `auth`**。
-- 后续版本新增 `password` / `oidc` 登录，`Identity` 结构不变。
 - 所有操作的服务端鉴权 MUST 只检查 `roles`，不检查 `kind`。
+
+### 3.2 会话 token 认证（OIDC 等 REST 登录后的 WS 接入）
+
+```json
+→ { "type": "auth", "ref": "1", "data": { "session_token": "..." } }
+← { "type": "auth.ok", ... }   // 与 3.1 同构
+```
+
+凡经 REST 获得的 session_token（guest REST 登录、OIDC 登录）都可直接在 WS 上换取连接身份。
+
+### 3.3 OIDC 登录（Zitadel 等 IdP）
+
+```
+POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
+→ { "identity": { "id": "o_…", "name": "<preferred_username>", "kind": "oidc",
+                  "roles": ["listener", "requester", …映射结果] },
+    "session_token": "..." }
+```
+
+- 服务端只验证 **ID token**（恒为 JWT，RS256）；access token（Zitadel 默认 opaque）不使用。
+- 验签材料：`{issuer}/.well-known/openid-configuration` → `jwks_uri` → JWKS 缓存；未知 kid 自动刷新一次（密钥轮换）。校验 iss / aud（= config `oidc.client_id`）/ exp（60s 宽限）。
+- 显示名取 `preferred_username`（ID token 恒有；`name` 在颁发 access token 时会被 Zitadel 从 ID token 剥掉，不可用）。
+- 身份 ID：`o_` + sha256(sub) 前 12 hex——`sub` 在 IdP 里永不变，改名不影响归属。
+- 角色映射：扫描 payload 中所有 `urn:zitadel:iam:org:project*:roles` claim，对象 key 即角色名；config `oidc.role_mapping` 把 Zitadel 角色名映射为 yuzu roles。未命中者保持 `listener + requester`。
+- IdP 侧前提（Zitadel console）：Native 类型应用；Project 勾 "Assert Roles on Authentication"；Application Token Settings 勾 "User Roles Inside ID Token"。
+- 客户端获取 id_token 的方式服务端不感知：CLI/agent 推荐 Device Authorization Grant；WebUI 推荐 Authorization Code + PKCE。
 
 ## 4. 房间会话
 
@@ -263,6 +289,7 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | 端点 | 权限 | 说明 |
 |---|---|---|
 | `POST /api/v1/auth/guest` | — | 访客认证，body `{"name", "password"}`（password 为全局管理员口令，可选）；返回 `{identity, session_token}` |
+| `POST /api/v1/auth/oidc` | — | OIDC 认证，body `{"id_token"}`（IdP 签发的 ID token）；服务端验签 + 角色映射后返回 `{identity, session_token}`；未启用 404 |
 | `GET /api/v1/rooms` | 已认证 | 房间列表（大厅目录） |
 | `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 后台建/改房间（名称、访客密码、policy） |
 | `GET /api/v1/rooms/{id}/history?offset=&limit=` | 已认证 | 播放历史，最新在前（默认 50，上限 200） |
