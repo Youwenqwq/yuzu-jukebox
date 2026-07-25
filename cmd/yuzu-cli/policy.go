@@ -9,7 +9,7 @@ import (
 )
 
 func cmdPolicySet(ctx context.Context, roomID, policy string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -21,7 +21,7 @@ func cmdPolicySet(ctx context.Context, roomID, policy string) error {
 }
 
 func cmdPolicyShow(ctx context.Context, roomID string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}

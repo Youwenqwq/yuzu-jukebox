@@ -42,6 +42,10 @@ func NewOIDCValidator(issuer, clientID string) *OIDCValidator {
 	}
 }
 
+// Issuer / ClientID 供公开配置端点展示。
+func (v *OIDCValidator) Issuer() string   { return v.issuer }
+func (v *OIDCValidator) ClientID() string { return v.clientID }
+
 // OIDCClaims 从 ID token 提取的最小身份集。
 type OIDCClaims struct {
 	Sub      string

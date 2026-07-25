@@ -13,7 +13,7 @@ import (
 )
 
 func cmdProviders(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -32,7 +32,7 @@ func cmdProviders(ctx context.Context) error {
 }
 
 func cmdCredential(ctx context.Context, providerID, payload string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func cmdQRLogin(providerID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}

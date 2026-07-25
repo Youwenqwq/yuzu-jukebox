@@ -155,6 +155,7 @@ yuzu-cli provider qrlogin ncm
 | `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
+| `login` / `logout` / `whoami` | — | OIDC 登录（设备流）/ 登出 / 查看当前身份 |
 
 ### 房间治理策略
 
@@ -195,9 +196,20 @@ session_token → 之后与 guest 完全同构（REST Bearer / WS `auth{session_
 服务端只验证 ID token（JWKS 本地验签，缓存 + kid 轮换刷新），显示名取
 `preferred_username`，身份 ID 由 `sub` 确定性派生（改名不影响权限归属）。
 
-Zitadel console 一次性配置：Native 类型应用；Project 勾
+Zitadel console 一次性配置：Native 类型应用（勾 Device Code grant）；Project 勾
 "Assert Roles on Authentication"；Application Token Settings 勾
 "User Roles Inside ID Token"。
+
+CLI 登录（推荐路径）：
+
+```bash
+yuzu-cli login     # 自动发现服务端 OIDC 配置，终端显示验证链接，浏览器确认
+yuzu-cli whoami    # 查看当前身份
+yuzu-cli logout    # 清除本地会话缓存
+```
+
+登录后会话缓存于 `~/.config/yuzu-cli/session.json`（0600），之后所有命令自动
+携带该身份；未登录时回退 guest（`-name`/`-password`）。
 
 ### 电台模式
 

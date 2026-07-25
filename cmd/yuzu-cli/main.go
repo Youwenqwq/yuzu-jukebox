@@ -383,6 +383,30 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdStatus(ctx, args[0]) })
 			},
 		},
+		"login": {
+			usage: "login",
+			desc:  "OIDC 登录（设备授权流，会话缓存到本地）",
+			detail: `从服务端发现 OIDC 配置，启动设备授权流：终端显示验证链接和用户码，
+在手机/电脑浏览器中确认后自动完成登录。会话缓存在
+~/.config/yuzu-cli/session.json，之后所有命令自动携带该身份。
+
+可用环境变量覆盖服务端发现：YUZU_OIDC_ISSUER / YUZU_OIDC_CLIENT_ID。`,
+			run: func(args []string) error {
+				return withCtx(func(ctx context.Context) error { return cmdLogin(ctx) })
+			},
+		},
+		"logout": {
+			usage: "logout",
+			desc:  "登出：清除本地缓存的登录会话",
+			run:   func(args []string) error { return cmdLogout() },
+		},
+		"whoami": {
+			usage: "whoami",
+			desc:  "查看当前生效身份（缓存会话或 guest）",
+			run: func(args []string) error {
+				return withCtx(func(ctx context.Context) error { return cmdWhoami(ctx) })
+			},
+		},
 		"queue del": {
 			usage:  "queue del <room> <entry_id>",
 			desc:   "移除队列条目（本人或管理员）",

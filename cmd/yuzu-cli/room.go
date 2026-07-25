@@ -10,7 +10,7 @@ import (
 )
 
 func cmdRooms(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -29,7 +29,7 @@ func cmdRooms(ctx context.Context) error {
 }
 
 func cmdMkRoom(ctx context.Context, id, roomName string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -41,7 +41,7 @@ func cmdMkRoom(ctx context.Context, id, roomName string) error {
 }
 
 func cmdHistory(ctx context.Context, roomID string, offset int) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func cmdHistory(ctx context.Context, roomID string, offset int) error {
 }
 
 func cmdTop(ctx context.Context, roomID string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}

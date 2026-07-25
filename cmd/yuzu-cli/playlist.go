@@ -10,7 +10,7 @@ import (
 )
 
 func cmdPlaylists(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -29,7 +29,7 @@ func cmdPlaylists(ctx context.Context) error {
 }
 
 func cmdPlaylistShow(ctx context.Context, id string, offset int) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func cmdPlaylistShow(ctx context.Context, id string, offset int) error {
 }
 
 func cmdPlaylistCreate(ctx context.Context, plName, desc string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func cmdPlaylistCreate(ctx context.Context, plName, desc string) error {
 }
 
 func cmdPlaylistDelete(ctx context.Context, id string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func cmdPlaylistDelete(ctx context.Context, id string) error {
 }
 
 func cmdPlaylistAdd(ctx context.Context, id string, refs []string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func cmdPlaylistAdd(ctx context.Context, id string, refs []string) error {
 }
 
 func cmdPlaylistDelItem(ctx context.Context, id string, ord int) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -94,7 +94,7 @@ func cmdPlaylistDelItem(ctx context.Context, id string, ord int) error {
 }
 
 func cmdPlaylistImport(ctx context.Context, what, plName string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}

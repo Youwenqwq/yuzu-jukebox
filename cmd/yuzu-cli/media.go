@@ -9,7 +9,7 @@ import (
 )
 
 func cmdUpload(ctx context.Context, filePath string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -22,7 +22,7 @@ func cmdUpload(ctx context.Context, filePath string) error {
 }
 
 func cmdCache(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}

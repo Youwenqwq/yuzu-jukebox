@@ -10,7 +10,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 )
 
-// connect 校时 + 认证 + 进房。
+// connect 校时 + 认证 + 进房。认证优先用缓存的 OIDC 会话，否则 guest。
 func connect(ctx context.Context, roomID string) (*client.Client, error) {
 	cli, err := client.Dial(ctx, *server)
 	if err != nil {
@@ -20,7 +20,12 @@ func connect(ctx context.Context, roomID string) (*client.Client, error) {
 		cli.Close()
 		return nil, err
 	}
-	if _, err := cli.Auth(ctx, *name, *password); err != nil {
+	if s := loadSession(*server); s != nil {
+		if _, err := cli.AuthToken(ctx, s.Token); err != nil {
+			cli.Close()
+			return nil, fmt.Errorf("缓存会话已失效，请重新 yuzu-cli login: %w", err)
+		}
+	} else if _, err := cli.Auth(ctx, *name, *password); err != nil {
 		cli.Close()
 		return nil, err
 	}
@@ -32,7 +37,7 @@ func connect(ctx context.Context, roomID string) (*client.Client, error) {
 }
 
 func cmdSearch(ctx context.Context, query string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}

@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/guest", s.guestAuth)
 	mux.HandleFunc("POST /api/v1/auth/oidc", s.oidcAuth)
+	mux.HandleFunc("GET /api/v1/auth/oidc/config", s.oidcConfig)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
@@ -115,6 +116,18 @@ func (s *Server) guestAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
+}
+
+// oidcConfig 公开 OIDC 客户端配置（issuer/client_id 本就是公开值，
+// Native 公共客户端无 secret）。CLI 的 login 流程靠它零配置自发现。
+func (s *Server) oidcConfig(w http.ResponseWriter, r *http.Request) {
+	if s.oidc == nil {
+		writeErr(w, http.StatusNotFound, "not_found", "oidc not enabled")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer": s.oidc.Issuer(), "client_id": s.oidc.ClientID(),
+	})
 }
 
 // oidcAuth OIDC 登录：客户端递来 IdP 签发的 id_token，
