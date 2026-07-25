@@ -410,13 +410,14 @@ func RESTAuth(ctx context.Context, server, name, password string) (token string,
 }
 
 // RESTOIDCAuth 用 IdP 签发的 id_token 换 yuzu session token。
-func RESTOIDCAuth(ctx context.Context, server, idToken string) (identity Identity, token string, err error) {
+// accessToken 可选：id_token 缺 preferred_username 时服务端用它调 userinfo 补齐。
+func RESTOIDCAuth(ctx context.Context, server, idToken, accessToken string) (identity Identity, token string, err error) {
 	var out struct {
 		Identity     Identity `json:"identity"`
 		SessionToken string   `json:"session_token"`
 	}
 	err = restCall(ctx, server, "POST", "/api/v1/auth/oidc", "", map[string]any{
-		"id_token": idToken,
+		"id_token": idToken, "access_token": accessToken,
 	}, &out)
 	return out.Identity, out.SessionToken, err
 }

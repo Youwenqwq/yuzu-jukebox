@@ -86,10 +86,11 @@ func cmdLogin(ctx context.Context) error {
 		cfg.ClientID = v
 	}
 
-	// 登录窗口给足（device code 有效期 300s + 余量）
-	flowCtx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	// 登录全程自带超时：用户在浏览器里确认可能要几分钟，
+	// 绝不能用 withCtx 的 15s（否则确认完换发 session 时 ctx 已死）。
+	flowCtx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
-	idToken, err := client.DeviceFlowLogin(flowCtx, cfg.Issuer, cfg.ClientID,
+	idToken, accessToken, err := client.DeviceFlowLogin(flowCtx, cfg.Issuer, cfg.ClientID,
 		func(uri, code string) {
 			fmt.Printf("请在浏览器中完成登录确认：\n  %s\n用户码: %s\n等待确认中...\n", uri, code)
 		})
@@ -97,7 +98,10 @@ func cmdLogin(ctx context.Context) error {
 		return fmt.Errorf("设备授权流失败: %w", err)
 	}
 
-	identity, token, err := client.RESTOIDCAuth(ctx, *server, idToken)
+	// 服务端首次验证可能要拉 discovery+JWKS，给足 30s。
+	authCtx, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+	identity, token, err := client.RESTOIDCAuth(authCtx, *server, idToken, accessToken)
 	if err != nil {
 		return fmt.Errorf("服务端 OIDC 认证失败: %w", err)
 	}

@@ -42,10 +42,10 @@ var (
 //
 // display 只调用一次；轮询间隔遵循服务端 interval，slow_down 时 +5s；
 // 总窗口受 expires_in 约束（Zitadel 当前为 300s）。
-func DeviceFlowLogin(ctx context.Context, issuer, clientID string, display func(verificationURI, userCode string)) (idToken string, err error) {
+func DeviceFlowLogin(ctx context.Context, issuer, clientID string, display func(verificationURI, userCode string)) (idToken, accessToken string, err error) {
 	issuer = strings.TrimSuffix(issuer, "/")
 
-	form := url.Values{"client_id": {clientID}, "scope": {"openid"}}
+	form := url.Values{"client_id": {clientID}, "scope": {"openid profile"}}
 	var dev struct {
 		DeviceCode              string `json:"device_code"`
 		UserCode                string `json:"user_code"`
@@ -55,7 +55,7 @@ func DeviceFlowLogin(ctx context.Context, issuer, clientID string, display func(
 		Interval                int    `json:"interval"`
 	}
 	if err := postForm(ctx, issuer+"/oauth/v2/device_authorization", form, &dev); err != nil {
-		return "", fmt.Errorf("device authorization: %w", err)
+		return "", "", fmt.Errorf("device authorization: %w", err)
 	}
 	if dev.Interval <= 0 {
 		dev.Interval = 5
@@ -76,28 +76,29 @@ func DeviceFlowLogin(ctx context.Context, issuer, clientID string, display func(
 	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", "", ctx.Err()
 		case <-time.After(interval):
 		}
 		if time.Now().After(deadline) {
-			return "", ErrDeviceExpired
+			return "", "", ErrDeviceExpired
 		}
 		var tok struct {
-			IDToken string `json:"id_token"`
+			IDToken     string `json:"id_token"`
+			AccessToken string `json:"access_token"`
 		}
 		err := postForm(ctx, issuer+"/oauth/v2/token", poll, &tok)
 		switch {
 		case err == nil:
 			if tok.IDToken == "" {
-				return "", fmt.Errorf("token response missing id_token")
+				return "", "", fmt.Errorf("token response missing id_token")
 			}
-			return tok.IDToken, nil
+			return tok.IDToken, tok.AccessToken, nil
 		case errors.Is(err, errDevicePending):
 			// 用户还没确认，继续等
 		case errors.Is(err, errDeviceSlowDown):
 			interval += 5 * time.Second
 		default:
-			return "", err
+			return "", "", err
 		}
 	}
 }

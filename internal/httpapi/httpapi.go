@@ -138,7 +138,8 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		IDToken string `json:"id_token"`
+		IDToken     string `json:"id_token"`
+		AccessToken string `json:"access_token"` // 可选：id_token 缺 preferred_username 时用于 userinfo 兜底
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IDToken == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "id_token required")
@@ -148,6 +149,22 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", err.Error())
 		return
+	}
+	// Zitadel 颁发 access token 时会把 profile claims 从 id_token 剥掉，
+	// 且角色 claim 也可能只在 userinfo 里（Assert Roles on Authentication
+	// 作用于 userinfo；id_token 需单独勾 User Roles Inside ID Token）。
+	// 有 access_token 就统一走 userinfo：补显示名 + 合并角色。
+	if body.AccessToken != "" {
+		if info, err := s.oidc.Userinfo(r.Context(), body.AccessToken); err == nil {
+			if claims.Username == claims.Sub {
+				if name, _ := info["preferred_username"].(string); name != "" {
+					claims.Username = name
+				} else if name, _ := info["name"].(string); name != "" {
+					claims.Username = name
+				}
+			}
+			claims.Roles = mergeRoles(claims.Roles, zitadelRolesFrom(info))
+		}
 	}
 	roles := []string{auth.RoleListener, auth.RoleRequester}
 	seen := map[string]bool{auth.RoleListener: true, auth.RoleRequester: true}
@@ -163,6 +180,35 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	token := s.authm.IssueSession(id)
 	s.st.Audit(r.Context(), id.ID, "auth.oidc", "", `{"name":`+strconv.Quote(id.Name)+`}`)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
+}
+
+// mergeRoles 合并去重。
+func mergeRoles(a, b []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, r := range append(a, b...) {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// zitadelRolesFrom 从 userinfo map 提取 Zitadel 角色名。
+func zitadelRolesFrom(info map[string]any) []string {
+	var out []string
+	for k, v := range info {
+		if !strings.HasPrefix(k, "urn:zitadel:iam:org:project") || !strings.HasSuffix(k, ":roles") {
+			continue
+		}
+		if m, ok := v.(map[string]any); ok {
+			for role := range m {
+				out = append(out, role)
+			}
+		}
+	}
+	return out
 }
 
 func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {

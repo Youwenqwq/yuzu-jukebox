@@ -61,7 +61,7 @@ func newFakeDeviceIdP(t *testing.T, pendingN int32, finalError string) *fakeDevi
 func TestDeviceFlowPendingThenSuccess(t *testing.T) {
 	f := newFakeDeviceIdP(t, 2, "")
 	var shown string
-	tok, err := DeviceFlowLogin(context.Background(), f.srv.URL, "cli-1",
+	tok, _, err := DeviceFlowLogin(context.Background(), f.srv.URL, "cli-1",
 		func(uri, code string) { shown = uri + "|" + code })
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestDeviceFlowPendingThenSuccess(t *testing.T) {
 
 func TestDeviceFlowDenied(t *testing.T) {
 	f := newFakeDeviceIdP(t, 0, "access_denied")
-	_, err := DeviceFlowLogin(context.Background(), f.srv.URL, "cli-1", func(string, string) {})
+	_, _, err := DeviceFlowLogin(context.Background(), f.srv.URL, "cli-1", func(string, string) {})
 	if !errors.Is(err, ErrDeviceDenied) {
 		t.Fatalf("want ErrDeviceDenied, got %v", err)
 	}
@@ -87,7 +87,7 @@ func TestDeviceFlowDenied(t *testing.T) {
 
 func TestDeviceFlowExpired(t *testing.T) {
 	f := newFakeDeviceIdP(t, 0, "expired_token")
-	_, err := DeviceFlowLogin(context.Background(), f.srv.URL, "cli-1", func(string, string) {})
+	_, _, err := DeviceFlowLogin(context.Background(), f.srv.URL, "cli-1", func(string, string) {})
 	if !errors.Is(err, ErrDeviceExpired) {
 		t.Fatalf("want ErrDeviceExpired, got %v", err)
 	}
@@ -97,7 +97,7 @@ func TestDeviceFlowContextCancel(t *testing.T) {
 	f := newFakeDeviceIdP(t, 1<<30, "") // 永远 pending
 	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 	defer cancel()
-	_, err := DeviceFlowLogin(ctx, f.srv.URL, "cli-1", func(string, string) {})
+	_, _, err := DeviceFlowLogin(ctx, f.srv.URL, "cli-1", func(string, string) {})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want ctx deadline, got %v", err)
 	}

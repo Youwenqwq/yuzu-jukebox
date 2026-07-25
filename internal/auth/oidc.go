@@ -28,9 +28,10 @@ type OIDCValidator struct {
 	clientID string
 	hc       *http.Client
 
-	mu      sync.Mutex
-	jwksURI string
-	keys    map[string]*rsa.PublicKey // kid → 公钥
+	mu          sync.Mutex
+	jwksURI     string
+	userinfoURI string
+	keys        map[string]*rsa.PublicKey // kid → 公钥
 }
 
 func NewOIDCValidator(issuer, clientID string) *OIDCValidator {
@@ -127,6 +128,39 @@ func (v *OIDCValidator) Validate(ctx context.Context, idToken string) (OIDCClaim
 	return claims, nil
 }
 
+// Userinfo 用 access token 调 userinfo 端点取资料。
+// 背景：Zitadel 在颁发 access token 时会把 profile scope 的 claims
+// 从 ID token 剥掉，preferred_username 只能从这里补。
+func (v *OIDCValidator) Userinfo(ctx context.Context, accessToken string) (map[string]any, error) {
+	if err := v.discover(ctx); err != nil {
+		return nil, err
+	}
+	v.mu.Lock()
+	uri := v.userinfoURI
+	v.mu.Unlock()
+	if uri == "" {
+		return nil, errors.New("oidc discovery: no userinfo_endpoint")
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := v.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("userinfo: %s", resp.Status)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OIDCIdentity 由 OIDC 声明构造 yuzu 身份。roles 为完整角色集
 // （基础角色 + 映射结果，由调用方组装）。
 func OIDCIdentity(c OIDCClaims, roles []string) Identity {
@@ -176,23 +210,38 @@ func (v *OIDCValidator) keyFor(ctx context.Context, kid string) (*rsa.PublicKey,
 	return nil, fmt.Errorf("%w: unknown key id %q", ErrOIDCToken, kid)
 }
 
+// discover 拉取并缓存 discovery 文档（jwks_uri 与 userinfo_endpoint）。
+func (v *OIDCValidator) discover(ctx context.Context) error {
+	v.mu.Lock()
+	done := v.jwksURI != ""
+	v.mu.Unlock()
+	if done {
+		return nil
+	}
+	var doc struct {
+		JWKSURI    string `json:"jwks_uri"`
+		UserinfoEP string `json:"userinfo_endpoint"`
+	}
+	if err := v.getJSON(ctx, v.issuer+"/.well-known/openid-configuration", &doc); err != nil {
+		return fmt.Errorf("oidc discovery: %w", err)
+	}
+	if doc.JWKSURI == "" {
+		return errors.New("oidc discovery: no jwks_uri")
+	}
+	v.mu.Lock()
+	v.jwksURI = doc.JWKSURI
+	v.userinfoURI = doc.UserinfoEP
+	v.mu.Unlock()
+	return nil
+}
+
 func (v *OIDCValidator) refreshKeys(ctx context.Context) error {
+	if err := v.discover(ctx); err != nil {
+		return err
+	}
 	v.mu.Lock()
 	jwksURI := v.jwksURI
 	v.mu.Unlock()
-
-	if jwksURI == "" {
-		var discovery struct {
-			JWKSURI string `json:"jwks_uri"`
-		}
-		if err := v.getJSON(ctx, v.issuer+"/.well-known/openid-configuration", &discovery); err != nil {
-			return fmt.Errorf("oidc discovery: %w", err)
-		}
-		if discovery.JWKSURI == "" {
-			return errors.New("oidc discovery: no jwks_uri")
-		}
-		jwksURI = discovery.JWKSURI
-	}
 
 	var jwks struct {
 		Keys []struct {

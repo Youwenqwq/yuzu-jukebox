@@ -118,6 +118,7 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 	const debounceWindow = 400 * time.Millisecond
 	applyCh := make(chan client.Playback, 1)
 	var debounce *time.Timer
+	syncer := &driftSyncer{}
 	scheduleApply := func(pb client.Playback) {
 		if debounce != nil {
 			debounce.Stop()
@@ -134,6 +135,7 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 		cur = pb
 		if pb.Current == nil {
 			loadedRef = ""
+			syncer.reset()
 			mpv.Stop()
 			return
 		}
@@ -143,11 +145,12 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 				return
 			}
 			loadedRef = pb.Current.TrackRef
+			syncer.reset()
 			mpv.SetSpeed(1.0) // 上一首可能残留变速
 			log.Printf("playing %s (%s)", pb.Current.Title, pb.Current.TrackRef)
 		}
 		mpv.SetPause(!pb.Playing)
-		correct(mpv, cli, pb)
+		correct(mpv, cli, pb, syncer)
 	}
 
 	for {
@@ -168,14 +171,59 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 			apply(pb)
 		case <-ticker.C:
 			if cur.Current != nil && cur.Playing {
-				correct(mpv, cli, cur)
+				correct(mpv, cli, cur, syncer)
 			}
 		}
 	}
 }
 
+// driftSyncer 区分真实漂移与恒定测量偏差。
+//
+// 背景：mpv 的 time-pos 读数 = 真实位置 - 音频输出延迟补偿。输出链路
+// 有较大缓冲（蓝牙、大 quantum 的声卡）时，读数持续少报 ~300ms——
+// 这不是漂移，拽它只会让播放每秒跳一次。判据：连续 3 次采样漂移
+// 稳定（±60ms）即视为输出延迟偏差，停止纠正；漂移在变化才是真漂移。
+type driftSyncer struct {
+	hist   [3]int64
+	n      int
+	biased bool
+}
+
+func (s *driftSyncer) reset() { s.n = 0; s.biased = false }
+
+// observe 记录一次漂移采样，返回是否已稳定（应停止纠正）。
+func (s *driftSyncer) observe(drift int64) bool {
+	if s.biased {
+		// 已判定偏差；漂移重新大幅变化（如 seek 后未生效）时解除
+		if drift > s.hist[2]+150 || drift < s.hist[2]-150 {
+			s.reset()
+		}
+		return s.biased
+	}
+	if s.n < len(s.hist) {
+		s.hist[s.n] = drift
+		s.n++
+		return false
+	}
+	copy(s.hist[:], s.hist[1:])
+	s.hist[2] = drift
+	lo, hi := s.hist[0], s.hist[0]
+	for _, d := range s.hist[1:] {
+		if d < lo {
+			lo = d
+		}
+		if d > hi {
+			hi = d
+		}
+	}
+	if hi-lo <= 60 {
+		s.biased = true
+	}
+	return s.biased
+}
+
 // correct 按漂移量分级纠正。
-func correct(mpv *mpvClient, cli *client.Client, pb client.Playback) {
+func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *driftSyncer) {
 	if pb.Current == nil {
 		return
 	}
@@ -185,6 +233,10 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback) {
 		return // 文件刚加载，time-pos 暂不可用
 	}
 	drift := actualMs - shouldMs
+	if syncer.observe(drift) {
+		mpv.SetSpeed(1.0)
+		return
+	}
 	const (
 		seekThreshold  = 150
 		speedThreshold = 30
