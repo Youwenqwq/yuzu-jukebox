@@ -341,27 +341,39 @@ func (r *Room) Run(ctx context.Context) {
 		r.authm.RevokeTrack(cur.TrackRef)
 	}
 
-	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充
+	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充。
+	// 毒化条目（时长未知，如元数据缺失的历史遗留）直接丢弃——
+	// 它们会让 scheduleEnd 永不触发，队列永久停滞。
 	advance := func(reason string) {
 		now := nowMs()
 		finishCurrent(reason, now)
-		if len(queue) == 0 && radio != nil {
-			refill()
-		}
-		if len(queue) == 0 {
-			playback = &Playback{Rate: 1.0}
-			if timer != nil {
-				timer.Stop()
-				timer = nil
+		dropped := 0
+		for {
+			if len(queue) == 0 && radio != nil {
+				refill()
 			}
-			broadcast(playbackMsg)
-			return
-		}
-		next := queue[0]
-		queue = queue[1:]
-		persistQueue()
-		playback = &Playback{
-			Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
+			if len(queue) == 0 || dropped >= 100 {
+				// dropped 上限：防止病态电台源持续产出 0 时长曲目导致死循环
+				playback = &Playback{Rate: 1.0}
+				if timer != nil {
+					timer.Stop()
+					timer = nil
+				}
+				broadcast(playbackMsg)
+				return
+			}
+			next := queue[0]
+			queue = queue[1:]
+			persistQueue()
+			if next.DurationMs <= 0 {
+				log.Printf("room %s: dropping entry %s (%s): zero/unknown duration", r.ID, next.EntryID, next.TrackRef)
+				dropped++
+				continue
+			}
+			playback = &Playback{
+				Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
+			}
+			break
 		}
 		if radio != nil && len(queue) < 3 {
 			refill()
