@@ -110,6 +110,34 @@ yuzu-cli credential ncm "MUSIC_U=xxxx"
 yuzu-cli qrlogin ncm
 ```
 
+## CLI 参考
+
+全局 flag 可放在子命令前后任意位置，均可用环境变量代替：
+
+| flag | 环境变量 | 说明 |
+|---|---|---|
+| `-server` | `YUZU_SERVER` | 服务器地址，默认 `http://127.0.0.1:8080` |
+| `-name` | `YUZU_NAME` | 显示名 |
+| `-password` | `YUZU_PASSWORD` | 全局管理员口令 |
+| `-room-password` | `YUZU_ROOM_PASSWORD` | 房间访客密码（mkroom 时作为新房间的密码） |
+
+| 子命令 | 权限 | 说明 |
+|---|---|---|
+| `rooms` | 任意身份 | 列出所有房间 |
+| `search <关键词> [-provider p]` | `requester` | 搜索曲目，输出 `track_ref` 供点歌 |
+| `queue <room>` | 任意身份 | 查看当前播放（含实时进度）与队列 |
+| `add <room> <track_ref>` | `requester` | 点歌，队尾追加，空闲自动开播 |
+| `skip <room>` | `room_admin` | 切歌，自动播放下一首 |
+| `pause / resume <room>` | `room_admin` | 暂停 / 恢复 |
+| `seek <room> <秒>` | `room_admin` | 跳转进度 |
+| `mkroom <id> <名称>` | `room_admin` | 创建持久房间 |
+| `upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
+| `credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
+| `qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
+| `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
+
+每个子命令都有独立帮助文档，如 `yuzu-cli search --help`。
+
 ## 组件
 
 | 二进制 | 形态 | 职责 |
