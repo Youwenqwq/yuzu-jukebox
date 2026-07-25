@@ -140,7 +140,9 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 			return
 		}
 		if pb.Current.TrackRef != loadedRef {
-			if err := mpv.LoadFile(server + pb.Current.StreamURL); err != nil {
+			// 开播即定位到房间当前进度，避免从 0 播一秒再大跳
+			startSec := float64(pb.ShouldBeMs(cli.ServerNow())) / 1000
+			if err := mpv.LoadFile(server+pb.Current.StreamURL, startSec); err != nil {
 				log.Printf("loadfile: %v", err)
 				return
 			}
@@ -177,52 +179,26 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 	}
 }
 
-// driftSyncer 区分真实漂移与恒定测量偏差。
+// driftSyncer 用基线学习区分真实漂移与测量偏差。
 //
-// 背景：mpv 的 time-pos 读数 = 真实位置 - 音频输出延迟补偿。输出链路
-// 有较大缓冲（蓝牙、大 quantum 的声卡）时，读数持续少报 ~300ms——
-// 这不是漂移，拽它只会让播放每秒跳一次。判据：连续 3 次采样漂移
-// 稳定（±60ms）即视为输出延迟偏差，停止纠正；漂移在变化才是真漂移。
+// 背景：mpv 的 time-pos 读数 = 真实位置 - 音频输出延迟补偿（蓝牙等
+// 输出链路典型 200-300ms）。播放速率是 1:1 时，seek 生效后的第一个
+// 漂移样本就是这个偏差本身——直接学为基线，后续只纠正超出基线的
+// 变化，而不是反复拽一个恒定的读数差。
 type driftSyncer struct {
-	hist   [3]int64
-	n      int
-	biased bool
+	baseline    int64 // 已学习的测量偏差
+	hasBaseline bool  // 基线是否已建立
+	awaitSample bool  // 刚执行过 seek，下一个样本用于学习基线
 }
 
-func (s *driftSyncer) reset() { s.n = 0; s.biased = false }
+func (s *driftSyncer) reset() { s.hasBaseline, s.awaitSample = false, false }
 
-// observe 记录一次漂移采样，返回是否已稳定（应停止纠正）。
-func (s *driftSyncer) observe(drift int64) bool {
-	if s.biased {
-		// 已判定偏差；漂移重新大幅变化（如 seek 后未生效）时解除
-		if drift > s.hist[2]+150 || drift < s.hist[2]-150 {
-			s.reset()
-		}
-		return s.biased
-	}
-	if s.n < len(s.hist) {
-		s.hist[s.n] = drift
-		s.n++
-		return false
-	}
-	copy(s.hist[:], s.hist[1:])
-	s.hist[2] = drift
-	lo, hi := s.hist[0], s.hist[0]
-	for _, d := range s.hist[1:] {
-		if d < lo {
-			lo = d
-		}
-		if d > hi {
-			hi = d
-		}
-	}
-	if hi-lo <= 60 {
-		s.biased = true
-	}
-	return s.biased
-}
+const (
+	seekThreshold  = 150 // 超过即 seek（校准后同样适用）
+	speedThreshold = 30
+)
 
-// correct 按漂移量分级纠正。
+// correct 按漂移量分级纠正；未校准时先做一次绝对对齐再学基线。
 func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *driftSyncer) {
 	if pb.Current == nil {
 		return
@@ -233,22 +209,42 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *dri
 		return // 文件刚加载，time-pos 暂不可用
 	}
 	drift := actualMs - shouldMs
-	if syncer.observe(drift) {
-		mpv.SetSpeed(1.0)
+
+	// 校准阶段：一次绝对对齐（或小漂移直接以当前值为基线），收敛于
+	// 一两个样本，不再像稳定性判定那样连 seek 三四秒。
+	if !syncer.hasBaseline {
+		if syncer.awaitSample {
+			syncer.baseline = drift
+			syncer.hasBaseline = true
+			syncer.awaitSample = false
+			log.Printf("calibrated: output latency bias %dms", drift)
+			return
+		}
+		if drift > seekThreshold || drift < -seekThreshold {
+			log.Printf("drift %dms, seeking to %dms", drift, shouldMs)
+			mpv.SeekTo(float64(shouldMs) / 1000)
+			mpv.SetSpeed(1.0)
+			syncer.awaitSample = true
+		} else {
+			syncer.baseline = drift
+			syncer.hasBaseline = true
+		}
 		return
 	}
-	const (
-		seekThreshold  = 150
-		speedThreshold = 30
-	)
+
+	// 校准后：只纠正超出基线的变化。seek 后基线作废重新学习，
+	// 输出设备延迟中途变化（蓝牙重连等）也能自适应。
+	corrected := drift - syncer.baseline
 	switch {
-	case drift > seekThreshold || drift < -seekThreshold:
-		log.Printf("drift %dms, seeking to %dms", drift, shouldMs)
+	case corrected > seekThreshold || corrected < -seekThreshold:
+		log.Printf("drift %dms (bias %dms), seeking to %dms", corrected, syncer.baseline, shouldMs)
 		mpv.SeekTo(float64(shouldMs) / 1000)
 		mpv.SetSpeed(1.0)
-	case drift > speedThreshold:
+		syncer.reset()
+		syncer.awaitSample = true
+	case corrected > speedThreshold:
 		mpv.SetSpeed(0.98) // 本地超前，放慢
-	case drift < -speedThreshold:
+	case corrected < -speedThreshold:
 		mpv.SetSpeed(1.02) // 本地落后，加快
 	default:
 		mpv.SetSpeed(1.0)

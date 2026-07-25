@@ -115,8 +115,17 @@ func (m *mpvClient) command(args ...any) (mpvResponse, error) {
 	}
 }
 
-func (m *mpvClient) LoadFile(url string) error {
-	resp, err := m.command("loadfile", url)
+// LoadFile 加载 URL；startSec > 0 时用 loadfile options 开播即定位
+// （mpv ≥0.34），避免从 0 播一秒再大跳。
+func (m *mpvClient) LoadFile(url string, startSec float64) error {
+	var resp mpvResponse
+	var err error
+	if startSec > 0 {
+		resp, err = m.command("loadfile", url, "replace", -1,
+			map[string]any{"start": fmt.Sprintf("%.3f", startSec)})
+	} else {
+		resp, err = m.command("loadfile", url)
+	}
 	if err != nil {
 		return err
 	}
