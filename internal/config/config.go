@@ -14,14 +14,8 @@ type CORSConfig struct {
 	Enabled bool `json:"enabled"`
 	// 允许的 Origin。设置 ["*"] 允许任意来源；生产环境应限定具体域名。
 	AllowedOrigins []string `json:"allowed_origins"`
-	// 允许的 HTTP 方法。默认 GET/POST/PATCH/DELETE/OPTIONS。
-	AllowedMethods []string `json:"allowed_methods"`
-	// 允许的请求头。默认包含 Content-Type/Authorization/X-Session-Token。
-	AllowedHeaders []string `json:"allowed_headers"`
 	// 是否允许携带凭据（cookies、Authorization 头）。为 true 时 AllowedOrigins 不可为 "*"。
 	AllowCredentials bool `json:"allow_credentials"`
-	// 预检请求缓存时间（秒）。默认 0。
-	MaxAge int `json:"max_age"`
 }
 
 type Config struct {
@@ -87,11 +81,8 @@ func Default() Config {
 		CORS: CORSConfig{
 			Enabled:        false,
 			AllowedOrigins: []string{"*"},
-			AllowedMethods: []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-			AllowedHeaders: []string{"Content-Type", "Authorization", "X-Session-Token"},
 			AllowCredentials: false,
-			MaxAge:         0,
- 		},
+		},
 		Bili: BiliConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3002",
