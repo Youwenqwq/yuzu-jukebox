@@ -105,6 +105,9 @@ yuzu-cli pause|resume|seek lobby [秒]       # 播放控制（管理员）
 
 # 配置 NCM 账号凭据解锁高音质（可选，先校验再生效，热更新）
 yuzu-cli credential ncm "MUSIC_U=xxxx"
+
+# 或者扫码登录：终端渲染二维码，用网易云 App 扫码确认，凭据自动生效
+yuzu-cli qrlogin ncm
 ```
 
 ## 组件

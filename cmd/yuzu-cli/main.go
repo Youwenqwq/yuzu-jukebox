@@ -8,6 +8,7 @@
 //	yuzu-cli skip|pause|resume <room>
 //	yuzu-cli seek <room> <seconds>
 //	yuzu-cli credential <provider> <payload>
+//	yuzu-cli qrlogin <provider>          # 终端渲染二维码，扫码后凭据自动生效
 //
 // 全局参数：-server -name -password（管理员口令）-room-password（房间访客密码），
 // 均可用环境变量 YUZU_SERVER / YUZU_NAME / YUZU_PASSWORD / YUZU_ROOM_PASSWORD 代替。
@@ -20,6 +21,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/mdp/qrterminal/v3"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 )
@@ -93,6 +96,12 @@ func main() {
 			err = usageErr("credential <provider> <payload>")
 		} else {
 			err = cmdCredential(ctx, args[1], args[2])
+		}
+	case "qrlogin":
+		if len(args) < 2 {
+			err = usageErr("qrlogin <provider>")
+		} else {
+			err = cmdQRLogin(args[1])
 		}
 	default:
 		err = usageErr("unknown command: " + args[0])
@@ -221,6 +230,53 @@ func cmdCredential(ctx context.Context, providerID, payload string) error {
 		return err
 	}
 	return client.RESTSetCredential(ctx, *server, token, providerID, payload)
+}
+
+// cmdQRLogin 二维码登录：渲染二维码并轮询，凭据由服务端在扫码成功后自动生效。
+// 轮询不套全局 15s 超时（扫码是分钟级操作），单独给 5 分钟。
+func cmdQRLogin(providerID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	sess, err := client.RESTQRLoginStart(ctx, *server, token, providerID)
+	if err != nil {
+		return err
+	}
+	fmt.Println("请用网易云音乐 App 扫描以下二维码：")
+	qrterminal.GenerateHalfBlock(sess.QRContent, qrterminal.L, os.Stdout)
+
+	lastStatus := ""
+	for {
+		res, err := client.RESTQRLoginPoll(ctx, *server, token, providerID, sess.Key)
+		if err != nil {
+			return err
+		}
+		if res.Status != lastStatus {
+			switch res.Status {
+			case "waiting":
+				fmt.Println("等待扫码…")
+			case "scanned":
+				fmt.Println("已扫码，请在 App 上确认登录…")
+			}
+			lastStatus = res.Status
+		}
+		switch res.Status {
+		case "ok":
+			fmt.Println("✓", res.Message)
+			return nil
+		case "expired":
+			return fmt.Errorf("二维码已过期，请重新运行")
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待超时")
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func usageErr(msg string) error { return fmt.Errorf("usage: %s", msg) }

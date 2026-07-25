@@ -202,6 +202,8 @@ pause│  │resume
 | `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | 热更新 Provider 凭据（如 ncm 的 MUSIC_U cookie）；服务端先校验再生效，凭据存 credentials 表，永不下发 |
+| `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 生成二维码登录会话，返回 `{key, qr_content}`（客户端自行渲染二维码） |
+| `GET /api/v1/providers/{id}/qrlogin/{key}` | `media_admin` | 轮询扫码状态：waiting / scanned / ok / expired；ok 时服务端已自行提取 MUSIC_U、校验并热生效（cookie 不经过客户端） |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |
 | `GET /api/v1/media/cache` / `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 缓存查看/手动清理 |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |

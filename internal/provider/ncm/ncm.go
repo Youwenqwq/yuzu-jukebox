@@ -99,6 +99,88 @@ func (p *Provider) checkLogin(ctx context.Context, cookie string) error {
 	return nil
 }
 
+// ---------- 二维码登录 ----------
+
+// QR 登录状态码（NCM API 返回的 code）。
+const (
+	QRStatusExpired = 800 // 二维码过期
+	QRStatusWaiting = 801 // 等待扫码
+	QRStatusScanned = 802 // 已扫码待确认
+	QRStatusOK      = 803 // 授权成功
+)
+
+// QRLoginStart 生成二维码：返回 key（轮询用）与 qrurl（渲染二维码的内容）。
+func (p *Provider) QRLoginStart(ctx context.Context) (key, qrurl string, err error) {
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	var keyResp struct {
+		Data struct {
+			UniKey string `json:"unikey"`
+		} `json:"data"`
+	}
+	if err := p.get(ctx, "/login/qr/key", url.Values{"timestamp": {ts}}, "", &keyResp); err != nil {
+		return "", "", err
+	}
+	if keyResp.Data.UniKey == "" {
+		return "", "", fmt.Errorf("qr key: empty unikey")
+	}
+
+	var createResp struct {
+		Data struct {
+			QRURL string `json:"qrurl"`
+		} `json:"data"`
+	}
+	if err := p.get(ctx, "/login/qr/create",
+		url.Values{"key": {keyResp.Data.UniKey}, "timestamp": {ts}}, "", &createResp); err != nil {
+		return "", "", err
+	}
+	return keyResp.Data.UniKey, createResp.Data.QRURL, nil
+}
+
+// QRLoginPoll 轮询扫码状态。status 为 expired|waiting|scanned|ok；
+// ok 时凭据已被提取、校验并热生效。
+func (p *Provider) QRLoginPoll(ctx context.Context, key string) (string, string, error) {
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Cookie  string `json:"cookie"`
+	}
+	if err := p.get(ctx, "/login/qr/check",
+		url.Values{"key": {key}, "timestamp": {ts}, "noCookie": {"true"}}, "", &resp); err != nil {
+		return "", "", err
+	}
+	switch resp.Code {
+	case QRStatusExpired:
+		return "expired", resp.Message, nil
+	case QRStatusWaiting:
+		return "waiting", resp.Message, nil
+	case QRStatusScanned:
+		return "scanned", resp.Message, nil
+	case QRStatusOK:
+		musicU := extractCookieValue(resp.Cookie, "MUSIC_U")
+		if musicU == "" {
+			return "", "", fmt.Errorf("qr login succeeded but MUSIC_U missing in cookie")
+		}
+		if err := p.SetCredential(ctx, "MUSIC_U="+musicU); err != nil {
+			return "", "", err
+		}
+		return "ok", "登录成功，凭据已生效", nil
+	default:
+		return "", "", fmt.Errorf("qr check: unexpected code %d (%s)", resp.Code, resp.Message)
+	}
+}
+
+// extractCookieValue 从 Set-Cookie 串中提取指定 key 的值。
+func extractCookieValue(cookieStr, key string) string {
+	for part := range strings.SplitSeq(cookieStr, ";") {
+		part = strings.TrimSpace(part)
+		if v, ok := strings.CutPrefix(part, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // ---------- Provider 接口 ----------
 
 func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, error) {

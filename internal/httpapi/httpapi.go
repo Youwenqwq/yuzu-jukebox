@@ -47,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
+	mux.HandleFunc("POST /api/v1/providers/{id}/qrlogin", s.qrLoginStart)
+	mux.HandleFunc("GET /api/v1/providers/{id}/qrlogin/{key}", s.qrLoginPoll)
 	mux.HandleFunc("POST /api/v1/media/upload", s.upload)
 	mux.HandleFunc("GET /api/v1/media/cache", s.listCache)
 	mux.HandleFunc("DELETE /api/v1/media/cache/{ref}", s.evictCache)
@@ -252,6 +254,56 @@ func (s *Server) setCredential(w http.ResponseWriter, r *http.Request) {
 	}
 	s.st.Audit(r.Context(), id.ID, "provider.set_credential", pid, "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"provider": pid, "status": "ok"})
+}
+
+// qrLoginStart 生成二维码登录会话（media_admin）。
+func (s *Server) qrLoginStart(w http.ResponseWriter, r *http.Request) {
+	_, qa, ok := s.requireQRProvider(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	key, content, err := qa.QRLoginStart(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"key": key, "qr_content": content})
+}
+
+// qrLoginPoll 轮询扫码状态；ok 时凭据已由服务端落库并热生效。
+func (s *Server) qrLoginPoll(w http.ResponseWriter, r *http.Request) {
+	_, qa, ok := s.requireQRProvider(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	status, message, err := qa.QRLoginPoll(ctx, r.PathValue("key"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": status, "message": message})
+}
+
+func (s *Server) requireQRProvider(w http.ResponseWriter, r *http.Request) (auth.Identity, provider.QRLoginAware, bool) {
+	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return id, nil, false
+	}
+	p, okp := s.reg.Get(r.PathValue("id"))
+	if !okp {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown provider: "+r.PathValue("id"))
+		return id, nil, false
+	}
+	qa, okq := p.(provider.QRLoginAware)
+	if !okq {
+		writeErr(w, http.StatusBadRequest, "bad_request", "provider does not support qr login")
+		return id, nil, false
+	}
+	return id, qa, true
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {

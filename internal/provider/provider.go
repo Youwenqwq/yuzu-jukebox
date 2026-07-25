@@ -67,6 +67,14 @@ type Provider interface {
 	Resolve(ctx context.Context, ref TrackRef) (StreamLocator, error)
 }
 
+// QRLoginAware 是可选接口：支持二维码登录的 Provider 实现它。
+// status 取值：expired | waiting | scanned | ok。
+type QRLoginAware interface {
+	Provider
+	QRLoginStart(ctx context.Context) (key, qrContent string, err error)
+	QRLoginPoll(ctx context.Context, key string) (status, message string, err error)
+}
+
 // CredentialAware 是可选接口：支持凭据热更新的 Provider 实现它。
 type CredentialAware interface {
 	Provider

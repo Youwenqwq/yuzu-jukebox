@@ -336,6 +336,31 @@ func RESTSetCredential(ctx context.Context, server, token, providerID, payload s
 		token, map[string]any{"payload": payload}, &struct{}{})
 }
 
+// QRLoginSession 是二维码登录会话。
+type QRLoginSession struct {
+	Key       string `json:"key"`
+	QRContent string `json:"qr_content"`
+}
+
+func RESTQRLoginStart(ctx context.Context, server, token, providerID string) (QRLoginSession, error) {
+	var out QRLoginSession
+	err := restCall(ctx, server, "POST", "/api/v1/providers/"+providerID+"/qrlogin",
+		token, map[string]any{}, &out)
+	return out, err
+}
+
+type QRLoginResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+func RESTQRLoginPoll(ctx context.Context, server, token, providerID, key string) (QRLoginResult, error) {
+	var out QRLoginResult
+	err := restCall(ctx, server, "GET", "/api/v1/providers/"+providerID+"/qrlogin/"+key,
+		token, nil, &out)
+	return out, err
+}
+
 func restCall(ctx context.Context, server, method, path, token string, body, out any) error {
 	var rdr *strings.Reader
 	if body != nil {
