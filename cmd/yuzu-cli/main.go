@@ -375,7 +375,19 @@ source 取值：
 				})
 			},
 		},
-		"queue-del": {
+		"status": {
+		usage: "status <room>",
+		desc:  "房间总览：播放状态、电台绑定、队列规模、听众",
+		detail: `一眼看清房间当前状态：正在放什么、是否绑定曲目源（电台）、
+队列里还压着几首、谁在线。想看队列明细用 queue。`,
+		run: func(args []string) error {
+			if len(args) < 1 {
+				return errUsage("status")
+			}
+			return withCtx(func(ctx context.Context) error { return cmdStatus(ctx, args[0]) })
+		},
+	},
+	"queue-del": {
 			usage:  "queue-del <room> <entry_id>",
 			desc:   "移除队列条目（本人或管理员）",
 			detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；room_admin 可移除任意。\n\nentry_id 见 queue 输出第一列。",
@@ -787,50 +799,93 @@ func cmdPolicyShow(ctx context.Context, roomID string) error {
 }
 
 func cmdQueue(ctx context.Context, roomID string) error {
-
 	cli, err := connect(ctx, roomID)
 	if err != nil {
 		return err
 	}
 	defer cli.Close()
-
-	var playback *client.Playback
-	var queue []client.QueueEntry
-	// 收 join 快照三件套
-	timeout := time.After(5 * time.Second)
-	for playback == nil || queue == nil {
-		select {
-		case m := <-cli.Events():
-			switch m.Type {
-			case "playback.changed":
-				pb, err := client.ParsePlayback(m)
-				if err == nil {
-					playback = &pb
-				}
-			case "queue.changed":
-				queue, _ = client.ParseQueue(m)
-			}
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for room snapshot")
-		}
+	snap, err := cli.AwaitSnapshot(5 * time.Second)
+	if err != nil {
+		return err
 	}
-
-	if playback.Current != nil {
-		fmt.Printf("playing: %s — %s (%dms/%dms)\n",
-			playback.Current.Title, playback.Current.Artist,
-			playback.ShouldBeMs(cli.ServerNow()), playback.Current.DurationMs)
-		if playback.Current.StreamURL != "" {
-			fmt.Printf("stream:  %s\n", playback.Current.StreamURL)
+	if snap.Playback.Current != nil {
+		cur := snap.Playback.Current
+		state := "playing"
+		if !snap.Playback.Playing {
+			state = "paused "
+		}
+		fmt.Printf("%s: %s — %s (%dms/%dms)\n", state, cur.Title, cur.Artist,
+			snap.Playback.ShouldBeMs(cli.ServerNow()), cur.DurationMs)
+		if cur.StreamURL != "" {
+			fmt.Printf("stream:  %s\n", cur.StreamURL)
 		}
 	} else {
 		fmt.Println("playing: (idle)")
 	}
-	if len(queue) == 0 {
+	if snap.Radio != nil {
+		fmt.Printf("radio:   %s (%s)\n", snap.Radio.Source, radioFlags(snap.Radio))
+	}
+	if len(snap.Queue) == 0 {
 		fmt.Println("queue: (empty)")
 	}
-	for i, e := range queue {
+	for i, e := range snap.Queue {
 		fmt.Printf("  %d. [%s] %s — %s (%ds)\n", i, e.EntryID, e.Title, e.Artist, e.DurationMs/1000)
 	}
+	return nil
+}
+
+// radioFlags 电台标志的人性化描述。
+func radioFlags(r *client.RadioInfo) string {
+	if !r.Finite {
+		return "无限流"
+	}
+	flags := ""
+	if r.Shuffle {
+		flags += "shuffle "
+	}
+	if r.Once {
+		flags += "once "
+	}
+	if flags == "" {
+		return "顺序循环"
+	}
+	return flags[:len(flags)-1]
+}
+
+func cmdStatus(ctx context.Context, roomID string) error {
+	cli, err := connect(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	snap, err := cli.AwaitSnapshot(5 * time.Second)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("room:      %s\n", roomID)
+	if snap.Playback.Current != nil {
+		cur := snap.Playback.Current
+		state := "playing"
+		if !snap.Playback.Playing {
+			state = "paused"
+		}
+		fmt.Printf("state:     %s %s — %s (%ds/%ds)\n", state, cur.Title, cur.Artist,
+			snap.Playback.ShouldBeMs(cli.ServerNow())/1000, cur.DurationMs/1000)
+	} else {
+		fmt.Println("state:     idle")
+	}
+	if snap.Radio != nil {
+		fmt.Printf("radio:     %s\n", snap.Radio.Source)
+		fmt.Printf("           %s (%s)\n", snap.Radio.Description, radioFlags(snap.Radio))
+	} else {
+		fmt.Println("radio:     (未绑定，队列播完即停)")
+	}
+	fmt.Printf("queue:     %d 首待播\n", len(snap.Queue))
+	names := make([]string, 0, len(snap.Listeners))
+	for _, l := range snap.Listeners {
+		names = append(names, l.Name)
+	}
+	fmt.Printf("listeners: %d 人 (%s)\n", len(snap.Listeners), strings.Join(names, ", "))
 	return nil
 }
 

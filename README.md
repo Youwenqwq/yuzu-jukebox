@@ -130,7 +130,8 @@ yuzu-cli qrlogin ncm
 |---|---|---|
 | `rooms` | 任意身份 | 列出所有房间 |
 | `search <关键词> [-provider p]` | `requester` | 搜索曲目，输出 `track_ref` 供点歌 |
-| `queue <room>` | 任意身份 | 查看当前播放（含实时进度）与队列 |
+| `queue <room>` | 任意身份 | 查看当前播放（含实时进度）与队列（含电台行） |
+| `status <room>` | 任意身份 | 房间总览：播放状态、电台绑定、队列规模、听众 |
 | `add <room> <track_ref>` | `requester` | 点歌，队尾追加，空闲自动开播 |
 | `skip <room>` | `room_admin` | 切歌，自动播放下一首 |
 | `pause / resume <room>` | `room_admin` | 暂停 / 恢复 |

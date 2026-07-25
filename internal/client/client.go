@@ -306,6 +306,79 @@ func ParseQueue(m Message) ([]QueueEntry, error) {
 	return d.Queue, err
 }
 
+// RadioInfo 电台绑定状态（radio.changed 事件 data.radio；null 表示未绑定）。
+type RadioInfo struct {
+	Source      string `json:"source"`
+	Description string `json:"description"`
+	Finite      bool   `json:"finite"`
+	Shuffle     bool   `json:"shuffle"`
+	Once        bool   `json:"once"`
+}
+
+// ParseRadio 解析 radio.changed；未绑定时返回 nil。
+func ParseRadio(m Message) *RadioInfo {
+	var d struct {
+		Radio *RadioInfo `json:"radio"`
+	}
+	if json.Unmarshal(m.Data, &d) != nil {
+		return nil
+	}
+	return d.Radio
+}
+
+// Listener 听众条目（listeners.changed）。
+type Listener struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Snapshot 进房快照四件套：播放状态、队列、电台、听众。
+type Snapshot struct {
+	Playback  Playback
+	Queue     []QueueEntry
+	Radio     *RadioInfo
+	Listeners []Listener
+}
+
+// AwaitSnapshot 在 Join 之后调用，收齐服务端按序推送的快照消息。
+func (c *Client) AwaitSnapshot(timeout time.Duration) (*Snapshot, error) {
+	snap := &Snapshot{}
+	var gotPlayback, gotQueue, gotRadio, gotListeners bool
+	deadline := time.After(timeout)
+	for !(gotPlayback && gotQueue && gotRadio && gotListeners) {
+		select {
+		case m, ok := <-c.events:
+			if !ok {
+				return nil, fmt.Errorf("connection closed while waiting for snapshot")
+			}
+			switch m.Type {
+			case "playback.changed":
+				if pb, err := ParsePlayback(m); err == nil {
+					snap.Playback = pb
+					gotPlayback = true
+				}
+			case "queue.changed":
+				snap.Queue, _ = ParseQueue(m)
+				gotQueue = true
+			case "radio.changed":
+				snap.Radio = ParseRadio(m)
+				gotRadio = true
+			case "listeners.changed":
+				var d struct {
+					Listeners []Listener `json:"listeners"`
+				}
+				if json.Unmarshal(m.Data, &d) == nil {
+					snap.Listeners = d.Listeners
+					gotListeners = true
+				}
+			}
+		case <-deadline:
+			return nil, fmt.Errorf("timeout waiting for room snapshot")
+		}
+	}
+	return snap, nil
+}
+
 var ErrNoSuchRoom = errors.New("room not found")
 
 // ---------- REST 辅助（低频管理操作） ----------
