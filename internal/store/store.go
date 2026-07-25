@@ -221,11 +221,11 @@ func (s *Store) SearchMediaFiles(ctx context.Context, query string, limit int) (
 // ---------- 缓存索引 ----------
 
 type CacheRow struct {
-	TrackRef       string
-	FilePath       string
-	SizeBytes      int64
-	LastAccessedAt int64
-	CreatedAt      int64
+	TrackRef       string `json:"track_ref"`
+	FilePath       string `json:"file_path"`
+	SizeBytes      int64  `json:"size_bytes"`
+	LastAccessedAt int64  `json:"last_accessed_at"`
+	CreatedAt      int64  `json:"created_at"`
 }
 
 func (s *Store) GetCacheRow(ctx context.Context, trackRef string) (CacheRow, error) {

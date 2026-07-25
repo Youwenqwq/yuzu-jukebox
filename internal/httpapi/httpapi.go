@@ -366,7 +366,11 @@ func (s *Server) listCache(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": rows})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries":   rows,
+		"downloads": s.cache.Downloads(),
+		"history":   s.cache.History(),
+	})
 }
 
 func (s *Server) evictCache(w http.ResponseWriter, r *http.Request) {

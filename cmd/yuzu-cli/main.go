@@ -179,6 +179,19 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 			return withCtx(func(ctx context.Context) error { return cmdUpload(ctx, args[0]) })
 		},
 	},
+	"cache": {
+		usage: "cache",
+		desc:  "查看媒体缓存：已缓存条目、进行中的下载、最近下载历史（管理员）",
+		detail: `显示三段缓存状态：
+  entries   已落盘的缓存文件（DB 索引）
+  downloads 正在进行中的下载（含进度）
+  history   最近完成的下载记录（成功/失败及原因，最新在前）
+
+需要 media_admin 角色。`,
+		run: func(args []string) error {
+			return withCtx(cmdCache)
+		},
+	},
 	"credential": {
 		usage: "credential <provider> <payload>",
 		desc:  "热更新 provider 凭据（管理员）",
@@ -501,6 +514,47 @@ func cmdCredential(ctx context.Context, providerID, payload string) error {
 		return err
 	}
 	return client.RESTSetCredential(ctx, *server, token, providerID, payload)
+}
+
+func cmdCache(ctx context.Context) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	view, err := client.RESTCacheView(ctx, *server, token)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("== downloading (%d) ==\n", len(view.Downloads))
+	for _, d := range view.Downloads {
+		fmt.Printf("  %-28s %s / %s\n", d.TrackRef, humanBytes(d.Fetched), humanBytes(d.Total))
+	}
+	fmt.Printf("== cached (%d) ==\n", len(view.Entries))
+	for _, e := range view.Entries {
+		fmt.Printf("  %-28s %s\n", e.TrackRef, humanBytes(e.SizeBytes))
+	}
+	fmt.Printf("== history (%d) ==\n", len(view.History))
+	for _, h := range view.History {
+		line := fmt.Sprintf("  %-28s %-8s %s", h.TrackRef, h.Status, humanBytes(h.Fetched))
+		if h.Error != "" {
+			line += "  err: " + h.Error
+		}
+		fmt.Println(line)
+	}
+	return nil
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n < 0:
+		return "?"
+	case n < 1 << 10:
+		return fmt.Sprintf("%dB", n)
+	case n < 1 << 20:
+		return fmt.Sprintf("%.1fKiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%.1fMiB", float64(n)/(1<<20))
+	}
 }
 
 // cmdQRLogin 二维码登录：渲染二维码并轮询，凭据由服务端在扫码成功后自动生效。

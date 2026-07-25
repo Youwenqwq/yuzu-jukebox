@@ -228,7 +228,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 生成二维码登录会话，返回 `{key, qr_content}`（客户端自行渲染二维码） |
 | `GET /api/v1/providers/{id}/qrlogin/{key}` | `media_admin` | 轮询扫码状态：waiting / scanned / ok / expired；ok 时服务端已自行提取 MUSIC_U、校验并热生效（cookie 不经过客户端） |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |
-| `GET /api/v1/media/cache` / `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 缓存查看/手动清理 |
+| `GET /api/v1/media/cache` | `media_admin` | 缓存全貌：`entries`（已缓存）、`downloads`（进行中，含进度）、`history`（最近 20 条成功/失败记录，内存态） |
+| `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 手动清理单条缓存 |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |
 
 ## 7. 错误码

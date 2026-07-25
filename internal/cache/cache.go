@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -30,13 +31,30 @@ type Cache struct {
 
 	mu       sync.Mutex
 	inflight map[provider.TrackRef]*download
+	history  []DownloadStatus // 最近完成的下载（最新在前，环形上限 historyCap）
 }
 
 // download 表示一次进行中的拉取；跟随者等待完成后读缓存文件。
 type download struct {
-	done chan struct{}
-	err  error
+	done      chan struct{}
+	err       error
+	startedAt time.Time
+	total     int64 // 上游 Content-Length；-1 = 未知
+	fetched   atomic.Int64
 }
+
+// DownloadStatus 是一次下载的可观测快照（进行中或历史）。
+type DownloadStatus struct {
+	TrackRef   string `json:"track_ref"`
+	Fetched    int64  `json:"fetched_bytes"`
+	Total      int64  `json:"total_bytes"` // -1 = 未知
+	StartedAt  int64  `json:"started_at"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	Status     string `json:"status"` // downloading | ok | failed
+	Error      string `json:"error,omitempty"`
+}
+
+const historyCap = 20
 
 func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *Cache {
 	// 清理上次进程退出时遗留的临时下载文件
@@ -54,6 +72,54 @@ func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *C
 		client:   &http.Client{Timeout: 0}, // 流式拉取，不设总超时；由 ctx 控制
 		inflight: map[provider.TrackRef]*download{},
 	}
+}
+
+// Downloads 返回进行中的下载快照。
+func (c *Cache) Downloads() []DownloadStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := []DownloadStatus{}
+	for ref, dl := range c.inflight {
+		out = append(out, DownloadStatus{
+			TrackRef:  ref.String(),
+			Fetched:   dl.fetched.Load(),
+			Total:     dl.total,
+			StartedAt: dl.startedAt.UnixMilli(),
+			Status:    "downloading",
+		})
+	}
+	return out
+}
+
+// History 返回最近完成的下载记录（最新在前）。
+func (c *Cache) History() []DownloadStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]DownloadStatus, len(c.history))
+	copy(out, c.history)
+	return out
+}
+
+// recordHistory 登记一条完成的下载记录。
+func (c *Cache) recordHistory(ref provider.TrackRef, dl *download, err error) {
+	rec := DownloadStatus{
+		TrackRef:   ref.String(),
+		Fetched:    dl.fetched.Load(),
+		Total:      dl.total,
+		StartedAt:  dl.startedAt.UnixMilli(),
+		FinishedAt: time.Now().UnixMilli(),
+		Status:     "ok",
+	}
+	if err != nil {
+		rec.Status = "failed"
+		rec.Error = err.Error()
+	}
+	c.mu.Lock()
+	c.history = append([]DownloadStatus{rec}, c.history...)
+	if len(c.history) > historyCap {
+		c.history = c.history[:historyCap]
+	}
+	c.mu.Unlock()
 }
 
 // Lookup 返回已缓存文件路径；未命中返回空串。
@@ -168,7 +234,7 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 			return nil, false, ctx.Err()
 		}
 	}
-	dl := &download{done: make(chan struct{})}
+	dl := &download{done: make(chan struct{}), startedAt: time.Now(), total: -1}
 	c.inflight[ref] = dl
 	c.mu.Unlock()
 
@@ -199,6 +265,7 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 		c.finishInflight(ref, dl, fmt.Errorf("fetch %s: %w", ref, err))
 		return nil, false, err // 上游明确拒绝，重试无意义
 	}
+	dl.total = resp.ContentLength // 可能为 -1（未知）
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		resp.Body.Close()
 		upCancel()
@@ -233,6 +300,7 @@ func (c *Cache) ensure(ctx context.Context, ref provider.TrackRef) error {
 
 func (c *Cache) finishInflight(ref provider.TrackRef, dl *download, err error) {
 	dl.err = err
+	c.recordHistory(ref, dl, err)
 	c.mu.Lock()
 	delete(c.inflight, ref)
 	c.mu.Unlock()
@@ -253,7 +321,6 @@ type teeReader struct {
 	cancel context.CancelFunc // 上游请求的超时控制
 
 	mu        sync.Mutex
-	size      int64
 	done      bool // 已读完并 finalize
 	handedOff bool // 已移交后台 drain
 }
@@ -262,9 +329,7 @@ func (t *teeReader) Read(p []byte) (int, error) {
 	n, err := t.body.Read(p)
 	if n > 0 {
 		wn, werr := t.tmp.Write(p[:n])
-		t.mu.Lock()
-		t.size += int64(wn)
-		t.mu.Unlock()
+		t.dl.fetched.Add(int64(wn))
 		if werr != nil && err == nil {
 			err = werr
 		}
@@ -298,9 +363,7 @@ func (t *teeReader) Close() error {
 func (t *teeReader) drain() {
 	n, err := io.Copy(t.tmp, t.body)
 	t.body.Close()
-	t.mu.Lock()
-	t.size += n
-	t.mu.Unlock()
+	t.dl.fetched.Add(n)
 	if err != nil {
 		t.tmp.Close()
 		os.Remove(t.tmp.Name())
@@ -319,9 +382,9 @@ func (t *teeReader) finalize() {
 		return
 	}
 	t.done = true
-	size := t.size
 	t.mu.Unlock()
 	defer t.cancel()
+	size := t.dl.fetched.Load()
 
 	tmpPath := t.tmp.Name()
 	if err := t.tmp.Close(); err != nil {

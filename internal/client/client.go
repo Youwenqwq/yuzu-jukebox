@@ -398,6 +398,33 @@ func RESTUpload(ctx context.Context, server, token, filePath, title, artist stri
 	return out.Track, nil
 }
 
+// RESTCacheView 返回缓存全貌（media_admin）。
+type CacheView struct {
+	Entries []struct {
+		TrackRef  string `json:"track_ref"`
+		FilePath  string `json:"file_path"`
+		SizeBytes int64  `json:"size_bytes"`
+	} `json:"entries"`
+	Downloads []DownloadStatus `json:"downloads"`
+	History   []DownloadStatus `json:"history"`
+}
+
+type DownloadStatus struct {
+	TrackRef   string `json:"track_ref"`
+	Fetched    int64  `json:"fetched_bytes"`
+	Total      int64  `json:"total_bytes"`
+	StartedAt  int64  `json:"started_at"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+}
+
+func RESTCacheView(ctx context.Context, server, token string) (CacheView, error) {
+	var out CacheView
+	err := restCall(ctx, server, "GET", "/api/v1/media/cache", token, nil, &out)
+	return out, err
+}
+
 // RESTSetCredential 热更新 provider 凭据。
 func RESTSetCredential(ctx context.Context, server, token, providerID, payload string) error {
 	return restCall(ctx, server, "POST", "/api/v1/providers/"+providerID+"/credential",
