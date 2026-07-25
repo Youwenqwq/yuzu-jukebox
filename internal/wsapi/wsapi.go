@@ -247,15 +247,7 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.replyErr(ref, "provider_error", err.Error())
 			return
 		}
-		err = c.room.AddFor(c.Identity(), room.QueueEntry{
-			EntryID:     room.NewEntryID(),
-			TrackRef:    track.Ref.String(),
-			Title:       track.Title,
-			Artist:      track.Artist,
-			DurationMs:  track.DurationMs,
-			RequestedBy: c.identity.ID,
-			AddedAt:     time.Now().UnixMilli(),
-		})
+		err = c.room.AddFor(c.Identity(), room.EntryFromTrack(track, c.identity.ID))
 		c.replyResult(ref, err)
 
 	case "queue.remove":

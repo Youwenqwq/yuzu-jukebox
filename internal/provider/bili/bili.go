@@ -158,6 +158,8 @@ func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, 
 			Bvid       string `json:"bvid"`
 			Title      string `json:"title"`
 			Author     string `json:"author"`
+			Cover      string `json:"cover"`     // 可能是协议相对 URL（//i0.hdslb.com/...）
+			Partition  string `json:"partition"` // 视频分区，作为 Album
 			DurationMs int64  `json:"duration_ms"`
 		} `json:"results"`
 	}
@@ -170,10 +172,14 @@ func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, 
 			continue
 		}
 		out = append(out, provider.Track{
-			Ref:        provider.NewRef(p.ID(), r.Bvid),
-			Title:      r.Title,
-			Artist:     r.Author,
-			DurationMs: r.DurationMs,
+			Ref:          provider.NewRef(p.ID(), r.Bvid),
+			Title:        r.Title,
+			Artist:       r.Author,
+			Album:        r.Partition,
+			CoverURL:     normalizeCoverURL(r.Cover),
+			SourceURL:    videoURL(r.Bvid),
+			DurationMs:   r.DurationMs,
+			Contributors: uploaderContributor(r.Author),
 		})
 	}
 	return out, nil
@@ -185,9 +191,15 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 		return provider.Track{}, err
 	}
 	var resp struct {
-		Title      string `json:"title"`
-		Author     string `json:"author"`
-		DurationMs int64  `json:"duration_ms"` // 顶层：所有分 P 总时长
+		Title  string `json:"title"`
+		Author string `json:"author"`
+		Cover  string `json:"cover"` // sidecar 现有字段；完整 https URL
+		Pic    string `json:"pic"`   // 预留：上游 bilibili API 原生封面字段
+		TName  string `json:"tname"` // 预留：视频分区，作为 Album
+		Owner  struct {
+			Name string `json:"name"` // 预留：UP 主名
+		} `json:"owner"`
+		DurationMs int64 `json:"duration_ms"` // 顶层：所有分 P 总时长
 		Pages      []struct {
 			Page       int    `json:"page"`
 			Part       string `json:"part"`
@@ -204,11 +216,25 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 	if len(resp.Pages) > 0 && resp.Pages[0].DurationMs > 0 {
 		duration = resp.Pages[0].DurationMs
 	}
+	// 封面：pic（上游原生）优先，回退 sidecar 现有的 cover。
+	cover := resp.Pic
+	if cover == "" {
+		cover = resp.Cover
+	}
+	// Contributors：owner.name 缺省时回退 author（同为 UP 主名）。
+	uploader := resp.Owner.Name
+	if uploader == "" {
+		uploader = resp.Author
+	}
 	return provider.Track{
-		Ref:        ref,
-		Title:      resp.Title,
-		Artist:     resp.Author,
-		DurationMs: duration,
+		Ref:          ref,
+		Title:        resp.Title,
+		Artist:       resp.Author,
+		Album:        resp.TName,
+		CoverURL:     normalizeCoverURL(cover),
+		SourceURL:    videoURL(id),
+		DurationMs:   duration,
+		Contributors: uploaderContributor(uploader),
 	}, nil
 }
 
@@ -221,6 +247,9 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 		URL         string `json:"url"`
 		ContentType string `json:"content_type"`
 		DurationMs  int64  `json:"duration_ms"`
+		// 预留：sidecar 暂不返回 size/bandwidth，为 0 = 未知（合法）。
+		SizeBytes int64 `json:"size"`
+		Bandwidth int   `json:"bandwidth"` // bps
 	}
 	if err := p.get(ctx, "/audio-url", url.Values{"bvid": {id}}, p.cookie.Load().(string), &resp); err != nil {
 		return provider.StreamLocator{}, err
@@ -229,12 +258,39 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 		return provider.StreamLocator{}, fmt.Errorf("no playable url for %s (可能需要登录或视频不可用)", ref)
 	}
 	return provider.StreamLocator{
-		URL:        resp.URL,
-		Header:     streamHeaders,
-		Format:     "m4a", // content_type 恒为 audio/mp4
-		DurationMs: resp.DurationMs,
-		ExpiresAt:  time.Now().Add(streamURLTTL),
+		URL:         resp.URL,
+		Header:      streamHeaders,
+		Format:      "m4a", // content_type 恒为 audio/mp4
+		DurationMs:  resp.DurationMs,
+		SizeBytes:   resp.SizeBytes,
+		BitrateKbps: resp.Bandwidth / 1000, // bandwidth 单位 bps；0 = 未知
+		ExpiresAt:   time.Now().Add(streamURLTTL),
 	}, nil
+}
+
+// CoverHeaders 实现 provider.CoverAware：B 站图床（hdslb.com）无 Referer 会 403，
+// 与拉流复用同一组头。
+func (p *Provider) CoverHeaders() http.Header { return streamHeaders }
+
+// videoURL 返回视频页地址（Track.SourceURL）。
+func videoURL(bvid string) string {
+	return "https://www.bilibili.com/video/" + bvid
+}
+
+// normalizeCoverURL 把协议相对 URL（//i0.hdslb.com/...）补全为 https。
+func normalizeCoverURL(u string) string {
+	if strings.HasPrefix(u, "//") {
+		return "https:" + u
+	}
+	return u
+}
+
+// uploaderContributor 组装 UP 主贡献者；名字为空时返回 nil（字段留空合法）。
+func uploaderContributor(name string) []provider.Contributor {
+	if name == "" {
+		return nil
+	}
+	return []provider.Contributor{{Role: "uploader", Name: name}}
 }
 
 // ---------- 内部 ----------

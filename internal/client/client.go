@@ -284,9 +284,14 @@ type QueueEntry struct {
 	Title       string `json:"title"`
 	Artist      string `json:"artist"`
 	DurationMs  int64  `json:"duration_ms"`
+	Album       string `json:"album,omitempty"`
+	CoverURL    string `json:"cover_url,omitempty"`
+	SourceURL   string `json:"source_url,omitempty"`
 	RequestedBy string `json:"requested_by"`
 	AddedAt     int64  `json:"added_at"`
 	StreamURL   string `json:"stream_url,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	BitrateKbps int    `json:"bitrate_kbps,omitempty"`
 }
 
 type Playback struct {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log"
 	"time"
@@ -30,15 +31,34 @@ type ClientConn interface {
 }
 
 // QueueEntry 队列条目。StreamURL 仅在下发给具体客户端时填充（按身份签发票据）。
+// Album/CoverURL/SourceURL/Contributors 为曲目层富字段（入队时快照）；
+// CoverURL 存源站原始地址，广播时改写为服务端代理路径。
+// SizeBytes/BitrateKbps 仅当前播放条目在广播时填充（物理层，来自缓存索引）。
 type QueueEntry struct {
-	EntryID     string `json:"entry_id"`
-	TrackRef    string `json:"track_ref"`
-	Title       string `json:"title"`
-	Artist      string `json:"artist"`
-	DurationMs  int64  `json:"duration_ms"`
-	RequestedBy string `json:"requested_by"`
-	AddedAt     int64  `json:"added_at"`
-	StreamURL   string `json:"stream_url,omitempty"`
+	EntryID      string                 `json:"entry_id"`
+	TrackRef     string                 `json:"track_ref"`
+	Title        string                 `json:"title"`
+	Artist       string                 `json:"artist"`
+	DurationMs   int64                  `json:"duration_ms"`
+	Album        string                 `json:"album,omitempty"`
+	CoverURL     string                 `json:"cover_url,omitempty"`
+	SourceURL    string                 `json:"source_url,omitempty"`
+	Contributors []provider.Contributor `json:"contributors,omitempty"`
+	RequestedBy  string                 `json:"requested_by"`
+	AddedAt      int64                  `json:"added_at"`
+	StreamURL    string                 `json:"stream_url,omitempty"`
+	SizeBytes    int64                  `json:"size_bytes,omitempty"`
+	BitrateKbps  int                    `json:"bitrate_kbps,omitempty"`
+}
+
+// EntryFromTrack 以入队快照语义从 Track 构造队列条目。
+func EntryFromTrack(t provider.Track, requestedBy string) QueueEntry {
+	return QueueEntry{
+		EntryID: NewEntryID(), TrackRef: t.Ref.String(), Title: t.Title,
+		Artist: t.Artist, DurationMs: t.DurationMs, Album: t.Album,
+		CoverURL: t.CoverURL, SourceURL: t.SourceURL, Contributors: t.Contributors,
+		RequestedBy: requestedBy, AddedAt: time.Now().UnixMilli(),
+	}
 }
 
 // Playback 播放状态五元组（权威）。
@@ -230,10 +250,13 @@ func (r *Room) Run(ctx context.Context) {
 	persistQueue := func() {
 		rows := make([]store.QueueRow, len(queue))
 		for i, e := range queue {
+			contrib, _ := json.Marshal(e.Contributors)
 			rows[i] = store.QueueRow{
 				EntryID: e.EntryID, TrackRef: e.TrackRef, Title: e.Title,
 				Artist: e.Artist, DurationMs: e.DurationMs,
-				RequestedBy: e.RequestedBy, AddedAt: e.AddedAt,
+				Album: e.Album, CoverURL: e.CoverURL, SourceURL: e.SourceURL,
+				ContributorsJSON: string(contrib),
+				RequestedBy:      e.RequestedBy, AddedAt: e.AddedAt,
 			}
 		}
 		// DB 写入很快，actor 内同步执行换取简单的一致性
@@ -255,13 +278,24 @@ func (r *Room) Run(ctx context.Context) {
 		if pb.Current != nil {
 			cur := *pb.Current
 			cur.StreamURL = r.streamURL(c.Identity(), cur.TrackRef)
+			if cur.CoverURL != "" {
+				cur.CoverURL = "/api/v1/cover/" + cur.TrackRef
+			}
 			pb.Current = &cur
 		}
 		return map[string]any{"type": "playback.changed", "data": pb}
 	}
 
 	queueMsg := func() any {
-		return map[string]any{"type": "queue.changed", "data": map[string]any{"queue": queue}}
+		// 封面改写为服务端代理路径（广播一次组装，浅拷贝条目）
+		q := make([]QueueEntry, len(queue))
+		for i, e := range queue {
+			if e.CoverURL != "" {
+				e.CoverURL = "/api/v1/cover/" + e.TrackRef
+			}
+			q[i] = e
+		}
+		return map[string]any{"type": "queue.changed", "data": map[string]any{"queue": q}}
 	}
 
 	listenersMsg := func() any {
@@ -317,15 +351,7 @@ func (r *Room) Run(ctx context.Context) {
 			return
 		}
 		for _, t := range tracks {
-			queue = append(queue, QueueEntry{
-				EntryID:     NewEntryID(),
-				TrackRef:    t.Ref.String(),
-				Title:       t.Title,
-				Artist:      t.Artist,
-				DurationMs:  t.DurationMs,
-				RequestedBy: "radio",
-				AddedAt:     nowMs(),
-			})
+			queue = append(queue, EntryFromTrack(t, "radio"))
 		}
 		if len(tracks) > 0 {
 			persistQueue()
@@ -398,6 +424,12 @@ func (r *Room) Run(ctx context.Context) {
 			}
 			playback = &Playback{
 				Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
+			}
+			// 物理层质量信息：已缓存则立即可知（Resolve 已发生）
+			if row, err := r.st.GetCacheRow(ctx, next.TrackRef); err == nil {
+				next.SizeBytes = row.SizeBytes
+				next.BitrateKbps = row.BitrateKbps
+				playback.Current = &next
 			}
 			break
 		}
@@ -619,10 +651,16 @@ func (r *Room) loadQueue() []QueueEntry {
 	}
 	out := make([]QueueEntry, len(rows))
 	for i, row := range rows {
+		var contributors []provider.Contributor
+		if row.ContributorsJSON != "" {
+			json.Unmarshal([]byte(row.ContributorsJSON), &contributors)
+		}
 		out[i] = QueueEntry{
 			EntryID: row.EntryID, TrackRef: row.TrackRef, Title: row.Title,
 			Artist: row.Artist, DurationMs: row.DurationMs,
-			RequestedBy: row.RequestedBy, AddedAt: row.AddedAt,
+			Album: row.Album, CoverURL: row.CoverURL, SourceURL: row.SourceURL,
+			Contributors: contributors,
+			RequestedBy:  row.RequestedBy, AddedAt: row.AddedAt,
 		}
 	}
 	return out

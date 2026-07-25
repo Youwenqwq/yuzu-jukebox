@@ -70,6 +70,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/playlists/{id}/items/{ord}", s.deletePlaylistItem)
 	mux.HandleFunc("POST /api/v1/playlists/import", s.importPlaylist)
 	mux.HandleFunc("GET /stream/v1/{ref}", s.stream)
+	mux.HandleFunc("GET /api/v1/cover/{ref}", s.cover)
+	mux.HandleFunc("GET /api/v1/lyrics", s.lyrics)
 	mux.Handle("/ws/v1", s.ws)
 	return mux
 }
@@ -558,7 +560,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		durationMs, _ = strconv.ParseInt(v, 10, 64)
 	}
 	track, err := s.local.Add(r.Context(), header.Filename, file,
-		r.FormValue("title"), r.FormValue("artist"), id.ID, durationMs)
+		r.FormValue("title"), r.FormValue("artist"), id.Name, durationMs)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return

@@ -132,6 +132,10 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
   "current": {
     "entry_id": "e_991", "track_ref": "ncm:347230",
     "title": "海阔天空", "artist": "Beyond", "duration_ms": 326000,
+    "album": "乐与怒", "cover_url": "/api/v1/cover/ncm:347230",
+    "source_url": "https://music.163.com/song?id=347230",
+    "contributors": [{"role": "artist", "name": "Beyond"}],
+    "size_bytes": 8172890, "bitrate_kbps": 320,
     "requested_by": "g_8f3k2", "added_at": 1720000000000,
     "stream_url": "/stream/v1/ncm:347230?ticket=tk_abc"
   },
@@ -145,7 +149,13 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
 - 空闲时 `current` 为 `null`、`playing` 为 `false`。
 - `stream_url` 仅出现在 `current` 上，且**按接收身份签发**（见 4.4），不同听众收到的票据不同。
 
-**`queue.changed` 的 data：**`{"queue": [ <队列条目>, ... ]}`——条目字段同 `current`（但无 `stream_url`）。
+**`queue.changed` 的 data：**`{"queue": [ <队列条目>, ... ]}`——条目字段同 `current`（但无 `stream_url`/`size_bytes`/`bitrate_kbps`）。
+
+**曲目元数据层次**（客户端只需面对这一个形状，字段可空即降级）：
+
+- 曲目层（入队快照，队列与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
+- 物理层（仅 `playback.current`，Resolve/缓存后可得）：`size_bytes/bitrate_kbps`。
+- provider 能力缺席合法：bili 无歌词、local 无 source_url，字段缺省即降级。
 
 **`listeners.changed` 的 data：**`{"listeners": [ {"id": "...", "name": "..."}, ... ]}`
 
@@ -297,6 +307,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `DELETE /api/v1/auth/session` | 已认证 | 吊销当前会话（logout） |
 | `GET /api/v1/rooms/{id}/history?offset=&limit=` | 已认证 | 播放历史，最新在前（默认 50，上限 200） |
 | `GET /api/v1/rooms/{id}/stats?limit=` | 已认证 | 曲目热度榜：播放次数、首播/最近播放时间（默认 20，上限 100） |
+| `GET /api/v1/cover/{track_ref}` | 已认证 | 统一封面代理（local 内嵌封面 / 源站带 Referer 转发），Cache-Control 1 天 |
+| `GET /api/v1/lyrics?track_ref=` | 已认证 | 歌词（`{type:"lrc", lrc, tlrc?}`）；provider 无此能力返回 501 |
 | `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | 热更新 Provider 凭据（如 ncm 的 MUSIC_U cookie）；服务端先校验再生效，凭据存 credentials 表，永不下发 |

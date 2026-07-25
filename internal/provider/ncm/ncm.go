@@ -192,6 +192,7 @@ func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, 
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
+				Al       ncmAl  `json:"al"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -204,10 +205,14 @@ func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, 
 	out := make([]provider.Track, 0, len(resp.Result.Songs))
 	for _, s := range resp.Result.Songs {
 		out = append(out, provider.Track{
-			Ref:        provider.NewRef(p.ID(), strconv.FormatInt(s.ID, 10)),
-			Title:      s.Name,
-			Artist:     joinArtists(namesOf(s.Artists)),
-			DurationMs: s.Duration,
+			Ref:          provider.NewRef(p.ID(), strconv.FormatInt(s.ID, 10)),
+			Title:        s.Name,
+			Artist:       joinArtists(namesOf(s.Artists)),
+			DurationMs:   s.Duration,
+			Album:        s.Al.Name,
+			CoverURL:     s.Al.PicURL,
+			SourceURL:    sourceURL(s.ID),
+			Contributors: artistContributors(s.Artists),
 		})
 	}
 	return out, nil
@@ -225,7 +230,11 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 			ID   int64  `json:"id"`
 			Name string `json:"name"`
 			Dt   int64  `json:"dt"`
-			Ar   []struct {
+			Al   struct {
+				Name   string `json:"name"`
+				PicURL string `json:"picUrl"`
+			} `json:"al"`
+			Ar []struct {
 				Name string `json:"name"`
 			} `json:"ar"`
 		} `json:"songs"`
@@ -238,10 +247,14 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 	}
 	s := resp.Songs[0]
 	return provider.Track{
-		Ref:        ref,
-		Title:      s.Name,
-		Artist:     joinArtists(namesOf(s.Ar)),
-		DurationMs: s.Dt,
+		Ref:          ref,
+		Title:        s.Name,
+		Artist:       joinArtists(namesOf(s.Ar)),
+		DurationMs:   s.Dt,
+		Album:        s.Al.Name,
+		CoverURL:     s.Al.PicURL,
+		SourceURL:    sourceURL(s.ID),
+		Contributors: artistContributors(s.Ar),
 	}, nil
 }
 
@@ -270,8 +283,10 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 	}
 	d := resp.Data[0]
 	loc := provider.StreamLocator{
-		URL:    d.URL,
-		Format: strings.ToLower(d.Type),
+		URL:         d.URL,
+		Format:      strings.ToLower(d.Type),
+		SizeBytes:   d.Size,
+		BitrateKbps: int(d.Br / 1000), // br 单位 bps
 	}
 	if d.Expi > 0 {
 		loc.ExpiresAt = time.Now().Add(time.Duration(d.Expi) * time.Second)
@@ -313,3 +328,50 @@ func namesOf(as []struct {
 }
 
 func joinArtists(names []string) string { return strings.Join(names, "/") }
+
+// ---------- 富元数据辅助 ----------
+
+// ncmAl 专辑信息（各曲目接口共用的 al 对象）。
+type ncmAl struct {
+	Name   string `json:"name"`
+	PicURL string `json:"picUrl"`
+}
+
+func sourceURL(id int64) string {
+	return "https://music.163.com/song?id=" + strconv.FormatInt(id, 10)
+}
+
+func artistContributors(as []struct {
+	Name string `json:"name"`
+}) []provider.Contributor {
+	names := namesOf(as)
+	out := make([]provider.Contributor, 0, len(names))
+	for _, n := range names {
+		out = append(out, provider.Contributor{Role: "artist", Name: n})
+	}
+	return out
+}
+
+// Lyrics 实现 provider.LyricsProvider：/lyric → lrc 原文 + 翻译。
+func (p *Provider) Lyrics(ctx context.Context, ref provider.TrackRef) (provider.Lyrics, error) {
+	_, id, err := ref.Split()
+	if err != nil {
+		return provider.Lyrics{}, err
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Lrc  struct {
+			Lyric string `json:"lyric"`
+		} `json:"lrc"`
+		Tlyric struct {
+			Lyric string `json:"lyric"`
+		} `json:"tlyric"`
+	}
+	if err := p.get(ctx, "/lyric", url.Values{"id": {id}}, p.cookie.Load().(string), &resp); err != nil {
+		return provider.Lyrics{}, err
+	}
+	if resp.Lrc.Lyric == "" {
+		return provider.Lyrics{}, fmt.Errorf("no lyrics for %s", ref)
+	}
+	return provider.Lyrics{Type: "lrc", LRC: resp.Lrc.Lyric, TLRC: resp.Tlyric.Lyric}, nil
+}

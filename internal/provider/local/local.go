@@ -58,9 +58,12 @@ func (p *Provider) Add(ctx context.Context, filename string, r io.Reader, title,
 		title = strings.TrimSuffix(filename, ext)
 	}
 
+	album, bitrateKbps, coverPath := p.probeMeta(dst, id)
+
 	m := store.MediaFile{
 		ID: id, Filename: id + ext, Title: title, Artist: artist,
 		DurationMs: durationMs, SizeBytes: size, UploadedBy: uploadedBy,
+		Album: album, CoverPath: coverPath, BitrateKbps: bitrateKbps,
 		CreatedAt: time.Now().UnixMilli(),
 	}
 	if err := p.st.AddMediaFile(ctx, m); err != nil {
@@ -101,9 +104,11 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 		return provider.StreamLocator{}, fmt.Errorf("media file missing: %w", err)
 	}
 	return provider.StreamLocator{
-		URL:        "file://" + path,
-		Format:     strings.TrimPrefix(strings.ToLower(filepath.Ext(m.Filename)), "."),
-		DurationMs: m.DurationMs,
+		URL:         "file://" + path,
+		Format:      strings.TrimPrefix(strings.ToLower(filepath.Ext(m.Filename)), "."),
+		DurationMs:  m.DurationMs,
+		SizeBytes:   m.SizeBytes,
+		BitrateKbps: m.BitrateKbps,
 	}, nil
 }
 
@@ -120,12 +125,21 @@ func (p *Provider) mediaOf(ctx context.Context, ref provider.TrackRef) (store.Me
 }
 
 func (p *Provider) trackOf(m store.MediaFile) provider.Track {
-	return provider.Track{
+	t := provider.Track{
 		Ref:        provider.NewRef(p.ID(), m.ID),
 		Title:      m.Title,
 		Artist:     m.Artist,
 		DurationMs: m.DurationMs,
+		Album:      m.Album,
 	}
+	if m.CoverPath != "" {
+		// 原始值即磁盘上的封面文件路径；assembly 层重写为 /api/v1/cover/{ref}。
+		t.CoverURL = m.CoverPath
+	}
+	if m.UploadedBy != "" {
+		t.Contributors = []provider.Contributor{{Role: "uploader", Name: m.UploadedBy}}
+	}
+	return t
 }
 
 func newID() string {

@@ -118,13 +118,17 @@ func (s *Store) ListRooms(ctx context.Context) ([]Room, error) {
 // ---------- 队列持久化 ----------
 
 type QueueRow struct {
-	EntryID     string
-	TrackRef    string
-	Title       string
-	Artist      string
-	DurationMs  int64
-	RequestedBy string
-	AddedAt     int64
+	EntryID          string
+	TrackRef         string
+	Title            string
+	Artist           string
+	DurationMs       int64
+	Album            string
+	CoverURL         string
+	SourceURL        string
+	ContributorsJSON string
+	RequestedBy      string
+	AddedAt          int64
 }
 
 // ReplaceQueue 全量重写某房间的队列（队列规模小，重写最不易错）。
@@ -139,9 +143,11 @@ func (s *Store) ReplaceQueue(ctx context.Context, roomID string, rows []QueueRow
 	}
 	for i, r := range rows {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO room_queue (room_id, ord, entry_id, track_ref, title, artist, duration_ms, requested_by, added_at)
-			 VALUES (?,?,?,?,?,?,?,?,?)`,
-			roomID, i, r.EntryID, r.TrackRef, r.Title, r.Artist, r.DurationMs, r.RequestedBy, r.AddedAt); err != nil {
+			`INSERT INTO room_queue (room_id, ord, entry_id, track_ref, title, artist, duration_ms,
+			 album, cover_url, source_url, contributors_json, requested_by, added_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			roomID, i, r.EntryID, r.TrackRef, r.Title, r.Artist, r.DurationMs,
+			r.Album, r.CoverURL, r.SourceURL, r.ContributorsJSON, r.RequestedBy, r.AddedAt); err != nil {
 			return err
 		}
 	}
@@ -150,7 +156,7 @@ func (s *Store) ReplaceQueue(ctx context.Context, roomID string, rows []QueueRow
 
 func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT entry_id, track_ref, title, artist, duration_ms, requested_by, added_at
+		`SELECT entry_id, track_ref, title, artist, duration_ms, album, cover_url, source_url, contributors_json, requested_by, added_at
 		 FROM room_queue WHERE room_id = ? ORDER BY ord`, roomID)
 	if err != nil {
 		return nil, err
@@ -159,7 +165,8 @@ func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, error
 	var out []QueueRow
 	for rows.Next() {
 		var r QueueRow
-		if err := rows.Scan(&r.EntryID, &r.TrackRef, &r.Title, &r.Artist, &r.DurationMs, &r.RequestedBy, &r.AddedAt); err != nil {
+		if err := rows.Scan(&r.EntryID, &r.TrackRef, &r.Title, &r.Artist, &r.DurationMs,
+			&r.Album, &r.CoverURL, &r.SourceURL, &r.ContributorsJSON, &r.RequestedBy, &r.AddedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -320,36 +327,41 @@ func (s *Store) Audit(ctx context.Context, actorID, action, target, detailJSON s
 // ---------- 媒体文件（local provider） ----------
 
 type MediaFile struct {
-	ID         string
-	Filename   string
-	Title      string
-	Artist     string
-	DurationMs int64
-	SizeBytes  int64
-	UploadedBy string
-	CreatedAt  int64
+	ID          string
+	Filename    string
+	Title       string
+	Artist      string
+	DurationMs  int64
+	SizeBytes   int64
+	UploadedBy  string
+	Album       string
+	CoverPath   string
+	BitrateKbps int
+	CreatedAt   int64
 }
 
 func (s *Store) AddMediaFile(ctx context.Context, m MediaFile) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO media_files (id, filename, title, artist, duration_ms, size_bytes, uploaded_by, created_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		m.ID, m.Filename, m.Title, m.Artist, m.DurationMs, m.SizeBytes, m.UploadedBy, m.CreatedAt)
+		`INSERT INTO media_files (id, filename, title, artist, duration_ms, size_bytes, uploaded_by, album, cover_path, bitrate_kbps, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		m.ID, m.Filename, m.Title, m.Artist, m.DurationMs, m.SizeBytes, m.UploadedBy,
+		m.Album, m.CoverPath, m.BitrateKbps, m.CreatedAt)
 	return err
 }
 
 func (s *Store) GetMediaFile(ctx context.Context, id string) (MediaFile, error) {
 	var m MediaFile
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, filename, title, artist, duration_ms, size_bytes, uploaded_by, created_at
+		`SELECT id, filename, title, artist, duration_ms, size_bytes, uploaded_by, album, cover_path, bitrate_kbps, created_at
 		 FROM media_files WHERE id = ?`, id).
-		Scan(&m.ID, &m.Filename, &m.Title, &m.Artist, &m.DurationMs, &m.SizeBytes, &m.UploadedBy, &m.CreatedAt)
+		Scan(&m.ID, &m.Filename, &m.Title, &m.Artist, &m.DurationMs, &m.SizeBytes, &m.UploadedBy,
+			&m.Album, &m.CoverPath, &m.BitrateKbps, &m.CreatedAt)
 	return m, err
 }
 
 func (s *Store) SearchMediaFiles(ctx context.Context, query string, limit int) ([]MediaFile, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, filename, title, artist, duration_ms, size_bytes, uploaded_by, created_at
+		`SELECT id, filename, title, artist, duration_ms, size_bytes, uploaded_by, album, cover_path, bitrate_kbps, created_at
 		 FROM media_files WHERE title LIKE ? OR artist LIKE ? ORDER BY created_at DESC LIMIT ?`,
 		"%"+query+"%", "%"+query+"%", limit)
 	if err != nil {
@@ -359,7 +371,8 @@ func (s *Store) SearchMediaFiles(ctx context.Context, query string, limit int) (
 	var out []MediaFile
 	for rows.Next() {
 		var m MediaFile
-		if err := rows.Scan(&m.ID, &m.Filename, &m.Title, &m.Artist, &m.DurationMs, &m.SizeBytes, &m.UploadedBy, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Filename, &m.Title, &m.Artist, &m.DurationMs, &m.SizeBytes, &m.UploadedBy,
+			&m.Album, &m.CoverPath, &m.BitrateKbps, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -373,6 +386,7 @@ type CacheRow struct {
 	TrackRef       string `json:"track_ref"`
 	FilePath       string `json:"file_path"`
 	SizeBytes      int64  `json:"size_bytes"`
+	BitrateKbps    int    `json:"bitrate_kbps"`
 	LastAccessedAt int64  `json:"last_accessed_at"`
 	CreatedAt      int64  `json:"created_at"`
 }
@@ -380,18 +394,19 @@ type CacheRow struct {
 func (s *Store) GetCacheRow(ctx context.Context, trackRef string) (CacheRow, error) {
 	var c CacheRow
 	err := s.db.QueryRowContext(ctx,
-		`SELECT track_ref, file_path, size_bytes, last_accessed_at, created_at FROM media_cache WHERE track_ref = ?`,
-		trackRef).Scan(&c.TrackRef, &c.FilePath, &c.SizeBytes, &c.LastAccessedAt, &c.CreatedAt)
+		`SELECT track_ref, file_path, size_bytes, bitrate_kbps, last_accessed_at, created_at FROM media_cache WHERE track_ref = ?`,
+		trackRef).Scan(&c.TrackRef, &c.FilePath, &c.SizeBytes, &c.BitrateKbps, &c.LastAccessedAt, &c.CreatedAt)
 	return c, err
 }
 
 func (s *Store) PutCacheRow(ctx context.Context, c CacheRow) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO media_cache (track_ref, file_path, size_bytes, last_accessed_at, created_at)
-		 VALUES (?,?,?,?,?)
+		`INSERT INTO media_cache (track_ref, file_path, size_bytes, bitrate_kbps, last_accessed_at, created_at)
+		 VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(track_ref) DO UPDATE SET file_path=excluded.file_path, size_bytes=excluded.size_bytes,
+		 bitrate_kbps=excluded.bitrate_kbps,
 		 last_accessed_at=excluded.last_accessed_at`,
-		c.TrackRef, c.FilePath, c.SizeBytes, c.LastAccessedAt, c.CreatedAt)
+		c.TrackRef, c.FilePath, c.SizeBytes, c.BitrateKbps, c.LastAccessedAt, c.CreatedAt)
 	return err
 }
 
@@ -419,12 +434,16 @@ type Playlist struct {
 }
 
 type PlaylistItem struct {
-	Ord        int    `json:"ord"`
-	TrackRef   string `json:"track_ref"`
-	Title      string `json:"title"`
-	Artist     string `json:"artist"`
-	DurationMs int64  `json:"duration_ms"`
-	AddedAt    int64  `json:"added_at"`
+	Ord              int    `json:"ord"`
+	TrackRef         string `json:"track_ref"`
+	Title            string `json:"title"`
+	Artist           string `json:"artist"`
+	DurationMs       int64  `json:"duration_ms"`
+	Album            string `json:"album,omitempty"`
+	CoverURL         string `json:"cover_url,omitempty"`
+	SourceURL        string `json:"source_url,omitempty"`
+	ContributorsJSON string `json:"contributors_json,omitempty"`
+	AddedAt          int64  `json:"added_at"`
 }
 
 func (s *Store) CreatePlaylist(ctx context.Context, p Playlist) error {
@@ -485,9 +504,11 @@ func (s *Store) AppendPlaylistItems(ctx context.Context, playlistID string, item
 	ord := maxOrd.Int64 + 1
 	for _, it := range items {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO playlist_items (playlist_id, ord, track_ref, title, artist, duration_ms, added_at)
-			 VALUES (?,?,?,?,?,?,?)`,
-			playlistID, ord, it.TrackRef, it.Title, it.Artist, it.DurationMs, it.AddedAt); err != nil {
+			`INSERT INTO playlist_items (playlist_id, ord, track_ref, title, artist, duration_ms,
+			 album, cover_url, source_url, contributors_json, added_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			playlistID, ord, it.TrackRef, it.Title, it.Artist, it.DurationMs,
+			it.Album, it.CoverURL, it.SourceURL, it.ContributorsJSON, it.AddedAt); err != nil {
 			return err
 		}
 		ord++
@@ -502,7 +523,7 @@ func (s *Store) AppendPlaylistItems(ctx context.Context, playlistID string, item
 // PlaylistItems 分页读取（按 ord 升序）。
 func (s *Store) PlaylistItems(ctx context.Context, playlistID string, offset, limit int) ([]PlaylistItem, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT ord, track_ref, title, artist, duration_ms, added_at
+		`SELECT ord, track_ref, title, artist, duration_ms, album, cover_url, source_url, contributors_json, added_at
 		 FROM playlist_items WHERE playlist_id = ? ORDER BY ord LIMIT ? OFFSET ?`,
 		playlistID, limit, offset)
 	if err != nil {
@@ -512,7 +533,8 @@ func (s *Store) PlaylistItems(ctx context.Context, playlistID string, offset, li
 	var out []PlaylistItem
 	for rows.Next() {
 		var it PlaylistItem
-		if err := rows.Scan(&it.Ord, &it.TrackRef, &it.Title, &it.Artist, &it.DurationMs, &it.AddedAt); err != nil {
+		if err := rows.Scan(&it.Ord, &it.TrackRef, &it.Title, &it.Artist, &it.DurationMs,
+			&it.Album, &it.CoverURL, &it.SourceURL, &it.ContributorsJSON, &it.AddedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, it)
@@ -614,7 +636,7 @@ func (s *Store) GetCredentialStatus(ctx context.Context, providerID string) (str
 
 func (s *Store) ListCacheRows(ctx context.Context) ([]CacheRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT track_ref, file_path, size_bytes, last_accessed_at, created_at FROM media_cache
+		`SELECT track_ref, file_path, size_bytes, bitrate_kbps, last_accessed_at, created_at FROM media_cache
 		 ORDER BY last_accessed_at`)
 	if err != nil {
 		return nil, err
@@ -623,7 +645,7 @@ func (s *Store) ListCacheRows(ctx context.Context) ([]CacheRow, error) {
 	var out []CacheRow
 	for rows.Next() {
 		var c CacheRow
-		if err := rows.Scan(&c.TrackRef, &c.FilePath, &c.SizeBytes, &c.LastAccessedAt, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.TrackRef, &c.FilePath, &c.SizeBytes, &c.BitrateKbps, &c.LastAccessedAt, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

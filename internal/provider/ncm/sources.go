@@ -49,6 +49,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 				ID   int64  `json:"id"`
 				Name string `json:"name"`
 				Dt   int64  `json:"dt"`
+				Al   ncmAl  `json:"al"`
 				Ar   []struct {
 					Name string `json:"name"`
 				} `json:"ar"`
@@ -60,10 +61,14 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 		}
 		for _, s := range resp.Songs {
 			tracks = append(tracks, provider.Track{
-				Ref:        provider.NewRef(p.ID(), strconv.FormatInt(s.ID, 10)),
-				Title:      s.Name,
-				Artist:     joinArtists(namesOf(s.Ar)),
-				DurationMs: s.Dt,
+				Ref:          provider.NewRef(p.ID(), strconv.FormatInt(s.ID, 10)),
+				Title:        s.Name,
+				Artist:       joinArtists(namesOf(s.Ar)),
+				DurationMs:   s.Dt,
+				Album:        s.Al.Name,
+				CoverURL:     s.Al.PicURL,
+				SourceURL:    sourceURL(s.ID),
+				Contributors: artistContributors(s.Ar),
 			})
 		}
 		if len(resp.Songs) < pageSize {
@@ -142,6 +147,7 @@ func (s *dailySource) refresh(ctx context.Context) error {
 				ID   int64  `json:"id"`
 				Name string `json:"name"`
 				Dt   int64  `json:"dt"`
+				Al   ncmAl  `json:"al"`
 				Ar   []struct {
 					Name string `json:"name"`
 				} `json:"ar"`
@@ -158,10 +164,14 @@ func (s *dailySource) refresh(ctx context.Context) error {
 	s.tracks = s.tracks[:0]
 	for _, song := range resp.Data.DailySongs {
 		s.tracks = append(s.tracks, provider.Track{
-			Ref:        provider.NewRef(s.p.ID(), strconv.FormatInt(song.ID, 10)),
-			Title:      song.Name,
-			Artist:     joinArtists(namesOf(song.Ar)),
-			DurationMs: song.Dt,
+			Ref:          provider.NewRef(s.p.ID(), strconv.FormatInt(song.ID, 10)),
+			Title:        song.Name,
+			Artist:       joinArtists(namesOf(song.Ar)),
+			DurationMs:   song.Dt,
+			Album:        song.Al.Name,
+			CoverURL:     song.Al.PicURL,
+			SourceURL:    sourceURL(song.ID),
+			Contributors: artistContributors(song.Ar),
 		})
 	}
 	s.cursor = 0
@@ -191,6 +201,7 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
+				Al       ncmAl  `json:"al"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -205,6 +216,8 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 				out = append(out, provider.Track{
 					Ref: ref, Title: song.Name,
 					Artist: joinArtists(namesOf(song.Artists)), DurationMs: song.Duration,
+					Album: song.Al.Name, CoverURL: song.Al.PicURL,
+					SourceURL: sourceURL(song.ID), Contributors: artistContributors(song.Artists),
 				})
 			}
 		}
@@ -288,6 +301,7 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
+				Al       ncmAl  `json:"al"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -302,6 +316,8 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				out = append(out, provider.Track{
 					Ref: ref, Title: song.Name,
 					Artist: joinArtists(namesOf(song.Artists)), DurationMs: song.Duration,
+					Album: song.Al.Name, CoverURL: song.Al.PicURL,
+					SourceURL: sourceURL(song.ID), Contributors: artistContributors(song.Artists),
 				})
 			}
 		}
@@ -313,6 +329,7 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
+				Al       ncmAl  `json:"al"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -320,6 +337,7 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 					ID   int64  `json:"id"`
 					Name string `json:"name"`
 					Dt   int64  `json:"dt"`
+					Al   ncmAl  `json:"al"`
 					Ar   []struct {
 						Name string `json:"name"`
 					} `json:"ar"`
@@ -334,17 +352,25 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 			var t provider.Track
 			if si := item.SongInfo; si != nil && si.ID != 0 {
 				t = provider.Track{
-					Ref:        provider.NewRef(s.p.ID(), strconv.FormatInt(si.ID, 10)),
-					Title:      si.Name,
-					Artist:     joinArtists(namesOf(si.Ar)),
-					DurationMs: si.Dt,
+					Ref:          provider.NewRef(s.p.ID(), strconv.FormatInt(si.ID, 10)),
+					Title:        si.Name,
+					Artist:       joinArtists(namesOf(si.Ar)),
+					DurationMs:   si.Dt,
+					Album:        si.Al.Name,
+					CoverURL:     si.Al.PicURL,
+					SourceURL:    sourceURL(si.ID),
+					Contributors: artistContributors(si.Ar),
 				}
 			} else if item.ID != 0 {
 				t = provider.Track{
-					Ref:        provider.NewRef(s.p.ID(), strconv.FormatInt(item.ID, 10)),
-					Title:      item.Name,
-					Artist:     joinArtists(namesOf(item.Artists)),
-					DurationMs: item.Duration,
+					Ref:          provider.NewRef(s.p.ID(), strconv.FormatInt(item.ID, 10)),
+					Title:        item.Name,
+					Artist:       joinArtists(namesOf(item.Artists)),
+					DurationMs:   item.Duration,
+					Album:        item.Al.Name,
+					CoverURL:     item.Al.PicURL,
+					SourceURL:    sourceURL(item.ID),
+					Contributors: artistContributors(item.Artists),
 				}
 			} else {
 				continue // 无法解析的条目，跳过

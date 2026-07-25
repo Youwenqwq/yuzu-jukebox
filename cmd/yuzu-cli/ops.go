@@ -180,6 +180,12 @@ func cmdStatus(ctx context.Context, roomID string) error {
 		}
 		fmt.Printf("state:     %s %s — %s (%ds/%ds)\n", state, cur.Title, cur.Artist,
 			snap.Playback.ShouldBeMs(cli.ServerNow())/1000, cur.DurationMs/1000)
+		if cur.Album != "" {
+			fmt.Printf("album:     %s\n", cur.Album)
+		}
+		if cur.BitrateKbps > 0 || cur.SizeBytes > 0 {
+			fmt.Printf("quality:   %d kbps, %s\n", cur.BitrateKbps, humanBytes(cur.SizeBytes))
+		}
 	} else {
 		fmt.Println("state:     idle")
 	}

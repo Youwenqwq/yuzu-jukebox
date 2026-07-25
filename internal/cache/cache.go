@@ -405,6 +405,7 @@ func (t *teeReader) finalize() {
 	now := time.Now().UnixMilli()
 	err := t.c.st.PutCacheRow(context.Background(), store.CacheRow{
 		TrackRef: t.ref.String(), FilePath: final, SizeBytes: size,
+		BitrateKbps:    t.loc.BitrateKbps,
 		LastAccessedAt: now, CreatedAt: now,
 	})
 	t.c.finishInflight(t.ref, t.dl, err)

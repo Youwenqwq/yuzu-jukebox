@@ -10,6 +10,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -32,12 +33,43 @@ func (r TrackRef) Split() (providerID, id string, err error) {
 	return p, rest, nil
 }
 
-// Track 是媒体元数据。
+// Contributor 创作贡献者。Role 约定取值：
+// "artist"(歌手/出演) "composer"(作曲) "lyricist"(作词)
+// "uploader"(上传者/UP主)。provider 尽力而为，可为空。
+type Contributor struct {
+	Role string `json:"role"`
+	Name string `json:"name"`
+}
+
+// Track 是媒体元数据（曲目层）。Album/CoverURL/SourceURL/Contributors
+// 为可选富字段，provider 按数据源实际能力填充，客户端对空值降级。
+// CoverURL 可能是服务端代理地址（源站需 Referer 时）。
 type Track struct {
-	Ref        TrackRef `json:"track_ref"`
-	Title      string   `json:"title"`
-	Artist     string   `json:"artist"`
-	DurationMs int64    `json:"duration_ms"`
+	Ref          TrackRef      `json:"track_ref"`
+	Title        string        `json:"title"`
+	Artist       string        `json:"artist"`
+	DurationMs   int64         `json:"duration_ms"`
+	Album        string        `json:"album,omitempty"`
+	CoverURL     string        `json:"cover_url,omitempty"`
+	SourceURL    string        `json:"source_url,omitempty"`
+	Contributors []Contributor `json:"contributors,omitempty"`
+}
+
+// Lyrics 歌词。Type 目前只有 "lrc"；TLRC 为翻译（可无）。
+type Lyrics struct {
+	Type string `json:"type"`
+	LRC  string `json:"lrc"`
+	TLRC string `json:"tlrc,omitempty"`
+}
+
+// ErrNotSupported 能力缺席：provider 明确不支持某项可选能力。
+var ErrNotSupported = errors.New("capability not supported by provider")
+
+// LyricsProvider 是可选接口：能提供歌词的 Provider 实现它。
+// 不支持的 provider 直接不实现，调用方以类型断言探测。
+type LyricsProvider interface {
+	Provider
+	Lyrics(ctx context.Context, ref TrackRef) (Lyrics, error)
 }
 
 // StreamLocator 是 Resolve 的结果：拉流所需的全部信息。
@@ -49,6 +81,9 @@ type StreamLocator struct {
 	Format     string      // 如 "mp3" "flac" "m4a"，可能为空
 	DurationMs int64
 	ExpiresAt  time.Time // 零值表示不过期
+	// 物理层质量信息（随音质档位变化，故在 Locator 而非 Track）：
+	SizeBytes   int64 // 0 = 未知
+	BitrateKbps int   // 0 = 未知
 }
 
 func (l StreamLocator) IsFile() bool { return strings.HasPrefix(l.URL, "file://") }
@@ -93,6 +128,13 @@ type PlaylistImporter interface {
 	Provider
 	// ImportPlaylist 拉取外部歌单全量曲目；playlistID 可为裸 id 或完整 URL。
 	ImportPlaylist(ctx context.Context, playlistID string) (name string, tracks []Track, err error)
+}
+
+// CoverAware 是可选接口：源站封面需要特定请求头（如 Referer）的
+// Provider 实现它。封面代理由此取头。
+type CoverAware interface {
+	Provider
+	CoverHeaders() http.Header
 }
 
 // QRLoginAware 是可选接口：支持二维码登录的 Provider 实现它。
