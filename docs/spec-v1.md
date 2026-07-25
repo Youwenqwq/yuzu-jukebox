@@ -64,6 +64,16 @@ should_be = position_ms                                        (paused 时)
   - < 30ms → 不动
   - **输出延迟区分**：播放器位置读数可能系统性少报（蓝牙等输出链路延迟被播放器从 time-pos 中扣除，典型 200–300ms）。参考实现 yuzu-agent 的处理：(a) loadfile 带 `start` 选项开播即定位，避免“从 0 播一秒再大跳”；(b) 播放速率 1:1 时，对齐 seek 生效后的第一个漂移样本即为该偏差，学为基线后只纠正超出基线的变化——校准开销为一次 seek，而非反复拽恒定读数差造成的 seek 风暴。
 
+### 2.3 TrackRef 扩展（provider 自定义 id 段）
+
+`provider:id` 的 id 段格式由 provider 自定义，服务端其它层一律视为不透明字符串：
+
+- `ncm:<song_id>`
+- `bili:<bvid>`、`bili:<bvid>?p=<N>`（分 P；无 ?p 为第 1 P。合集语义：标题 = 分 P 名，Album = 视频总标题）
+- `local:<媒体id>`
+
+含特殊字符的 ref 嵌入 URL 路径时 MUST 做 PathEscape（stream_url / cover_url 已由服务端转义）。
+
 ## 3. 认证
 
 ### 3.1 访客登录

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -185,8 +186,24 @@ func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, 
 	return out, nil
 }
 
-func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provider.Track, error) {
+// parseRef 拆解扩展 ref：bili:BVxxx?p=N。无 ?p 默认为第 1 P。
+func parseRef(ref provider.TrackRef) (bvid string, page int, err error) {
 	_, id, err := ref.Split()
+	if err != nil {
+		return "", 0, err
+	}
+	bvid, pageStr, _ := strings.Cut(id, "?p=")
+	page = 1
+	if pageStr != "" {
+		if page, err = strconv.Atoi(pageStr); err != nil || page < 1 {
+			return "", 0, fmt.Errorf("invalid page in ref %q", ref)
+		}
+	}
+	return bvid, page, nil
+}
+
+func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provider.Track, error) {
+	bvid, page, err := parseRef(ref)
 	if err != nil {
 		return provider.Track{}, err
 	}
@@ -206,15 +223,30 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 			DurationMs int64  `json:"duration_ms"`
 		} `json:"pages"`
 	}
-	if err := p.get(ctx, "/detail", url.Values{"bvid": {id}}, "", &resp); err != nil {
+	if err := p.get(ctx, "/detail", url.Values{"bvid": {bvid}}, "", &resp); err != nil {
 		return provider.Track{}, err
 	}
-	// Resolve 固定播放第 1 P（page=1），时长必须与之一致：
-	// 多分 P 视频的顶层 duration 是全集合计，直接用它会让
-	// 房间的结束 timer 严重超调（流早完了，状态机还以为在放）。
+
+	// 分 P 选择：时长必须取自目标分 P（顶层 duration 是全集合计，
+	// 直接用它会让房间的结束 timer 严重超调）。
+	title := resp.Title
+	album := resp.TName
 	duration := resp.DurationMs
-	if len(resp.Pages) > 0 && resp.Pages[0].DurationMs > 0 {
-		duration = resp.Pages[0].DurationMs
+	if len(resp.Pages) > 0 {
+		if page > len(resp.Pages) {
+			return provider.Track{}, fmt.Errorf("%s has %d pages, page %d out of range", bvid, len(resp.Pages), page)
+		}
+		pg := resp.Pages[page-1]
+		if pg.DurationMs > 0 {
+			duration = pg.DurationMs
+		}
+		if len(resp.Pages) > 1 {
+			// 合集即专辑：分 P 曲目 Album 用视频总标题，标题用分 P 名
+			album = resp.Title
+			if pg.Part != "" {
+				title = pg.Part
+			}
+		}
 	}
 	// 封面：pic（上游原生）优先，回退 sidecar 现有的 cover。
 	cover := resp.Pic
@@ -226,20 +258,24 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 	if uploader == "" {
 		uploader = resp.Author
 	}
+	sourceURL := videoURL(bvid)
+	if page > 1 {
+		sourceURL += "?p=" + strconv.Itoa(page)
+	}
 	return provider.Track{
 		Ref:          ref,
-		Title:        resp.Title,
+		Title:        title,
 		Artist:       resp.Author,
-		Album:        resp.TName,
+		Album:        album,
 		CoverURL:     normalizeCoverURL(cover),
-		SourceURL:    videoURL(id),
+		SourceURL:    sourceURL,
 		DurationMs:   duration,
 		Contributors: uploaderContributor(uploader),
 	}, nil
 }
 
 func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider.StreamLocator, error) {
-	_, id, err := ref.Split()
+	bvid, page, err := parseRef(ref)
 	if err != nil {
 		return provider.StreamLocator{}, err
 	}
@@ -252,7 +288,9 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 		Bytes     int64 `json:"bytes"`
 		Bandwidth int   `json:"bandwidth"` // bps
 	}
-	if err := p.get(ctx, "/audio-url", url.Values{"bvid": {id}}, p.cookie.Load().(string), &resp); err != nil {
+	if err := p.get(ctx, "/audio-url", url.Values{
+		"bvid": {bvid}, "page": {strconv.Itoa(page)},
+	}, p.cookie.Load().(string), &resp); err != nil {
 		return provider.StreamLocator{}, err
 	}
 	if resp.URL == "" {

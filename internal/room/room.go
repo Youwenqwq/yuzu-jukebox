@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
@@ -279,7 +280,7 @@ func (r *Room) Run(ctx context.Context) {
 			cur := *pb.Current
 			cur.StreamURL = r.streamURL(c.Identity(), cur.TrackRef)
 			if cur.CoverURL != "" {
-				cur.CoverURL = "/api/v1/cover/" + cur.TrackRef
+				cur.CoverURL = "/api/v1/cover/" + url.PathEscape(cur.TrackRef)
 			}
 			pb.Current = &cur
 		}
@@ -291,7 +292,7 @@ func (r *Room) Run(ctx context.Context) {
 		q := make([]QueueEntry, len(queue))
 		for i, e := range queue {
 			if e.CoverURL != "" {
-				e.CoverURL = "/api/v1/cover/" + e.TrackRef
+				e.CoverURL = "/api/v1/cover/" + url.PathEscape(e.TrackRef)
 			}
 			q[i] = e
 		}
@@ -639,7 +640,7 @@ func (r *Room) Run(ctx context.Context) {
 // Snapshot 供 REST 侧展示房间状态（非实时路径）。
 func (r *Room) streamURL(id auth.Identity, trackRef string) string {
 	ticket := r.authm.IssueTicket(id.ID, trackRef)
-	return "/stream/v1/" + trackRef + "?ticket=" + ticket
+	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + ticket
 }
 
 func (r *Room) loadQueue() []QueueEntry {
