@@ -232,7 +232,7 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.replyErr(ref, "provider_error", err.Error())
 			return
 		}
-		err = c.room.Add(room.QueueEntry{
+		err = c.room.AddFor(c.Identity(), room.QueueEntry{
 			EntryID:     room.NewEntryID(),
 			TrackRef:    track.Ref.String(),
 			Title:       track.Title,
@@ -369,8 +369,13 @@ func (c *client) replyResult(ref string, err error) {
 	switch {
 	case errors.Is(err, room.ErrEntryNotFound):
 		code = "not_found"
-	case errors.Is(err, room.ErrNoPlayback), errors.Is(err, room.ErrQueueEmpty), errors.Is(err, room.ErrInvalidSource):
+	case errors.Is(err, room.ErrNoPlayback), errors.Is(err, room.ErrQueueEmpty), errors.Is(err, room.ErrInvalidSource),
+		errors.Is(err, room.ErrInvalidPolicy):
 		code = "bad_request"
+	case errors.Is(err, room.ErrQueueFull):
+		code = "queue_full"
+	case errors.Is(err, room.ErrQuotaExceeded):
+		code = "quota_exceeded"
 	case errors.Is(err, room.ErrForbidden):
 		code = "forbidden"
 	}
@@ -383,4 +388,3 @@ func (c *client) replyErr(ref, code, message string) {
 		"data": map[string]any{"code": code, "message": message},
 	})
 }
-

@@ -145,9 +145,32 @@ yuzu-cli qrlogin ncm
 | `playlist-import <ncm:id|URL|ncm:daily>` | `media_admin` | 导入外部歌单或曲目源快照 |
 | `radio-play <room> <source>` | `room_admin` | 电台模式（`-shuffle` / `-once`） |
 | `radio-stop <room>` | `room_admin` | 退出电台 |
+| `queue-del <room> <entry_id>` | 本人/`room_admin` | 移除队列条目 |
+| `queue-move <room> <entry_id> <位置>` | `room_admin` | 移动队列条目 |
+| `history <room> [offset] [-limit]` | 已认证 | 播放历史（最新在前） |
+| `top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
+| `policy-set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
+| `policy-show <room>` | 已认证 | 查看房间策略 |
 | `credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
+
+### 房间治理策略
+
+每房间可配置点歌限制（`policy-set`，热生效）：
+
+```bash
+yuzu-cli policy-set lobby '{"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}'
+```
+
+`max_queue` 为队列总上限；`queue_limits` 按身份 kind/role 限待播数
+（命中 0 = 显式不限）。guest 身份 ID 由名字确定性派生，限额跨会话成立。
+
+### 代理重连
+
+yuzu-agent 内置断线重连：指数退避 1s→30s，重连后自动重走
+校时→认证→进房并恢复渲染。服务端重启后，各房间自动续播队首
+（当前曲目不持久化，队列保留）。
 
 ### 电台模式
 
@@ -217,6 +240,9 @@ go test ./... -race
 - 通用歌单（CRUD、分页、ncm 歌单导入、曲目源物化）
 - 电台模式（TrackSource 抽象：歌单/每日推荐/私人FM/相似歌曲/心动模式，
   洗牌袋、once、链式种子、seen 去重）
+- 房间治理策略（max_queue / 按 kind/role 的点歌限额，热更新）
+- 播放历史与热度统计 API（首播时间、播放次数）
+- 代理断线重连（指数退避 + 自动恢复渲染）、重启后房间自动续播队首
 - 凭据热更新、扫码登录（ncm / bili）、凭据定期健康检查（credmon）
 - 流式缓存（tee + 后台续传 + LRU）、下载进度可观测、票据化出流
 - MPV 播放代理（防抖渲染）、控制 CLI（子命令帮助）、端到端冒烟测试

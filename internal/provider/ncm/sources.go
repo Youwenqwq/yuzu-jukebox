@@ -391,4 +391,3 @@ func (s *seenSet) Add(ref string) bool {
 	}
 	return true
 }
-

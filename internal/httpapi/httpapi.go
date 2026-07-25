@@ -44,6 +44,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
+	mux.HandleFunc("GET /api/v1/rooms/{id}/history", s.roomHistory)
+	mux.HandleFunc("GET /api/v1/rooms/{id}/stats", s.roomStats)
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
@@ -115,12 +117,17 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type roomInfo struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID     string          `json:"id"`
+		Name   string          `json:"name"`
+		Policy json.RawMessage `json:"policy"`
 	}
 	out := []roomInfo{}
 	for _, rm := range s.rooms.List() {
-		out = append(out, roomInfo{ID: rm.ID, Name: rm.Name})
+		pol := json.RawMessage(rm.PolicyRaw())
+		if len(pol) == 0 {
+			pol = json.RawMessage(`{}`)
+		}
+		out = append(out, roomInfo{ID: rm.ID, Name: rm.Name, Policy: pol})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})
 }
@@ -131,10 +138,10 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
+		ID            string `json:"id"`
+		Name          string `json:"name"`
 		GuestPassword string `json:"guest_password"`
-		Policy       string `json:"policy"`
+		Policy        string `json:"policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "name required")
@@ -178,6 +185,7 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name          *string `json:"name"`
 		GuestPassword *string `json:"guest_password"`
+		Policy        *string `json:"policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
@@ -209,8 +217,64 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	if body.Policy != nil {
+		if _, err := room.ParsePolicy(*body.Policy); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		rm, err := s.rooms.Get(roomID)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "not_found", "room not running")
+			return
+		}
+		if err := rm.SetPolicy(*body.Policy); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+	}
 	s.st.Audit(r.Context(), id.ID, "room.update", roomID, "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"room": map[string]any{"id": roomID, "name": name}})
+}
+
+// roomHistory 房间播放历史（最新在前）。
+func (s *Server) roomHistory(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
+		return
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.st.PlayHistory(r.Context(), r.PathValue("id"), offset, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"history": rows})
+}
+
+// roomStats 房间曲目热度榜（首播时间、播放次数、最近播放）。
+func (s *Server) roomStats(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	stats, err := s.st.PlayStats(r.Context(), r.PathValue("id"), limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
 }
 
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {

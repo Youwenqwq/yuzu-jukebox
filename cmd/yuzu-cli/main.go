@@ -55,290 +55,290 @@ var commands map[string]command
 // 在 init 中填充，避免 commands → errUsage → commands 的包级初始化环。
 func init() {
 	commands = map[string]command{
-	"rooms": {
-		usage: "rooms",
-		desc:  "列出所有房间",
-		detail: `列出服务器上的全部房间（大厅目录）。
+		"rooms": {
+			usage: "rooms",
+			desc:  "列出所有房间",
+			detail: `列出服务器上的全部房间（大厅目录）。
 
 需要任意已认证身份。`,
-		run: func(args []string) error {
-			return withCtx(cmdRooms)
+			run: func(args []string) error {
+				return withCtx(cmdRooms)
+			},
 		},
-	},
-	"search": {
-		usage: "search <关键词> [-provider local|ncm]",
-		desc:  "搜索曲目",
-		detail: `在指定 provider 上搜索曲目，输出 track_ref / 标题 / 艺术家 / 时长。
+		"search": {
+			usage: "search <关键词> [-provider local|ncm]",
+			desc:  "搜索曲目",
+			detail: `在指定 provider 上搜索曲目，输出 track_ref / 标题 / 艺术家 / 时长。
 track_ref 用于 add 点歌。
 
   -provider   搜索源（默认 local；ncm 需服务器启用对应 provider）
 
 示例：
   yuzu-cli search "海阔天空" -provider ncm`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("search")
-			}
-			return withCtx(func(ctx context.Context) error { return cmdSearch(ctx, args[0]) })
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("search")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdSearch(ctx, args[0]) })
+			},
 		},
-	},
-	"queue": {
-		usage: "queue <room>",
-		desc:  "查看房间当前播放与队列",
-		detail: `显示房间正在播放的曲目（含实时进度）和等待队列。
+		"queue": {
+			usage: "queue <room>",
+			desc:  "查看房间当前播放与队列",
+			detail: `显示房间正在播放的曲目（含实时进度）和等待队列。
 
 需要房间访客密码（-room-password，若房间设有密码）。`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("queue")
-			}
-			return withCtx(func(ctx context.Context) error { return cmdQueue(ctx, args[0]) })
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("queue")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdQueue(ctx, args[0]) })
+			},
 		},
-	},
-	"add": {
-		usage: "add <room> <track_ref>",
-		desc:  "点歌：把曲目追加到房间队列",
-		detail: `把 track_ref 指定的曲目追加到房间队列尾部；房间空闲时自动开播。
+		"add": {
+			usage: "add <room> <track_ref>",
+			desc:  "点歌：把曲目追加到房间队列",
+			detail: `把 track_ref 指定的曲目追加到房间队列尾部；房间空闲时自动开播。
 track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 
 需要 requester 角色（访客默认拥有）。`,
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("add")
-			}
-			return withCtx(func(ctx context.Context) error { return cmdAdd(ctx, args[0], args[1]) })
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("add")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdAdd(ctx, args[0], args[1]) })
+			},
 		},
-	},
-	"skip": {
-		usage:  "skip <room>",
-		desc:   "切歌：结束当前曲目，播放下一首（管理员）",
-		detail:  "结束当前曲目（记入播放历史），队列非空时自动播放下一首。\n\n需要 room_admin 角色（-password 携带管理员口令）。",
-		run:    playbackCmd("playback.skip"),
-	},
-	"pause": {
-		usage:  "pause <room>",
-		desc:   "暂停播放（管理员）",
-		detail:  "暂停当前曲目，进度冻结。\n\n需要 room_admin 角色。",
-		run:    playbackCmd("playback.pause"),
-	},
-	"resume": {
-		usage:  "resume <room>",
-		desc:   "恢复播放（管理员）",
-		detail:  "从暂停位置继续播放。\n\n需要 room_admin 角色。",
-		run:    playbackCmd("playback.resume"),
-	},
-	"seek": {
-		usage: "seek <room> <秒>",
-		desc:  "跳转播放进度（管理员）",
-		detail: `把当前曲目跳转到指定秒数，越界自动收敛到 [0, 时长]。
+		"skip": {
+			usage:  "skip <room>",
+			desc:   "切歌：结束当前曲目，播放下一首（管理员）",
+			detail: "结束当前曲目（记入播放历史），队列非空时自动播放下一首。\n\n需要 room_admin 角色（-password 携带管理员口令）。",
+			run:    playbackCmd("playback.skip"),
+		},
+		"pause": {
+			usage:  "pause <room>",
+			desc:   "暂停播放（管理员）",
+			detail: "暂停当前曲目，进度冻结。\n\n需要 room_admin 角色。",
+			run:    playbackCmd("playback.pause"),
+		},
+		"resume": {
+			usage:  "resume <room>",
+			desc:   "恢复播放（管理员）",
+			detail: "从暂停位置继续播放。\n\n需要 room_admin 角色。",
+			run:    playbackCmd("playback.resume"),
+		},
+		"seek": {
+			usage: "seek <room> <秒>",
+			desc:  "跳转播放进度（管理员）",
+			detail: `把当前曲目跳转到指定秒数，越界自动收敛到 [0, 时长]。
 
 需要 room_admin 角色。
 
 示例：
   yuzu-cli seek lobby 120    # 跳到 2 分钟处`,
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("seek")
-			}
-			sec, err := strconv.ParseFloat(args[1], 64)
-			if err != nil {
-				return fmt.Errorf("invalid seconds: %s", args[1])
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlayback(ctx, "playback.seek", args[0], int64(sec*1000))
-			})
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("seek")
+				}
+				sec, err := strconv.ParseFloat(args[1], 64)
+				if err != nil {
+					return fmt.Errorf("invalid seconds: %s", args[1])
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlayback(ctx, "playback.seek", args[0], int64(sec*1000))
+				})
+			},
 		},
-	},
-	"mkroom": {
-		usage: "mkroom <id> <名称>",
-		desc:  "创建房间（管理员）",
-		detail: `创建一个持久房间。访客密码取 -room-password（不传则无密码）。
+		"mkroom": {
+			usage: "mkroom <id> <名称>",
+			desc:  "创建房间（管理员）",
+			detail: `创建一个持久房间。访客密码取 -room-password（不传则无密码）。
 
 需要 room_admin 角色。
 
 示例：
   yuzu-cli mkroom lobby 大厅 -room-password room123`,
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("mkroom")
-			}
-			return withCtx(func(ctx context.Context) error { return cmdMkRoom(ctx, args[0], args[1]) })
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("mkroom")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdMkRoom(ctx, args[0], args[1]) })
+			},
 		},
-	},
-	"upload": {
-		usage: "upload <文件> [-title t] [-artist a] [-duration-ms n]",
-		desc:  "上传本地媒体文件（管理员）",
-		detail: `上传音频文件到 local provider。时长自动探测
+		"upload": {
+			usage: "upload <文件> [-title t] [-artist a] [-duration-ms n]",
+			desc:  "上传本地媒体文件（管理员）",
+			detail: `上传音频文件到 local provider。时长自动探测
 （WAV 直接解析，其他格式依赖服务器上的 ffprobe），失败时需显式传 -duration-ms。
 
 需要 media_admin 角色。
 
 示例：
   yuzu-cli upload ~/Music/song.wav -title "My Song" -artist "Me"`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("upload")
-			}
-			return withCtx(func(ctx context.Context) error { return cmdUpload(ctx, args[0]) })
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("upload")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdUpload(ctx, args[0]) })
+			},
 		},
-	},
-	"cache": {
-		usage: "cache",
-		desc:  "查看媒体缓存：已缓存条目、进行中的下载、最近下载历史（管理员）",
-		detail: `显示三段缓存状态：
+		"cache": {
+			usage: "cache",
+			desc:  "查看媒体缓存：已缓存条目、进行中的下载、最近下载历史（管理员）",
+			detail: `显示三段缓存状态：
   entries   已落盘的缓存文件（DB 索引）
   downloads 正在进行中的下载（含进度）
   history   最近完成的下载记录（成功/失败及原因，最新在前）
 
 需要 media_admin 角色。`,
-		run: func(args []string) error {
-			return withCtx(cmdCache)
+			run: func(args []string) error {
+				return withCtx(cmdCache)
+			},
 		},
-	},
-	"credential": {
-		usage: "credential <provider> <payload>",
-		desc:  "热更新 provider 凭据（管理员）",
-		detail: `提交 provider 凭据（如 ncm 的 MUSIC_U cookie）。服务端先校验
+		"credential": {
+			usage: "credential <provider> <payload>",
+			desc:  "热更新 provider 凭据（管理员）",
+			detail: `提交 provider 凭据（如 ncm 的 MUSIC_U cookie）。服务端先校验
 有效性再生效，无需重启。凭据存于服务端，不会下发给客户端。
 
 需要 media_admin 角色。
 
 示例：
   yuzu-cli credential ncm "MUSIC_U=xxxx"`,
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("credential")
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdCredential(ctx, args[0], args[1])
-			})
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("credential")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdCredential(ctx, args[0], args[1])
+				})
+			},
 		},
-	},
-	"providers": {
-		usage: "providers",
-		desc:  "列出已注册的 Provider 及凭据状态",
-		detail: `显示服务器上注册的全部 Provider；支持凭据的 Provider 附带
+		"providers": {
+			usage: "providers",
+			desc:  "列出已注册的 Provider 及凭据状态",
+			detail: `显示服务器上注册的全部 Provider；支持凭据的 Provider 附带
 凭据健康状态（unset / ok / invalid）。状态由服务端定期探活维护。`,
-		run: func(args []string) error {
-			return withCtx(cmdProviders)
+			run: func(args []string) error {
+				return withCtx(cmdProviders)
+			},
 		},
-	},
-	"playlists": {
-		usage: "playlists",
-		desc:  "列出全部歌单",
-		detail: "列出服务器上的歌单（含曲目数）。查看歌单内容用 playlist-show。",
-		run: func(args []string) error {
-			return withCtx(cmdPlaylists)
+		"playlists": {
+			usage:  "playlists",
+			desc:   "列出全部歌单",
+			detail: "列出服务器上的歌单（含曲目数）。查看歌单内容用 playlist-show。",
+			run: func(args []string) error {
+				return withCtx(cmdPlaylists)
+			},
 		},
-	},
-	"playlist-show": {
-		usage: "playlist-show <id> [offset] [-limit 50]",
-		desc:  "查看歌单内容（分页）",
-		detail: `分页显示歌单条目（序号、track_ref、标题、艺术家、时长）。
+		"playlist-show": {
+			usage: "playlist-show <id> [offset] [-limit 50]",
+			desc:  "查看歌单内容（分页）",
+			detail: `分页显示歌单条目（序号、track_ref、标题、艺术家、时长）。
 
 示例：
   yuzu-cli playlist-show pl_a1b2c3 0 -limit 20`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("playlist-show")
-			}
-			offset := 0
-			if len(args) > 1 {
-				offset, _ = strconv.Atoi(args[1])
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlaylistShow(ctx, args[0], offset)
-			})
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("playlist-show")
+				}
+				offset := 0
+				if len(args) > 1 {
+					offset, _ = strconv.Atoi(args[1])
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistShow(ctx, args[0], offset)
+				})
+			},
 		},
-	},
-	"playlist-create": {
-		usage: "playlist-create <名称> [描述]",
-		desc:  "创建歌单（管理员）",
-		detail: "创建一张空的通用歌单。\n\n需要 media_admin 角色。",
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("playlist-create")
-			}
-			desc := ""
-			if len(args) > 1 {
-				desc = args[1]
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlaylistCreate(ctx, args[0], desc)
-			})
+		"playlist-create": {
+			usage:  "playlist-create <名称> [描述]",
+			desc:   "创建歌单（管理员）",
+			detail: "创建一张空的通用歌单。\n\n需要 media_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("playlist-create")
+				}
+				desc := ""
+				if len(args) > 1 {
+					desc = args[1]
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistCreate(ctx, args[0], desc)
+				})
+			},
 		},
-	},
-	"playlist-delete": {
-		usage:  "playlist-delete <id>",
-		desc:   "删除歌单（管理员）",
-		detail: "删除歌单及其全部条目。\n\n需要 media_admin 角色。",
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("playlist-delete")
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlaylistDelete(ctx, args[0])
-			})
+		"playlist-delete": {
+			usage:  "playlist-delete <id>",
+			desc:   "删除歌单（管理员）",
+			detail: "删除歌单及其全部条目。\n\n需要 media_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("playlist-delete")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistDelete(ctx, args[0])
+				})
+			},
 		},
-	},
-	"playlist-add": {
-		usage: "playlist-add <id> <track_ref>...",
-		desc:  "向歌单追加曲目（管理员）",
-		detail: `把一个或多个 track_ref 追加到歌单尾部（单次最多 100 首）。
+		"playlist-add": {
+			usage: "playlist-add <id> <track_ref>...",
+			desc:  "向歌单追加曲目（管理员）",
+			detail: `把一个或多个 track_ref 追加到歌单尾部（单次最多 100 首）。
 元数据快照自各 provider 实时获取。
 
 需要 media_admin 角色。`,
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("playlist-add")
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlaylistAdd(ctx, args[0], args[1:])
-			})
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("playlist-add")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistAdd(ctx, args[0], args[1:])
+				})
+			},
 		},
-	},
-	"playlist-delitem": {
-		usage:  "playlist-delitem <id> <ord>",
-		desc:   "删除歌单中的指定条目（管理员）",
-		detail: "按序号（ord，playlist-show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("playlist-delitem")
-			}
-			ord, err := strconv.Atoi(args[1])
-			if err != nil {
-				return fmt.Errorf("invalid ord: %s", args[1])
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlaylistDelItem(ctx, args[0], ord)
-			})
+		"playlist-delitem": {
+			usage:  "playlist-delitem <id> <ord>",
+			desc:   "删除歌单中的指定条目（管理员）",
+			detail: "按序号（ord，playlist-show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("playlist-delitem")
+				}
+				ord, err := strconv.Atoi(args[1])
+				if err != nil {
+					return fmt.Errorf("invalid ord: %s", args[1])
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistDelItem(ctx, args[0], ord)
+				})
+			},
 		},
-	},
-	"playlist-import": {
-		usage: "playlist-import <ncm:歌单id|URL|ncm:daily> [名称]",
-		desc:  "导入外部歌单或曲目源快照（管理员）",
-		detail: `两种用法：
+		"playlist-import": {
+			usage: "playlist-import <ncm:歌单id|URL|ncm:daily> [名称]",
+			desc:  "导入外部歌单或曲目源快照（管理员）",
+			detail: `两种用法：
   playlist-import ncm:24381616     导入 ncm 歌单（也接受完整 URL）
   playlist-import ncm:daily        把每日推荐物化成歌单
 
 需要 media_admin 角色。长歌单分页拉取，可能需要几秒。`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("playlist-import")
-			}
-			name := ""
-			if len(args) > 1 {
-				name = args[1]
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdPlaylistImport(ctx, args[0], name)
-			})
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("playlist-import")
+				}
+				name := ""
+				if len(args) > 1 {
+					name = args[1]
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistImport(ctx, args[0], name)
+				})
+			},
 		},
-	},
-	"radio-play": {
-		usage: "radio-play <room> <source> [-shuffle] [-once]",
-		desc:  "房间进入电台模式：绑定曲目源自动续播（管理员）",
-		detail: `让房间绑定一个曲目源，队列见底时自动批量补充，实现无人值守续播。
+		"radio-play": {
+			usage: "radio-play <room> <source> [-shuffle] [-once]",
+			desc:  "房间进入电台模式：绑定曲目源自动续播（管理员）",
+			detail: `让房间绑定一个曲目源，队列见底时自动批量补充，实现无人值守续播。
 
 source 取值：
   playlist:<id>       通用歌单（playlist-show 可查 id）
@@ -353,45 +353,124 @@ source 取值：
 示例：
   yuzu-cli radio-play lobby playlist:pl_a1b2c3 -shuffle
   yuzu-cli radio-play lobby ncm:fm`,
-		run: func(args []string) error {
-			if len(args) < 2 {
-				return errUsage("radio-play")
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdRadioPlay(ctx, args[0], args[1])
-			})
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("radio-play")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdRadioPlay(ctx, args[0], args[1])
+				})
+			},
 		},
-	},
-	"radio-stop": {
-		usage:  "radio-stop <room>",
-		desc:   "退出电台模式（管理员）",
-		detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要 room_admin 角色。",
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("radio-stop")
-			}
-			return withCtx(func(ctx context.Context) error {
-				return cmdRadioStop(ctx, args[0])
-			})
+		"radio-stop": {
+			usage:  "radio-stop <room>",
+			desc:   "退出电台模式（管理员）",
+			detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("radio-stop")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdRadioStop(ctx, args[0])
+				})
+			},
 		},
-	},
-	"qrlogin": {
-		usage: "qrlogin <provider>",
-		desc:  "扫码登录 provider（管理员）",
-		detail: `在终端渲染二维码，用对应 App（如网易云音乐）扫码并确认。
+		"queue-del": {
+			usage:  "queue-del <room> <entry_id>",
+			desc:   "移除队列条目（本人或管理员）",
+			detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；room_admin 可移除任意。\n\nentry_id 见 queue 输出第一列。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("queue-del")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdQueueDel(ctx, args[0], args[1]) })
+			},
+		},
+		"queue-move": {
+			usage:  "queue-move <room> <entry_id> <位置>",
+			desc:   "移动队列条目到指定位置（管理员）",
+			detail: "把队列条目移动到目标序号（0 起）。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 3 {
+					return errUsage("queue-move")
+				}
+				to, err := strconv.Atoi(args[2])
+				if err != nil {
+					return fmt.Errorf("位置必须是数字")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdQueueMove(ctx, args[0], args[1], to) })
+			},
+		},
+		"history": {
+			usage:  "history <room> [offset] [-limit 20]",
+			desc:   "查看房间播放历史（最新在前）",
+			detail: "显示最近播放记录：开始时间、标题、点歌人、结束原因\n（natural / skipped / seek-past-end）。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("history")
+				}
+				offset := 0
+				if len(args) > 1 {
+					offset, _ = strconv.Atoi(args[1])
+				}
+				return withCtx(func(ctx context.Context) error { return cmdHistory(ctx, args[0], offset) })
+			},
+		},
+		"top": {
+			usage:  "top <room> [-limit 20]",
+			desc:   "房间曲目热度榜：播放次数、首播与最近播放时间",
+			detail: "按播放次数聚合的曲目榜，含首播时间与最近播放时间。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("top")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdTop(ctx, args[0]) })
+			},
+		},
+		"policy-set": {
+			usage: "policy-set <room> <JSON>",
+			desc:  "设置房间治理策略（管理员）",
+			detail: `热更新房间策略，JSON 结构：
+  {"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}
+max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 kind
+（guest/password/oidc）或 role，多命中取最宽松，0/缺省=不限。
+
+需要 room_admin 角色。`,
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("policy-set")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPolicySet(ctx, args[0], args[1]) })
+			},
+		},
+		"policy-show": {
+			usage:  "policy-show <room>",
+			desc:   "查看房间当前治理策略",
+			detail: "显示房间的 policy JSON。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("policy-show")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPolicyShow(ctx, args[0]) })
+			},
+		},
+		"qrlogin": {
+			usage: "qrlogin <provider>",
+			desc:  "扫码登录 provider（管理员）",
+			detail: `在终端渲染二维码，用对应 App（如网易云音乐）扫码并确认。
 凭据由服务端在扫码成功后自动提取、校验并热生效，不经过本机。
 
 需要 media_admin 角色。二维码约 2 分钟过期，全程最多等待 5 分钟。
 
 示例：
   yuzu-cli qrlogin ncm`,
-		run: func(args []string) error {
-			if len(args) < 1 {
-				return errUsage("qrlogin")
-			}
-			return cmdQRLogin(args[0])
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("qrlogin")
+				}
+				return cmdQRLogin(args[0])
+			},
 		},
-	},
 	}
 }
 
@@ -611,7 +690,104 @@ func cmdPlayback(ctx context.Context, op, roomID string, positionMs int64) error
 	return nil
 }
 
+func cmdQueueDel(ctx context.Context, roomID, entryID string) error {
+	cli, err := connect(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	if err := cli.QueueRemove(ctx, roomID, entryID); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdQueueMove(ctx context.Context, roomID, entryID string, to int) error {
+	cli, err := connect(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	if err := cli.QueueMove(ctx, roomID, entryID, to); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdHistory(ctx context.Context, roomID string, offset int) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	rows, err := client.RESTRoomHistory(ctx, *server, token, roomID, offset, *limit)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Println("（无记录）")
+		return nil
+	}
+	for i, h := range rows {
+		fmt.Printf("%3d. %s %-40s by %s (%s)\n", offset+i+1,
+			time.UnixMilli(h.StartedAt).Format("01-02 15:04"), h.Title, h.RequestedBy, h.EndReason)
+	}
+	return nil
+}
+
+func cmdTop(ctx context.Context, roomID string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	stats, err := client.RESTRoomStats(ctx, *server, token, roomID, *limit)
+	if err != nil {
+		return err
+	}
+	if len(stats) == 0 {
+		fmt.Println("（无记录）")
+		return nil
+	}
+	for i, t := range stats {
+		fmt.Printf("%3d. [%2d 次] %-40s 首播 %s  最近 %s\n", i+1, t.PlayCount, t.Title,
+			time.UnixMilli(t.FirstPlayedAt).Format("2006-01-02"), time.UnixMilli(t.LastPlayedAt).Format("01-02 15:04"))
+	}
+	return nil
+}
+
+func cmdPolicySet(ctx context.Context, roomID, policy string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTUpdateRoomPolicy(ctx, *server, token, roomID, policy); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdPolicyShow(ctx context.Context, roomID string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	rooms, err := client.RESTListRooms(ctx, *server, token)
+	if err != nil {
+		return err
+	}
+	for _, r := range rooms {
+		if r.ID == roomID {
+			fmt.Println(string(r.Policy))
+			return nil
+		}
+	}
+	return fmt.Errorf("room %q not found", roomID)
+}
+
 func cmdQueue(ctx context.Context, roomID string) error {
+
 	cli, err := connect(ctx, roomID)
 	if err != nil {
 		return err
@@ -886,9 +1062,9 @@ func humanBytes(n int64) string {
 	switch {
 	case n < 0:
 		return "?"
-	case n < 1 << 10:
+	case n < 1<<10:
 		return fmt.Sprintf("%dB", n)
-	case n < 1 << 20:
+	case n < 1<<20:
 		return fmt.Sprintf("%.1fKiB", float64(n)/(1<<10))
 	default:
 		return fmt.Sprintf("%.1fMiB", float64(n)/(1<<20))

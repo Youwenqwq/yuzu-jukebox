@@ -322,8 +322,9 @@ func RESTAuth(ctx context.Context, server, name, password string) (token string,
 }
 
 type RoomInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID     string          `json:"id"`
+	Name   string          `json:"name"`
+	Policy json.RawMessage `json:"policy"`
 }
 
 func RESTListRooms(ctx context.Context, server, token string) ([]RoomInfo, error) {
@@ -458,6 +459,52 @@ func RESTCreateRoom(ctx context.Context, server, token, id, roomName, guestPassw
 	return restCall(ctx, server, "POST", "/api/v1/rooms", token, map[string]any{
 		"id": id, "name": roomName, "guest_password": guestPassword,
 	}, &struct{}{})
+}
+
+// RESTUpdateRoomPolicy 热更新房间治理策略（room_admin）。policy 为 JSON 文本。
+func RESTUpdateRoomPolicy(ctx context.Context, server, token, roomID, policy string) error {
+	return restCall(ctx, server, "PATCH", "/api/v1/rooms/"+roomID, token, map[string]any{
+		"policy": policy,
+	}, &struct{}{})
+}
+
+// HistoryEntry 播放历史条目。
+type HistoryEntry struct {
+	TrackRef    string `json:"track_ref"`
+	Title       string `json:"title"`
+	RequestedBy string `json:"requested_by"`
+	StartedAt   int64  `json:"started_at"`
+	EndedAt     int64  `json:"ended_at"`
+	EndReason   string `json:"end_reason"`
+}
+
+// RESTRoomHistory 房间播放历史（最新在前）。
+func RESTRoomHistory(ctx context.Context, server, token, roomID string, offset, limit int) ([]HistoryEntry, error) {
+	var out struct {
+		History []HistoryEntry `json:"history"`
+	}
+	path := fmt.Sprintf("/api/v1/rooms/%s/history?offset=%d&limit=%d", roomID, offset, limit)
+	err := restCall(ctx, server, "GET", path, token, nil, &out)
+	return out.History, err
+}
+
+// TrackStat 曲目热度统计。
+type TrackStat struct {
+	TrackRef      string `json:"track_ref"`
+	Title         string `json:"title"`
+	PlayCount     int    `json:"play_count"`
+	FirstPlayedAt int64  `json:"first_played_at"`
+	LastPlayedAt  int64  `json:"last_played_at"`
+}
+
+// RESTRoomStats 房间曲目热度榜。
+func RESTRoomStats(ctx context.Context, server, token, roomID string, limit int) ([]TrackStat, error) {
+	var out struct {
+		Stats []TrackStat `json:"stats"`
+	}
+	path := fmt.Sprintf("/api/v1/rooms/%s/stats?limit=%d", roomID, limit)
+	err := restCall(ctx, server, "GET", path, token, nil, &out)
+	return out.Stats, err
 }
 
 // RESTUpload 上传本地媒体文件（media_admin）。

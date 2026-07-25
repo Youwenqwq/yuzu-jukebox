@@ -61,9 +61,9 @@ type playlistSource struct {
 
 	shuffle bool
 	once    bool
-	cursor  int    // 顺序模式：下一个位置
-	bag     []int  // 随机模式：剩余索引
-	bagUsed bool   // once 随机：洗牌袋已耗尽过一轮
+	cursor  int   // 顺序模式：下一个位置
+	bag     []int // 随机模式：剩余索引
+	bagUsed bool  // once 随机：洗牌袋已耗尽过一轮
 	rng     *rand.Rand
 }
 
@@ -169,4 +169,3 @@ func itemsToTracks(items []store.PlaylistItem) []provider.Track {
 	}
 	return out
 }
-

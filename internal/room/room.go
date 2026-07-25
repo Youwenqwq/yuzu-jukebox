@@ -65,6 +65,7 @@ const (
 	actTimerEnd
 	actRadioPlay
 	actRadioStop
+	actSetPolicy
 )
 
 type action struct {
@@ -77,10 +78,11 @@ type action struct {
 	posMs   int64
 	timerID uint64
 	// radio
-	source  string
-	shuffle bool
-	once    bool
-	result  chan error
+	source    string
+	shuffle   bool
+	once      bool
+	policyRaw string
+	result    chan error
 }
 
 var (
@@ -102,6 +104,7 @@ type Room struct {
 	ID           string
 	Name         string
 	passwordHash string
+	policyRaw    string
 
 	st    *store.Store
 	authm *auth.Manager
@@ -111,13 +114,16 @@ type Room struct {
 	inbound chan action
 }
 
-func New(id, name, passwordHash string, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Room {
+func New(id, name, passwordHash, policyRaw string, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Room {
 	return &Room{
-		ID: id, Name: name, passwordHash: passwordHash,
+		ID: id, Name: name, passwordHash: passwordHash, policyRaw: policyRaw,
 		st: st, authm: authm, cache: c, reg: reg,
 		inbound: make(chan action, 64),
 	}
 }
+
+// PolicyRaw 当前策略 JSON（供 REST 展示）。
+func (r *Room) PolicyRaw() string { return r.policyRaw }
 
 // CheckPassword 校验访客密码（空密码房间直接放行）。
 func (r *Room) CheckPassword(password string) bool {
@@ -133,10 +139,15 @@ func (r *Room) call(a action) error {
 	return <-a.result
 }
 
-func (r *Room) Join(c ClientConn)    { r.inbound <- action{kind: actJoin, client: c} }
-func (r *Room) Leave(c ClientConn)   { r.inbound <- action{kind: actLeave, client: c} }
+func (r *Room) Join(c ClientConn)  { r.inbound <- action{kind: actJoin, client: c} }
+func (r *Room) Leave(c ClientConn) { r.inbound <- action{kind: actLeave, client: c} }
 
-func (r *Room) Add(e QueueEntry) error      { return r.call(action{kind: actAdd, entry: e}) }
+// AddFor 带策略校验的点歌：队列总上限与按身份（kind/role）的待播上限
+// 在 actor 内检查，与队列状态读取天然串行。电台补充不经过此路径。
+func (r *Room) AddFor(id auth.Identity, e QueueEntry) error {
+	return r.call(action{kind: actAdd, actor: id, entry: e})
+}
+
 func (r *Room) Remove(entryID string) error { return r.call(action{kind: actRemove, entryID: entryID}) }
 
 // RemoveFor 带权限校验的移除：room_admin 或条目所有者可移除。
@@ -148,10 +159,10 @@ func (r *Room) RemoveFor(id auth.Identity, entryID string) error {
 func (r *Room) Move(entryID string, to int) error {
 	return r.call(action{kind: actMove, entryID: entryID, toIndex: to})
 }
-func (r *Room) Pause() error         { return r.call(action{kind: actPause}) }
-func (r *Room) Resume() error        { return r.call(action{kind: actResume}) }
+func (r *Room) Pause() error             { return r.call(action{kind: actPause}) }
+func (r *Room) Resume() error            { return r.call(action{kind: actResume}) }
 func (r *Room) SeekTo(posMs int64) error { return r.call(action{kind: actSeek, posMs: posMs}) }
-func (r *Room) Skip() error          { return r.call(action{kind: actSkip}) }
+func (r *Room) Skip() error              { return r.call(action{kind: actSkip}) }
 
 // PlayRadio 让房间进入电台模式：绑定曲目源，队列见底自动补充。
 func (r *Room) PlayRadio(sourceSpec string, shuffle, once bool) error {
@@ -161,12 +172,21 @@ func (r *Room) PlayRadio(sourceSpec string, shuffle, once bool) error {
 // StopRadio 退出电台模式（队列已有内容继续播）。
 func (r *Room) StopRadio() error { return r.call(action{kind: actRadioStop}) }
 
+// SetPolicy 热更新房间策略：校验 → 落库 → actor 内生效。
+func (r *Room) SetPolicy(raw string) error {
+	return r.call(action{kind: actSetPolicy, policyRaw: raw})
+}
+
 // Run 是 actor 主循环。阻塞直到进程退出。
 func (r *Room) Run(ctx context.Context) {
 	queue := r.loadQueue()
 	var playback *Playback
 	var radio *radioState
 	clients := map[string]ClientConn{}
+	policy, err := ParsePolicy(r.policyRaw)
+	if err != nil {
+		log.Printf("room %s: invalid stored policy, using empty: %v", r.ID, err)
+	}
 
 	var timer *time.Timer
 	var timerSeq uint64 // 防止过期 timer 回调在新状态上触发
@@ -355,6 +375,11 @@ func (r *Room) Run(ctx context.Context) {
 		broadcast(func(ClientConn) any { return queueMsg() })
 	}
 
+	// 启动即恢复：重启后播放状态丢失但队列仍在，自动续播队首。
+	if len(queue) > 0 {
+		advance("resume-after-restart")
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -375,6 +400,22 @@ func (r *Room) Run(ctx context.Context) {
 				broadcast(func(ClientConn) any { return listenersMsg() })
 
 			case actAdd:
+				if policy.MaxQueue > 0 && len(queue) >= policy.MaxQueue {
+					a.result <- ErrQueueFull
+					break
+				}
+				if lim := policy.queueLimit(a.actor); lim > 0 {
+					pending := 0
+					for _, e := range queue {
+						if e.RequestedBy == a.actor.ID {
+							pending++
+						}
+					}
+					if pending >= lim {
+						a.result <- ErrQuotaExceeded
+						break
+					}
+				}
 				queue = append(queue, a.entry)
 				persistQueue()
 				if playback == nil || playback.Current == nil {
@@ -505,6 +546,20 @@ func (r *Room) Run(ctx context.Context) {
 
 			case actRadioStop:
 				stopRadio()
+				a.result <- nil
+
+			case actSetPolicy:
+				p, err := ParsePolicy(a.policyRaw)
+				if err != nil {
+					a.result <- err
+					break
+				}
+				if err := r.st.UpdateRoomPolicy(ctx, r.ID, a.policyRaw); err != nil {
+					a.result <- err
+					break
+				}
+				policy = p
+				r.policyRaw = a.policyRaw
 				a.result <- nil
 			}
 		}

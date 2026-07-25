@@ -6,6 +6,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"sync"
@@ -82,8 +83,11 @@ func (m *Manager) GuestAuth(name, adminPassword string) (Identity, string, error
 	if m.adminPassword != "" && adminPassword == m.adminPassword {
 		roles = append(roles, RoleRoomAdmin, RoleMediaAdmin)
 	}
+	// 访客 ID 由名字确定性派生：同名重连仍是同一人。点歌限额、
+	// 移除自己点的歌等按 ID 归属的语义才能跨会话成立。
+	sum := sha256.Sum256([]byte("guest:" + name))
 	id := Identity{
-		ID:    "g_" + randHex(6),
+		ID:    "g_" + hex.EncodeToString(sum[:])[:12],
 		Name:  name,
 		Kind:  "guest",
 		Roles: roles,

@@ -186,6 +186,20 @@ should_be = position_ms                                        (paused 时)
 - 目的：凭据永不下发；`/stream` 端点无 cookie 会话也可鉴权（`<audio>` 标签、MPV 均适用）。
 - 仅**当前播放曲目**附带 `stream_url`；队列条目只给元数据。下一首的可播放性由服务端缓存预取保证（进入 PLAYING 时对队首做 Resolve + 预拉取），待其成为当前曲目时才下发 URL。
 
+### 4.7 房间治理策略
+
+每房间一份策略，存 `rooms.policy_json`，经 `POST/PATCH /api/v1/rooms` 的 `policy` 字段热更新（校验 → 落库 → actor 内生效，无需重启）：
+
+```json
+{ "max_queue": 100, "queue_limits": { "guest": 5, "room_admin": 0 } }
+```
+
+- `max_queue`：待播队列总上限，0/缺省 = 不限。超限拒绝 `queue.add`，错误码 `queue_full`。
+- `queue_limits`：按身份的待播数上限。key 匹配身份的 **kind**（`guest`/`password`/`oidc`）或其任一 **role**；任一命中值为 0 → 显式不限（覆盖其他命中），否则取命中最大值，无命中 = 不限。超限拒绝，错误码 `quota_exceeded`。
+- guest 身份 ID 由名字确定性派生（`g_` + sha256(name) 前 12 hex），同名重连仍是同一人——限额与"移除自己点的歌"跨会话成立。
+- 电台补充不经过限额检查（补充只在队列 <3 时触发，天然有界）。
+- 播放历史与统计见 6 节 REST；`play_history` 只记**播放**（结束原因 `finished`/`skipped`），不记点歌意图。
+
 ## 5. 房间状态机
 
 ### 5.1 状态字段（权威，存于房间 actor 内，不落库）
@@ -249,7 +263,9 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 |---|---|---|
 | `POST /api/v1/auth/guest` | — | 访客认证，body `{"name", "password"}`（password 为全局管理员口令，可选）；返回 `{identity, session_token}` |
 | `GET /api/v1/rooms` | 已认证 | 房间列表（大厅目录） |
-| `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 后台建/改房间（名称、访客密码、policy_json） |
+| `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 后台建/改房间（名称、访客密码、policy） |
+| `GET /api/v1/rooms/{id}/history?offset=&limit=` | 已认证 | 播放历史，最新在前（默认 50，上限 200） |
+| `GET /api/v1/rooms/{id}/stats?limit=` | 已认证 | 曲目热度榜：播放次数、首播/最近播放时间（默认 20，上限 100） |
 | `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | 热更新 Provider 凭据（如 ncm 的 MUSIC_U cookie）；服务端先校验再生效，凭据存 credentials 表，永不下发 |
@@ -274,6 +290,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `unauthorized` | 未认证 / 会话失效 |
 | `forbidden` | 角色权限不足 |
 | `bad_request` | 参数非法（含 track_ref 格式错误、未进房就发房间操作） |
+| `queue_full` | 队列达到房间 `max_queue` 上限 |
+| `quota_exceeded` | 超出身份的点歌限额（policy.queue_limits） |
 | `not_found` | 房间 / 条目 / 曲目不存在 |
 | `provider_error` | Provider 调用失败（附 message） |
 | `internal` | 服务端内部错误 |
@@ -281,8 +299,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 
 ## 8. 明确不做的（当前版本）
 
-- 投票切歌、DJ 模式（policy_json 预留字段，不实现逻辑）
-- 播放进度持久化（重启后房间恢复为 IDLE，队列保留在 DB）
+- 投票切歌、DJ 模式（policy_json 可扩展，不实现逻辑）
+- 播放进度持久化（重启后当前曲目丢失；队列保留在 DB，房间启动时自动续播队首）
 - 队列事件的增量 diff 下发
 - OIDC / 账号密码登录
 - 凭据加密存储（当前明文存 credentials 表；加密需引入密钥管理，随凭据种类增多再做）

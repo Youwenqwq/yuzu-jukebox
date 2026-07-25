@@ -46,7 +46,7 @@ func (m *Manager) Spawn(row store.Room) *Room {
 }
 
 func (m *Manager) spawn(row store.Room) *Room {
-	r := New(row.ID, row.Name, row.PasswordHash, m.st, m.authm, m.cache, m.reg)
+	r := New(row.ID, row.Name, row.PasswordHash, row.PolicyJSON, m.st, m.authm, m.cache, m.reg)
 	m.rooms[row.ID] = r
 	go r.Run(m.ctx)
 	return r

@@ -24,9 +24,9 @@ import (
 // ---------- 测试辅助 ----------
 
 type env struct {
-	t    *testing.T
-	srv  *httptest.Server
-	a    *app.App
+	t       *testing.T
+	srv     *httptest.Server
+	a       *app.App
 	cancels []context.CancelFunc
 }
 
@@ -115,9 +115,9 @@ func makeWAV(secs int) []byte {
 	binary.Write(buf, binary.LittleEndian, uint32(36+dataSize))
 	buf.WriteString("WAVE")
 	buf.WriteString("fmt ")
-	binary.Write(buf, binary.LittleEndian, uint32(16))           // fmt chunk size
-	binary.Write(buf, binary.LittleEndian, uint16(1))            // PCM
-	binary.Write(buf, binary.LittleEndian, uint16(1))            // mono
+	binary.Write(buf, binary.LittleEndian, uint32(16)) // fmt chunk size
+	binary.Write(buf, binary.LittleEndian, uint16(1))  // PCM
+	binary.Write(buf, binary.LittleEndian, uint16(1))  // mono
 	binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
 	binary.Write(buf, binary.LittleEndian, uint32(sampleRate*2)) // byte rate
 	binary.Write(buf, binary.LittleEndian, uint16(2))            // block align
@@ -302,7 +302,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 			TrackRef  string `json:"track_ref"`
 			StreamURL string `json:"stream_url"`
 		} `json:"current"`
-		Playing bool  `json:"playing"`
+		Playing bool    `json:"playing"`
 		Rate    float64 `json:"rate"`
 	}
 	json.Unmarshal(snap.Data, &pb)

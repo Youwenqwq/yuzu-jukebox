@@ -71,6 +71,12 @@ func (s *Store) UpdateRoom(ctx context.Context, id, name, passwordHash string) e
 	return err
 }
 
+// UpdateRoomPolicy 更新房间策略 JSON（策略内容已由 room 包校验）。
+func (s *Store) UpdateRoomPolicy(ctx context.Context, id, policyJSON string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE rooms SET policy_json = ? WHERE id = ?`, policyJSON, id)
+	return err
+}
+
 func (s *Store) GetRoom(ctx context.Context, id string) (Room, error) {
 	var r Room
 	err := s.db.QueryRowContext(ctx,
@@ -157,6 +163,69 @@ func (s *Store) AddPlayHistory(ctx context.Context, roomID, trackRef, title, req
 		 VALUES (?,?,?,?,?,?,?)`,
 		roomID, trackRef, title, requestedBy, startedAt, endedAt, reason)
 	return err
+}
+
+// PlayHistoryRow 一条播放历史。
+type PlayHistoryRow struct {
+	TrackRef    string `json:"track_ref"`
+	Title       string `json:"title"`
+	RequestedBy string `json:"requested_by"`
+	StartedAt   int64  `json:"started_at"`
+	EndedAt     int64  `json:"ended_at"`
+	EndReason   string `json:"end_reason"`
+}
+
+// PlayHistory 房间的播放历史，最新在前。
+func (s *Store) PlayHistory(ctx context.Context, roomID string, offset, limit int) ([]PlayHistoryRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT track_ref, title, requested_by, started_at, ended_at, end_reason
+		 FROM play_history WHERE room_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+		roomID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PlayHistoryRow{}
+	for rows.Next() {
+		var r PlayHistoryRow
+		if err := rows.Scan(&r.TrackRef, &r.Title, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TrackStat 单曲目聚合统计（"考古"视角：首播、播放次数、最近播放）。
+type TrackStat struct {
+	TrackRef      string `json:"track_ref"`
+	Title         string `json:"title"`
+	PlayCount     int    `json:"play_count"`
+	FirstPlayedAt int64  `json:"first_played_at"`
+	LastPlayedAt  int64  `json:"last_played_at"`
+}
+
+// PlayStats 房间曲目热度榜，按播放次数降序（次数相同按最近播放降序）。
+// SQLite 特性：GROUP BY + MAX 聚合时，裸列取自最大行，故 title 为最近一次播放的标题。
+func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]TrackStat, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT track_ref, title, COUNT(*) AS c, MIN(started_at), MAX(started_at)
+		 FROM play_history WHERE room_id = ? GROUP BY track_ref
+		 ORDER BY c DESC, MAX(started_at) DESC LIMIT ?`,
+		roomID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TrackStat{}
+	for rows.Next() {
+		var t TrackStat
+		if err := rows.Scan(&t.TrackRef, &t.Title, &t.PlayCount, &t.FirstPlayedAt, &t.LastPlayedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // ---------- 审计 ----------

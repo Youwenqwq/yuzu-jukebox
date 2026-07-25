@@ -2,14 +2,16 @@
 // 服务器权威播放状态渲染到本地 MPV。纯收听，不提供控制能力。
 //
 // 同步策略（spec-v1 §2.2）：
-//   |漂移| > 150ms  → 直接 seek
-//   30–150ms        → 调 speed（0.98–1.02）缓追
-//   < 30ms          → 不动
+//
+//	|漂移| > 150ms  → 直接 seek
+//	30–150ms        → 调 speed（0.98–1.02）缓追
+//	< 30ms          → 不动
 package main
 
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -45,6 +47,45 @@ func main() {
 }
 
 func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvPath, socket, ao string) error {
+	// MPV 只启动一次，跨重连存活。重连成功后服务器会推送播放快照，
+	// 代理把快照重新渲染进去（loadedRef 每会话重置，强制刷新）。
+	os.Remove(socket)
+	mpv, err := startMPV(ctx, mpvPath, socket, ao)
+	if err != nil {
+		return err
+	}
+	defer mpv.Kill()
+	log.Printf("mpv started (ipc: %s)", socket)
+
+	// 断线重连（spec-v1 §9.4）：指数退避 1s→30s；会话存活超 10s 视
+	// 为连接曾稳定，退避重置。
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		start := time.Now()
+		err := session(ctx, server, roomID, name, password, roomPassword, mpv)
+		if ctx.Err() != nil {
+			return nil // 主动退出
+		}
+		if time.Since(start) > 10*time.Second {
+			backoff = time.Second
+		}
+		log.Printf("session ended: %v; reconnecting in %s", err, backoff)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// session 一次连接的完整生命周期：连接 → 校时 → 认证 → 进房 → 渲染。
+// 任何环节失败都返回错误，由 run 决定重连。
+func session(ctx context.Context, server, roomID, name, password, roomPassword string, mpv *mpvClient) error {
 	// 1. 协议连接：校时 → 认证 → 进房
 	cli, err := client.Dial(ctx, server)
 	if err != nil {
@@ -62,15 +103,6 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 		return err
 	}
 	log.Printf("joined room %q as %s (%s)", roomID, id.Name, id.ID)
-
-	// 2. 启动 MPV（IPC 控制）
-	os.Remove(socket)
-	mpv, err := startMPV(ctx, mpvPath, socket, ao)
-	if err != nil {
-		return err
-	}
-	defer mpv.Kill()
-	log.Printf("mpv started (ipc: %s)", socket)
 
 	// 3. 状态渲染 + 周期校偏
 	var (
@@ -124,7 +156,7 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 			return nil
 		case m, ok := <-cli.Events():
 			if !ok {
-				return nil
+				return fmt.Errorf("connection lost")
 			}
 			if m.Type == "playback.changed" {
 				pb, err := client.ParsePlayback(m)
