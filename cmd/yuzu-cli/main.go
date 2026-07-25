@@ -19,10 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mdp/qrterminal/v3"
-
-	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 )
 
 var (
@@ -55,8 +51,8 @@ var commands map[string]command
 // 在 init 中填充，避免 commands → errUsage → commands 的包级初始化环。
 func init() {
 	commands = map[string]command{
-		"rooms": {
-			usage: "rooms",
+		"room list": {
+			usage: "room list",
 			desc:  "列出所有房间",
 			detail: `列出服务器上的全部房间（大厅目录）。
 
@@ -149,8 +145,8 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				})
 			},
 		},
-		"mkroom": {
-			usage: "mkroom <id> <名称>",
+		"room create": {
+			usage: "room create <id> <名称>",
 			desc:  "创建房间（管理员）",
 			detail: `创建一个持久房间。访客密码取 -room-password（不传则无密码）。
 
@@ -160,13 +156,13 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
   yuzu-cli mkroom lobby 大厅 -room-password room123`,
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("mkroom")
+					return errUsage("room create")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdMkRoom(ctx, args[0], args[1]) })
 			},
 		},
-		"upload": {
-			usage: "upload <文件> [-title t] [-artist a] [-duration-ms n]",
+		"media upload": {
+			usage: "media upload <文件> [-title t] [-artist a] [-duration-ms n]",
 			desc:  "上传本地媒体文件（管理员）",
 			detail: `上传音频文件到 local provider。时长自动探测
 （WAV 直接解析，其他格式依赖服务器上的 ffprobe），失败时需显式传 -duration-ms。
@@ -177,13 +173,13 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
   yuzu-cli upload ~/Music/song.wav -title "My Song" -artist "Me"`,
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("upload")
+					return errUsage("media upload")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdUpload(ctx, args[0]) })
 			},
 		},
-		"cache": {
-			usage: "cache",
+		"media cache": {
+			usage: "media cache",
 			desc:  "查看媒体缓存：已缓存条目、进行中的下载、最近下载历史（管理员）",
 			detail: `显示三段缓存状态：
   entries   已落盘的缓存文件（DB 索引）
@@ -195,8 +191,8 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				return withCtx(cmdCache)
 			},
 		},
-		"credential": {
-			usage: "credential <provider> <payload>",
+		"provider credential": {
+			usage: "provider credential <provider> <payload>",
 			desc:  "热更新 provider 凭据（管理员）",
 			detail: `提交 provider 凭据（如 ncm 的 MUSIC_U cookie）。服务端先校验
 有效性再生效，无需重启。凭据存于服务端，不会下发给客户端。
@@ -207,15 +203,15 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
   yuzu-cli credential ncm "MUSIC_U=xxxx"`,
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("credential")
+					return errUsage("provider credential")
 				}
 				return withCtx(func(ctx context.Context) error {
 					return cmdCredential(ctx, args[0], args[1])
 				})
 			},
 		},
-		"providers": {
-			usage: "providers",
+		"provider list": {
+			usage: "provider list",
 			desc:  "列出已注册的 Provider 及凭据状态",
 			detail: `显示服务器上注册的全部 Provider；支持凭据的 Provider 附带
 凭据健康状态（unset / ok / invalid）。状态由服务端定期探活维护。`,
@@ -413,13 +409,13 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdQueueMove(ctx, args[0], args[1], to) })
 			},
 		},
-		"history": {
-			usage:  "history <room> [offset] [-limit 20]",
+		"room history": {
+			usage:  "room history <room> [offset] [-limit 20]",
 			desc:   "查看房间播放历史（最新在前）",
 			detail: "显示最近播放记录：开始时间、标题、点歌人、结束原因\n（natural / skipped / seek-past-end）。",
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("history")
+					return errUsage("room history")
 				}
 				offset := 0
 				if len(args) > 1 {
@@ -428,13 +424,13 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdHistory(ctx, args[0], offset) })
 			},
 		},
-		"top": {
-			usage:  "top <room> [-limit 20]",
+		"room top": {
+			usage:  "room top <room> [-limit 20]",
 			desc:   "房间曲目热度榜：播放次数、首播与最近播放时间",
 			detail: "按播放次数聚合的曲目榜，含首播时间与最近播放时间。",
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("top")
+					return errUsage("room top")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdTop(ctx, args[0]) })
 			},
@@ -466,8 +462,8 @@ max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 k
 				return withCtx(func(ctx context.Context) error { return cmdPolicyShow(ctx, args[0]) })
 			},
 		},
-		"qrlogin": {
-			usage: "qrlogin <provider>",
+		"provider qrlogin": {
+			usage: "provider qrlogin <provider>",
 			desc:  "扫码登录 provider（管理员）",
 			detail: `在终端渲染二维码，用对应 App（如网易云音乐）扫码并确认。
 凭据由服务端在扫码成功后自动提取、校验并热生效，不经过本机。
@@ -478,7 +474,7 @@ max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 k
   yuzu-cli qrlogin ncm`,
 			run: func(args []string) error {
 				if len(args) < 1 {
-					return errUsage("qrlogin")
+					return errUsage("provider qrlogin")
 				}
 				return cmdQRLogin(args[0])
 			},
@@ -495,6 +491,9 @@ var groupMeta = map[string]struct {
 	"queue":    {"队列操作（queue <room> 为查看）", ""},
 	"radio":    {"电台模式", ""},
 	"policy":   {"房间治理策略", ""},
+	"room":     {"房间管理与统计", "list"},
+	"provider": {"Provider 与凭据管理", "list"},
+	"media":    {"媒体与缓存", ""},
 }
 
 // groupChildren 收集某组的全部子命令名（排序）。
@@ -647,6 +646,7 @@ func printHelp(args []string) {
   -password        全局管理员口令 (YUZU_PASSWORD)
   -room-password   房间访客密码 (YUZU_ROOM_PASSWORD)
 
+高频收听操作为顶级命令；管理类操作按域分组（room/provider/media/playlist/radio/policy）。
 查看详细帮助: yuzu-cli help <命令>，如 yuzu-cli help playlist add`)
 }
 
@@ -694,562 +694,6 @@ func playbackCmd(op string) func(args []string) error {
 		return withCtx(func(ctx context.Context) error {
 			return cmdPlayback(ctx, op, args[0], 0)
 		})
-	}
-}
-
-func cmdRooms(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	rooms, err := client.RESTListRooms(ctx, *server, token)
-	if err != nil {
-		return err
-	}
-	if len(rooms) == 0 {
-		fmt.Println("(no rooms — create one with: yuzu-cli mkroom <id> <name>)")
-		return nil
-	}
-	for _, r := range rooms {
-		fmt.Printf("%-20s %s\n", r.ID, r.Name)
-	}
-	return nil
-}
-
-func cmdSearch(ctx context.Context, query string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	tracks, err := client.RESTSearch(ctx, *server, token, *provider, query)
-	if err != nil {
-		return err
-	}
-	if len(tracks) == 0 {
-		fmt.Println("(no results)")
-		return nil
-	}
-	for _, t := range tracks {
-		fmt.Printf("%-24s %-30s %-20s %ds\n", t.Ref, t.Title, t.Artist, t.DurationMs/1000)
-	}
-	return nil
-}
-
-// connect 校时 + 认证 + 进房。
-func connect(ctx context.Context, roomID string) (*client.Client, error) {
-	cli, err := client.Dial(ctx, *server)
-	if err != nil {
-		return nil, err
-	}
-	if err := cli.ClockSync(ctx, 3); err != nil {
-		cli.Close()
-		return nil, err
-	}
-	if _, err := cli.Auth(ctx, *name, *password); err != nil {
-		cli.Close()
-		return nil, err
-	}
-	if err := cli.Join(ctx, roomID, *roomPassword); err != nil {
-		cli.Close()
-		return nil, err
-	}
-	return cli, nil
-}
-
-func cmdAdd(ctx context.Context, roomID, trackRef string) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	if err := cli.QueueAdd(ctx, roomID, trackRef); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdPlayback(ctx context.Context, op, roomID string, positionMs int64) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	if err := cli.PlaybackOp(ctx, op, roomID, positionMs); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdQueueDel(ctx context.Context, roomID, entryID string) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	if err := cli.QueueRemove(ctx, roomID, entryID); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdQueueMove(ctx context.Context, roomID, entryID string, to int) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	if err := cli.QueueMove(ctx, roomID, entryID, to); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdHistory(ctx context.Context, roomID string, offset int) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	rows, err := client.RESTRoomHistory(ctx, *server, token, roomID, offset, *limit)
-	if err != nil {
-		return err
-	}
-	if len(rows) == 0 {
-		fmt.Println("（无记录）")
-		return nil
-	}
-	for i, h := range rows {
-		fmt.Printf("%3d. %s %-40s by %s (%s)\n", offset+i+1,
-			time.UnixMilli(h.StartedAt).Format("01-02 15:04"), h.Title, h.RequestedBy, h.EndReason)
-	}
-	return nil
-}
-
-func cmdTop(ctx context.Context, roomID string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	stats, err := client.RESTRoomStats(ctx, *server, token, roomID, *limit)
-	if err != nil {
-		return err
-	}
-	if len(stats) == 0 {
-		fmt.Println("（无记录）")
-		return nil
-	}
-	for i, t := range stats {
-		fmt.Printf("%3d. [%2d 次] %-40s 首播 %s  最近 %s\n", i+1, t.PlayCount, t.Title,
-			time.UnixMilli(t.FirstPlayedAt).Format("2006-01-02"), time.UnixMilli(t.LastPlayedAt).Format("01-02 15:04"))
-	}
-	return nil
-}
-
-func cmdPolicySet(ctx context.Context, roomID, policy string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	if err := client.RESTUpdateRoomPolicy(ctx, *server, token, roomID, policy); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdPolicyShow(ctx context.Context, roomID string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	rooms, err := client.RESTListRooms(ctx, *server, token)
-	if err != nil {
-		return err
-	}
-	for _, r := range rooms {
-		if r.ID == roomID {
-			fmt.Println(string(r.Policy))
-			return nil
-		}
-	}
-	return fmt.Errorf("room %q not found", roomID)
-}
-
-func cmdQueue(ctx context.Context, roomID string) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	snap, err := cli.AwaitSnapshot(5 * time.Second)
-	if err != nil {
-		return err
-	}
-	if snap.Playback.Current != nil {
-		cur := snap.Playback.Current
-		state := "playing"
-		if !snap.Playback.Playing {
-			state = "paused "
-		}
-		fmt.Printf("%s: %s — %s (%dms/%dms)\n", state, cur.Title, cur.Artist,
-			snap.Playback.ShouldBeMs(cli.ServerNow()), cur.DurationMs)
-		if cur.StreamURL != "" {
-			fmt.Printf("stream:  %s\n", cur.StreamURL)
-		}
-	} else {
-		fmt.Println("playing: (idle)")
-	}
-	if snap.Radio != nil {
-		fmt.Printf("radio:   %s (%s)\n", snap.Radio.Source, radioFlags(snap.Radio))
-	}
-	if len(snap.Queue) == 0 {
-		fmt.Println("queue: (empty)")
-	}
-	for i, e := range snap.Queue {
-		fmt.Printf("  %d. [%s] %s — %s (%ds)\n", i, e.EntryID, e.Title, e.Artist, e.DurationMs/1000)
-	}
-	return nil
-}
-
-// radioFlags 电台标志的人性化描述。
-func radioFlags(r *client.RadioInfo) string {
-	if !r.Finite {
-		return "无限流"
-	}
-	flags := ""
-	if r.Shuffle {
-		flags += "shuffle "
-	}
-	if r.Once {
-		flags += "once "
-	}
-	if flags == "" {
-		return "顺序循环"
-	}
-	return flags[:len(flags)-1]
-}
-
-func cmdStatus(ctx context.Context, roomID string) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	snap, err := cli.AwaitSnapshot(5 * time.Second)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("room:      %s\n", roomID)
-	if snap.Playback.Current != nil {
-		cur := snap.Playback.Current
-		state := "playing"
-		if !snap.Playback.Playing {
-			state = "paused"
-		}
-		fmt.Printf("state:     %s %s — %s (%ds/%ds)\n", state, cur.Title, cur.Artist,
-			snap.Playback.ShouldBeMs(cli.ServerNow())/1000, cur.DurationMs/1000)
-	} else {
-		fmt.Println("state:     idle")
-	}
-	if snap.Radio != nil {
-		fmt.Printf("radio:     %s\n", snap.Radio.Source)
-		fmt.Printf("           %s (%s)\n", snap.Radio.Description, radioFlags(snap.Radio))
-	} else {
-		fmt.Println("radio:     (未绑定，队列播完即停)")
-	}
-	fmt.Printf("queue:     %d 首待播\n", len(snap.Queue))
-	names := make([]string, 0, len(snap.Listeners))
-	for _, l := range snap.Listeners {
-		names = append(names, l.Name)
-	}
-	fmt.Printf("listeners: %d 人 (%s)\n", len(snap.Listeners), strings.Join(names, ", "))
-	return nil
-}
-
-func cmdMkRoom(ctx context.Context, id, roomName string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	if err := client.RESTCreateRoom(ctx, *server, token, id, roomName, *roomPassword); err != nil {
-		return err
-	}
-	fmt.Printf("room %q created (guest password: %s)\n", id, orNone(*roomPassword))
-	return nil
-}
-
-func cmdUpload(ctx context.Context, filePath string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	track, err := client.RESTUpload(ctx, *server, token, filePath, *title, *artist, *durationMs)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("uploaded: %s — %s (%ds) ref=%s\n", track.Title, track.Artist, track.DurationMs/1000, track.Ref)
-	return nil
-}
-
-func cmdCredential(ctx context.Context, providerID, payload string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	return client.RESTSetCredential(ctx, *server, token, providerID, payload)
-}
-
-func cmdPlaylists(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	playlists, err := client.RESTListPlaylists(ctx, *server, token)
-	if err != nil {
-		return err
-	}
-	if len(playlists) == 0 {
-		fmt.Println("(no playlists — create one with: yuzu-cli playlist create <name>)")
-		return nil
-	}
-	for _, p := range playlists {
-		fmt.Printf("%-14s %-24s %d 首\n", p.ID, p.Name, p.TrackCount)
-	}
-	return nil
-}
-
-func cmdPlaylistShow(ctx context.Context, id string, offset int) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	pl, items, err := client.RESTGetPlaylist(ctx, *server, token, id, offset, *limit)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s《%s》 共 %d 首（显示 %d-%d）\n", pl.ID, pl.Name, pl.TrackCount, offset, offset+len(items))
-	for _, it := range items {
-		fmt.Printf("  %-6d %-24s %-30s %-18s %ds\n", it.Ord, it.TrackRef, it.Title, it.Artist, it.DurationMs/1000)
-	}
-	return nil
-}
-
-func cmdPlaylistCreate(ctx context.Context, plName, desc string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	pl, err := client.RESTCreatePlaylist(ctx, *server, token, plName, desc)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("created: %s《%s》\n", pl.ID, pl.Name)
-	return nil
-}
-
-func cmdPlaylistDelete(ctx context.Context, id string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	if err := client.RESTDeletePlaylist(ctx, *server, token, id); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdPlaylistAdd(ctx context.Context, id string, refs []string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	if err := client.RESTAddPlaylistItems(ctx, *server, token, id, refs); err != nil {
-		return err
-	}
-	fmt.Printf("added %d tracks\n", len(refs))
-	return nil
-}
-
-func cmdPlaylistDelItem(ctx context.Context, id string, ord int) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	if err := client.RESTDeletePlaylistItem(ctx, *server, token, id, ord); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdPlaylistImport(ctx context.Context, what, plName string) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	// 判定导入形态：provider:<纯数字id> 或 URL → 外部歌单；其余 → 曲目源物化
-	pid, rest, splitErr := client.SplitRef(what)
-	isNumericRef := splitErr == nil && isDigits(rest)
-	isURL := strings.Contains(what, "://")
-	var pl client.Playlist
-	switch {
-	case isURL:
-		pl, err = client.RESTImportPlaylist(ctx, *server, token, "ncm", what, "", plName)
-	case isNumericRef:
-		pl, err = client.RESTImportPlaylist(ctx, *server, token, pid, rest, "", plName)
-	default:
-		pl, err = client.RESTImportPlaylist(ctx, *server, token, "", "", what, plName)
-	}
-	if err != nil {
-		return err
-	}
-	fmt.Printf("imported: %s《%s》 %d 首\n", pl.ID, pl.Name, pl.TrackCount)
-	return nil
-}
-
-func isDigits(s string) bool {
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return len(s) > 0
-}
-
-func cmdRadioPlay(ctx context.Context, roomID, source string) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	if err := cli.RadioPlay(ctx, roomID, source, *shuffle, *once); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdRadioStop(ctx context.Context, roomID string) error {
-	cli, err := connect(ctx, roomID)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-	if err := cli.RadioStop(ctx, roomID); err != nil {
-		return err
-	}
-	fmt.Println("ok")
-	return nil
-}
-
-func cmdProviders(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	providers, err := client.RESTListProviders(ctx, *server, token)
-	if err != nil {
-		return err
-	}
-	for _, p := range providers {
-		status := p.CredentialStatus
-		if status == "" {
-			status = "-"
-		}
-		fmt.Printf("%-12s %s\n", p.ID, status)
-	}
-	return nil
-}
-
-func cmdCache(ctx context.Context) error {
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	view, err := client.RESTCacheView(ctx, *server, token)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("== downloading (%d) ==\n", len(view.Downloads))
-	for _, d := range view.Downloads {
-		fmt.Printf("  %-28s %s / %s\n", d.TrackRef, humanBytes(d.Fetched), humanBytes(d.Total))
-	}
-	fmt.Printf("== cached (%d) ==\n", len(view.Entries))
-	for _, e := range view.Entries {
-		fmt.Printf("  %-28s %s\n", e.TrackRef, humanBytes(e.SizeBytes))
-	}
-	fmt.Printf("== history (%d) ==\n", len(view.History))
-	for _, h := range view.History {
-		line := fmt.Sprintf("  %-28s %-8s %s", h.TrackRef, h.Status, humanBytes(h.Fetched))
-		if h.Error != "" {
-			line += "  err: " + h.Error
-		}
-		fmt.Println(line)
-	}
-	return nil
-}
-
-func humanBytes(n int64) string {
-	switch {
-	case n < 0:
-		return "?"
-	case n < 1<<10:
-		return fmt.Sprintf("%dB", n)
-	case n < 1<<20:
-		return fmt.Sprintf("%.1fKiB", float64(n)/(1<<10))
-	default:
-		return fmt.Sprintf("%.1fMiB", float64(n)/(1<<20))
-	}
-}
-
-// cmdQRLogin 二维码登录：渲染二维码并轮询，凭据由服务端在扫码成功后自动生效。
-// 轮询不套全局 15s 超时（扫码是分钟级操作），单独给 5 分钟。
-func cmdQRLogin(providerID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	token, err := client.RESTAuth(ctx, *server, *name, *password)
-	if err != nil {
-		return err
-	}
-	sess, err := client.RESTQRLoginStart(ctx, *server, token, providerID)
-	if err != nil {
-		return err
-	}
-	fmt.Println("请用网易云音乐 App 扫描以下二维码：")
-	qrterminal.GenerateHalfBlock(sess.QRContent, qrterminal.L, os.Stdout)
-
-	lastStatus := ""
-	for {
-		res, err := client.RESTQRLoginPoll(ctx, *server, token, providerID, sess.Key)
-		if err != nil {
-			return err
-		}
-		if res.Status != lastStatus {
-			switch res.Status {
-			case "waiting":
-				fmt.Println("等待扫码…")
-			case "scanned":
-				fmt.Println("已扫码，请在 App 上确认登录…")
-			}
-			lastStatus = res.Status
-		}
-		switch res.Status {
-		case "ok":
-			fmt.Println("✓", res.Message)
-			return nil
-		case "expired":
-			return fmt.Errorf("二维码已过期，请重新运行")
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("等待超时")
-		case <-time.After(2 * time.Second):
-		}
 	}
 }
 

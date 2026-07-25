@@ -101,7 +101,7 @@ export YUZU_SERVER=http://127.0.0.1:8080
 export YUZU_PASSWORD=admin123          # 需要管理员权限的操作
 export YUZU_ROOM_PASSWORD=room123
 
-yuzu-cli rooms
+yuzu-cli room list
 yuzu-cli search "海阔天空" -provider ncm   # 或 -provider local
 yuzu-cli add lobby ncm:347230              # 点歌（空闲时自动开播）
 yuzu-cli queue lobby                       # 查看当前播放与队列
@@ -109,10 +109,10 @@ yuzu-cli skip lobby                        # 切歌（管理员）
 yuzu-cli pause|resume|seek lobby [秒]       # 播放控制（管理员）
 
 # 配置 NCM 账号凭据解锁高音质（可选，先校验再生效，热更新）
-yuzu-cli credential ncm "MUSIC_U=xxxx"
+yuzu-cli provider credential ncm "MUSIC_U=xxxx"
 
 # 或者扫码登录：终端渲染二维码，用网易云 App 扫码确认，凭据自动生效
-yuzu-cli qrlogin ncm
+yuzu-cli provider qrlogin ncm
 ```
 
 ## CLI 参考
@@ -128,7 +128,7 @@ yuzu-cli qrlogin ncm
 
 | 子命令 | 权限 | 说明 |
 |---|---|---|
-| `rooms` | 任意身份 | 列出所有房间 |
+| `room list` | 任意身份 | 列出所有房间 |
 | `search <关键词> [-provider p]` | `requester` | 搜索曲目，输出 `track_ref` 供点歌 |
 | `queue <room>` | 任意身份 | 查看当前播放（含实时进度）与队列（含电台行） |
 | `status <room>` | 任意身份 | 房间总览：播放状态、电台绑定、队列规模、听众 |
@@ -136,8 +136,8 @@ yuzu-cli qrlogin ncm
 | `skip <room>` | `room_admin` | 切歌，自动播放下一首 |
 | `pause / resume <room>` | `room_admin` | 暂停 / 恢复 |
 | `seek <room> <秒>` | `room_admin` | 跳转进度 |
-| `mkroom <id> <名称>` | `room_admin` | 创建持久房间 |
-| `upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
+| `room create <id> <名称>` | `room_admin` | 创建持久房间 |
+| `media upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
 | `playlist list` | `requester` | 歌单列表 |
 | `playlist show <id> [offset]` | `requester` | 歌单条目分页（`-limit`） |
 | `playlist create / delete` | `media_admin` | 歌单创建 / 删除 |
@@ -148,12 +148,12 @@ yuzu-cli qrlogin ncm
 | `radio stop <room>` | `room_admin` | 退出电台 |
 | `queue del <room> <entry_id>` | 本人/`room_admin` | 移除队列条目 |
 | `queue move <room> <entry_id> <位置>` | `room_admin` | 移动队列条目 |
-| `history <room> [offset] [-limit]` | 已认证 | 播放历史（最新在前） |
-| `top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
+| `room history <room> [offset] [-limit]` | 已认证 | 播放历史（最新在前） |
+| `room top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
 | `policy set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
 | `policy show <room>` | 已认证 | 查看房间策略 |
-| `credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
-| `qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
+| `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
+| `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
 
 ### 房间治理策略
