@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,6 +39,13 @@ type download struct {
 }
 
 func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *Cache {
+	// 清理上次进程退出时遗留的临时下载文件
+	if matches, _ := filepath.Glob(filepath.Join(dir, "dl-*")); len(matches) > 0 {
+		for _, m := range matches {
+			os.Remove(m)
+		}
+		log.Printf("[cache] removed %d stale temp files", len(matches))
+	}
 	return &Cache{
 		dir:      dir,
 		maxBytes: maxBytes,
@@ -101,23 +109,44 @@ func (c *Cache) Open(ctx context.Context, ref provider.TrackRef) (*os.File, erro
 // 未命中且为首个请求者时，返回边拉边写的 tee 流——
 // 客户端首字节延迟 ≈ 源站响应延迟，同时后台落盘成缓存。
 // 跟随者阻塞等待首个请求完成，然后读完整缓存文件。
+//
+// 错误重试：leader 异常（如客户端探测后断开）不应传染给
+// 同时等待的 follower——跟随者收到错误后轮替为新 leader 重试。
 func (c *Cache) OpenStream(ctx context.Context, ref provider.TrackRef) (io.ReadCloser, error) {
+	var lastErr error
+	for attempt := range 3 {
+		rc, retry, err := c.openStreamOnce(ctx, ref)
+		if err == nil {
+			return rc, nil
+		}
+		lastErr = err
+		if !retry {
+			return nil, err
+		}
+		log.Printf("[cache] %s: %v (retry %d)", ref, err, attempt+1)
+	}
+	return nil, fmt.Errorf("cache: %s: %w (after retries)", ref, lastErr)
+}
+
+func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.ReadCloser, bool, error) {
 	if path := c.Lookup(ctx, ref); path != "" {
-		return os.Open(path)
+		f, err := os.Open(path)
+		return f, false, err
 	}
 	if path, ok, err := c.resolveFile(ctx, ref); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if ok {
-		return os.Open(path)
+		f, err := os.Open(path)
+		return f, false, err
 	}
 
 	p, _, err := c.reg.ForRef(ref)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	loc, err := p.Resolve(ctx, ref)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	c.mu.Lock()
@@ -126,26 +155,31 @@ func (c *Cache) OpenStream(ctx context.Context, ref provider.TrackRef) (io.ReadC
 		select {
 		case <-dl.done:
 			if dl.err != nil {
-				return nil, dl.err
+				// leader 失败可轮替重试
+				return nil, true, dl.err
 			}
 			path := c.Lookup(ctx, ref)
 			if path == "" {
-				return nil, ErrNotFound
+				return nil, true, ErrNotFound
 			}
-			return os.Open(path)
+			f, err := os.Open(path)
+			return f, false, err
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
 	}
 	dl := &download{done: make(chan struct{})}
 	c.inflight[ref] = dl
 	c.mu.Unlock()
 
-	// 发起上游请求
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, loc.URL, nil)
+	// 发起上游请求。注意：不用调用方 ctx——下载的生命周期独立于
+	// 首个客户端连接（客户端断开后转后台继续，见 teeReader.drain）。
+	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	req, err := http.NewRequestWithContext(upCtx, http.MethodGet, loc.URL, nil)
 	if err != nil {
+		upCancel()
 		c.finishInflight(ref, dl, err)
-		return nil, err
+		return nil, true, err
 	}
 	for k, vs := range loc.Header {
 		for _, v := range vs {
@@ -154,36 +188,36 @@ func (c *Cache) OpenStream(ctx context.Context, ref provider.TrackRef) (io.ReadC
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
+		upCancel()
 		c.finishInflight(ref, dl, fmt.Errorf("fetch %s: %w", ref, err))
-		return nil, err
+		return nil, true, fmt.Errorf("fetch: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		err := fmt.Errorf("fetch %s: upstream status %d", ref, resp.StatusCode)
-		c.finishInflight(ref, dl, err)
-		return nil, err
+		upCancel()
+		err := fmt.Errorf("upstream status %d", resp.StatusCode)
+		c.finishInflight(ref, dl, fmt.Errorf("fetch %s: %w", ref, err))
+		return nil, false, err // 上游明确拒绝，重试无意义
 	}
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		resp.Body.Close()
+		upCancel()
 		c.finishInflight(ref, dl, err)
-		return nil, err
+		return nil, false, err
 	}
 	tmp, err := os.CreateTemp(c.dir, "dl-*")
 	if err != nil {
 		resp.Body.Close()
+		upCancel()
 		c.finishInflight(ref, dl, err)
-		return nil, err
+		return nil, false, err
 	}
 
+	log.Printf("[cache] %s: download started (%s)", ref, loc.URL)
 	return &teeReader{
-		ctx:  ctx,
-		c:    c,
-		ref:  ref,
-		dl:   dl,
-		loc:  loc,
-		body: resp.Body,
-		tmp:  tmp,
-	}, nil
+		c: c, ref: ref, dl: dl, loc: loc,
+		body: resp.Body, tmp: tmp, cancel: upCancel,
+	}, false, nil
 }
 
 // ensure 阻塞直到曲目完成缓存（预取路径）。
@@ -205,24 +239,32 @@ func (c *Cache) finishInflight(ref provider.TrackRef, dl *download, err error) {
 	close(dl.done)
 }
 
-// teeReader 读上游的同时写临时文件；读到 EOF 时原子改名并登记缓存。
+// teeReader 读上游的同时写临时文件。
+// 生命周期与首个客户端连接解耦：客户端提前断开时，下载移交后台
+// goroutine 继续完成（drain），缓存照常客成——
+// 这是抗 MPV"探测-断开-重开"模式的关键。
 type teeReader struct {
-	ctx  context.Context
-	c    *Cache
-	ref  provider.TrackRef
-	dl   *download
-	loc  provider.StreamLocator
-	body io.ReadCloser
-	tmp  *os.File
-	size int64
-	done bool
+	c      *Cache
+	ref    provider.TrackRef
+	dl     *download
+	loc    provider.StreamLocator
+	body   io.ReadCloser
+	tmp    *os.File
+	cancel context.CancelFunc // 上游请求的超时控制
+
+	mu        sync.Mutex
+	size      int64
+	done      bool // 已读完并 finalize
+	handedOff bool // 已移交后台 drain
 }
 
 func (t *teeReader) Read(p []byte) (int, error) {
 	n, err := t.body.Read(p)
 	if n > 0 {
 		wn, werr := t.tmp.Write(p[:n])
+		t.mu.Lock()
 		t.size += int64(wn)
+		t.mu.Unlock()
 		if werr != nil && err == nil {
 			err = werr
 		}
@@ -233,23 +275,54 @@ func (t *teeReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Close 由 HTTP 层defer调用。客户端提前断开（未读到 EOF）时，
+// 不中止下载——移交后台继续，缓存照常客成，后续请求直接命中。
 func (t *teeReader) Close() error {
-	t.body.Close()
-	if !t.done {
-		// 客户端提前断开：放弃缓存，清理现场
-		t.tmp.Close()
-		os.Remove(t.tmp.Name())
-		t.done = true
-		t.c.finishInflight(t.ref, t.dl, errors.New("download aborted: client disconnected"))
+	t.mu.Lock()
+	if t.done {
+		t.mu.Unlock()
+		return t.body.Close()
 	}
+	if t.handedOff {
+		t.mu.Unlock()
+		return nil
+	}
+	t.handedOff = true
+	t.mu.Unlock()
+	log.Printf("[cache] %s: client disconnected, download continues in background", t.ref)
+	go t.drain()
 	return nil
 }
 
+// drain 后台完成剩余下载。
+func (t *teeReader) drain() {
+	n, err := io.Copy(t.tmp, t.body)
+	t.body.Close()
+	t.mu.Lock()
+	t.size += n
+	t.mu.Unlock()
+	if err != nil {
+		t.tmp.Close()
+		os.Remove(t.tmp.Name())
+		t.cancel()
+		log.Printf("[cache] %s: background download failed: %v", t.ref, err)
+		t.c.finishInflight(t.ref, t.dl, fmt.Errorf("background drain: %w", err))
+		return
+	}
+	t.finalize()
+}
+
 func (t *teeReader) finalize() {
+	t.mu.Lock()
 	if t.done {
+		t.mu.Unlock()
 		return
 	}
 	t.done = true
+	size := t.size
+	t.mu.Unlock()
+	defer t.cancel()
+
 	tmpPath := t.tmp.Name()
 	if err := t.tmp.Close(); err != nil {
 		os.Remove(tmpPath)
@@ -267,12 +340,13 @@ func (t *teeReader) finalize() {
 		return
 	}
 	now := time.Now().UnixMilli()
-	err := t.c.st.PutCacheRow(t.ctx, store.CacheRow{
-		TrackRef: t.ref.String(), FilePath: final, SizeBytes: t.size,
+	err := t.c.st.PutCacheRow(context.Background(), store.CacheRow{
+		TrackRef: t.ref.String(), FilePath: final, SizeBytes: size,
 		LastAccessedAt: now, CreatedAt: now,
 	})
 	t.c.finishInflight(t.ref, t.dl, err)
 	if err == nil {
+		log.Printf("[cache] %s: cached %d bytes -> %s", t.ref, size, final)
 		go t.c.evict()
 	}
 }

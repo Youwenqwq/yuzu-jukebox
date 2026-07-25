@@ -455,6 +455,9 @@ func cmdQueue(ctx context.Context, roomID string) error {
 		fmt.Printf("playing: %s — %s (%dms/%dms)\n",
 			playback.Current.Title, playback.Current.Artist,
 			playback.ShouldBeMs(cli.ServerNow()), playback.Current.DurationMs)
+		if playback.Current.StreamURL != "" {
+			fmt.Printf("stream:  %s\n", playback.Current.StreamURL)
+		}
 	} else {
 		fmt.Println("playing: (idle)")
 	}
