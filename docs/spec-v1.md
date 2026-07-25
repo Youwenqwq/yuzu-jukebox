@@ -88,12 +88,13 @@ should_be = position_ms                                        (paused 时)
 
 ### 4.1 房间快照
 
-`room.join` 成功时，服务端按固定顺序推送四条消息：
+`room.join` 成功时，服务端按固定顺序推送五条消息：
 
 1. `room.joined`（回带 ref，data: `{"room_id": "..."}`）
 2. `playback.changed` —— 当前播放状态
 3. `queue.changed` —— 完整队列
-4. `listeners.changed` —— 完整听众列表
+4. `radio.changed` —— 电台模式状态（见 4.5）
+5. `listeners.changed` —— 完整听众列表
 
 三条快照消息此后有任何变更都会再次全量推送，客户端始终用最新一份覆盖本地副本。
 
@@ -121,6 +122,8 @@ should_be = position_ms                                        (paused 时)
 
 **`listeners.changed` 的 data：**`{"listeners": [ {"id": "...", "name": "..."}, ... ]}`
 
+**`radio.changed` 的 data：**`{"radio": null | {"source": "...", "description": "...", "finite": true, "shuffle": false, "once": false}}`（见 4.5）
+
 ### 4.2 客户端 → 服务端消息
 
 | type | data | 权限 | 说明 |
@@ -133,6 +136,8 @@ should_be = position_ms                                        (paused 时)
 | `playback.pause` / `playback.resume` | `{room_id}` | `room_admin` | |
 | `playback.seek` | `{room_id, position_ms}` | `room_admin` | |
 | `playback.skip` | `{room_id}` | `room_admin` | 切下一首 |
+| `radio.play` | `{room_id, source, shuffle, once}` | `room_admin` | 进入电台模式（见 4.5） |
+| `radio.stop` | `{room_id}` | `room_admin` | 退出电台模式 |
 
 ### 4.3 服务端 → 客户端消息
 
@@ -146,12 +151,35 @@ should_be = position_ms                                        (paused 时)
 | `playback.changed` | 播放/暂停/seek/切歌/自然结束/新听众进房 | 完整 `playback` 对象（见 4.1） |
 | `queue.changed` | 队列任何变更 | `{"queue": [...]}`（当前版本全量下发，量大后再做 diff） |
 | `listeners.changed` | 听众进出 | `{"listeners": [...]}` |
+| `radio.changed` | 电台开启/停止/新听众进房 | `{"radio": null | {...}}` |
 
 **请求-响应匹配**：除广播三件套（`playback/queue/listeners.changed`）外，所有服务端消息都回带触发它的请求的 `ref`。客户端 MUST 用 `ref` 把响应路由到对应请求；无匹配 `ref` 的消息按广播处理。
 
 **关键设计：`playback.changed` 永远携带完整 playback 对象。** 客户端无需区分事件原因，统一按"以最新状态重算 should_be"处理。新增听众也凭此一次性对齐。
 
-### 4.4 出流票据
+### 4.5 电台模式与曲目源
+
+房间可绑定一个**曲目源（TrackSource）**进入电台模式：队列见底（<3 首）时服务端自动从源批量补充（10 首），实现无人值守续播。用户点歌与补充批次自然混排。
+
+**源规格字符串**（`radio.play` 的 `source` 字段）：
+
+| 规格 | 类型 | 说明 |
+|---|---|---|
+| `playlist:<id>` | 有限 | 通用歌单；顺序循环 / once；`-shuffle` 为洗牌袋 |
+| `ncm:daily` | 有限 | 每日推荐；TTL 物化，跨日自动重拉 |
+| `ncm:simi:<song_id>` | 无限 | 相似歌曲链式游走：种子初始为规格 id，之后跟随当前播放曲目 |
+| `ncm:heart:<song_id>` | 无限 | 心动模式：种子 = 登录账号"我喜欢" + 当前播放曲目 |
+| `ncm:fm` | 无限 | 私人FM：每批新 API 调用，不耗尽 |
+
+规则：
+
+- 无限源（`finite=false`）**拒绝** `shuffle`/`once`（返回 `bad_request`）。
+- 链式/无限源内部维护 seen 集合（约 500 条滚动窗口）防重复；整批均重复时判定耗尽，服务端自动停止电台并广播 `radio.changed{null}`。
+- 源出错（如凭据失效）时服务端停止电台并广播 `radio.changed{null}`，服务端日志留痕。
+- 电台状态为**运行时状态**：不落库，重启即止（队列保留）。
+- `radio.play` 切换源时**不清空**现有队列；新源在队列见底后才开始补充。
+
+### 4.6 出流票据
 
 - `stream_url` 中的 `ticket` 为短时效（5 分钟）、绑定身份与 track 的令牌。
 - 票据在 TTL 内**可复用**：客户端的 Range 请求与断线重试都依赖同一 URL。曲目播完（切歌/自然结束）时该曲目所有票据立即失效。
@@ -227,6 +255,13 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | 热更新 Provider 凭据（如 ncm 的 MUSIC_U cookie）；服务端先校验再生效，凭据存 credentials 表，永不下发 |
 | `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 生成二维码登录会话，返回 `{key, qr_content}`（客户端自行渲染二维码） |
 | `GET /api/v1/providers/{id}/qrlogin/{key}` | `media_admin` | 轮询扫码状态：waiting / scanned / ok / expired；ok 时服务端已自行提取 MUSIC_U、校验并热生效（cookie 不经过客户端） |
+| `GET /api/v1/playlists` | `requester` | 歌单列表（含曲目数，不含条目） |
+| `POST /api/v1/playlists` | `media_admin` | 创建歌单 `{name, description}` |
+| `GET /api/v1/playlists/{id}?offset=&limit=` | `requester` | 歌单详情 + 条目分页（默认 50，上限 200） |
+| `DELETE /api/v1/playlists/{id}` | `media_admin` | 删除歌单 |
+| `POST /api/v1/playlists/{id}/items` | `media_admin` | 追加条目 `{track_refs: [...]}`（单次≤100，元数据实时快照） |
+| `DELETE /api/v1/playlists/{id}/items/{ord}` | `media_admin` | 按序号删条目，后续重排 |
+| `POST /api/v1/playlists/import` | `media_admin` | 导入：`{provider, playlist_id}`（外部歌单，ncm 支持 id 或 URL，分页拉全量）或 `{source}`（曲目源物化，如 `ncm:daily`）；可选 `{name}` |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |
 | `GET /api/v1/media/cache` | `media_admin` | 缓存全貌：`entries`（已缓存）、`downloads`（进行中，含进度）、`history`（最近 20 条成功/失败记录，内存态） |
 | `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 手动清理单条缓存 |

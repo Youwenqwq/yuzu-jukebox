@@ -34,6 +34,9 @@ var (
 	title        = flag.String("title", "", "upload title")
 	artist       = flag.String("artist", "", "upload artist")
 	durationMs   = flag.Int64("duration-ms", 0, "upload duration in milliseconds (auto-detected if 0)")
+	shuffle      = flag.Bool("shuffle", false, "radio: shuffle mode")
+	once         = flag.Bool("once", false, "radio: play through once, no loop")
+	limit        = flag.Int("limit", 50, "pagination limit")
 
 	helpWanted bool
 )
@@ -220,6 +223,158 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 			return withCtx(cmdProviders)
 		},
 	},
+	"playlists": {
+		usage: "playlists",
+		desc:  "列出全部歌单",
+		detail: "列出服务器上的歌单（含曲目数）。查看歌单内容用 playlist-show。",
+		run: func(args []string) error {
+			return withCtx(cmdPlaylists)
+		},
+	},
+	"playlist-show": {
+		usage: "playlist-show <id> [offset] [-limit 50]",
+		desc:  "查看歌单内容（分页）",
+		detail: `分页显示歌单条目（序号、track_ref、标题、艺术家、时长）。
+
+示例：
+  yuzu-cli playlist-show pl_a1b2c3 0 -limit 20`,
+		run: func(args []string) error {
+			if len(args) < 1 {
+				return errUsage("playlist-show")
+			}
+			offset := 0
+			if len(args) > 1 {
+				offset, _ = strconv.Atoi(args[1])
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdPlaylistShow(ctx, args[0], offset)
+			})
+		},
+	},
+	"playlist-create": {
+		usage: "playlist-create <名称> [描述]",
+		desc:  "创建歌单（管理员）",
+		detail: "创建一张空的通用歌单。\n\n需要 media_admin 角色。",
+		run: func(args []string) error {
+			if len(args) < 1 {
+				return errUsage("playlist-create")
+			}
+			desc := ""
+			if len(args) > 1 {
+				desc = args[1]
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdPlaylistCreate(ctx, args[0], desc)
+			})
+		},
+	},
+	"playlist-delete": {
+		usage:  "playlist-delete <id>",
+		desc:   "删除歌单（管理员）",
+		detail: "删除歌单及其全部条目。\n\n需要 media_admin 角色。",
+		run: func(args []string) error {
+			if len(args) < 1 {
+				return errUsage("playlist-delete")
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdPlaylistDelete(ctx, args[0])
+			})
+		},
+	},
+	"playlist-add": {
+		usage: "playlist-add <id> <track_ref>...",
+		desc:  "向歌单追加曲目（管理员）",
+		detail: `把一个或多个 track_ref 追加到歌单尾部（单次最多 100 首）。
+元数据快照自各 provider 实时获取。
+
+需要 media_admin 角色。`,
+		run: func(args []string) error {
+			if len(args) < 2 {
+				return errUsage("playlist-add")
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdPlaylistAdd(ctx, args[0], args[1:])
+			})
+		},
+	},
+	"playlist-delitem": {
+		usage:  "playlist-delitem <id> <ord>",
+		desc:   "删除歌单中的指定条目（管理员）",
+		detail: "按序号（ord，playlist-show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
+		run: func(args []string) error {
+			if len(args) < 2 {
+				return errUsage("playlist-delitem")
+			}
+			ord, err := strconv.Atoi(args[1])
+			if err != nil {
+				return fmt.Errorf("invalid ord: %s", args[1])
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdPlaylistDelItem(ctx, args[0], ord)
+			})
+		},
+	},
+	"playlist-import": {
+		usage: "playlist-import <ncm:歌单id|URL|ncm:daily> [名称]",
+		desc:  "导入外部歌单或曲目源快照（管理员）",
+		detail: `两种用法：
+  playlist-import ncm:24381616     导入 ncm 歌单（也接受完整 URL）
+  playlist-import ncm:daily        把每日推荐物化成歌单
+
+需要 media_admin 角色。长歌单分页拉取，可能需要几秒。`,
+		run: func(args []string) error {
+			if len(args) < 1 {
+				return errUsage("playlist-import")
+			}
+			name := ""
+			if len(args) > 1 {
+				name = args[1]
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdPlaylistImport(ctx, args[0], name)
+			})
+		},
+	},
+	"radio-play": {
+		usage: "radio-play <room> <source> [-shuffle] [-once]",
+		desc:  "房间进入电台模式：绑定曲目源自动续播（管理员）",
+		detail: `让房间绑定一个曲目源，队列见底时自动批量补充，实现无人值守续播。
+
+source 取值：
+  playlist:<id>       通用歌单（playlist-show 可查 id）
+  ncm:daily            网易云每日推荐
+  ncm:fm               网易云私人FM（无限流，不接受 -shuffle/-once）
+  ncm:simi:<song_id>  相似歌曲电台（种子=当前播放曲目）
+  ncm:heart:<song_id> 心动模式（种子=我喜欢+当前播放）
+
+-shuffle 洗牌袋随机（仅有限源）；-once 播完即停（仅有限源）。
+需要 room_admin 角色。
+
+示例：
+  yuzu-cli radio-play lobby playlist:pl_a1b2c3 -shuffle
+  yuzu-cli radio-play lobby ncm:fm`,
+		run: func(args []string) error {
+			if len(args) < 2 {
+				return errUsage("radio-play")
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdRadioPlay(ctx, args[0], args[1])
+			})
+		},
+	},
+	"radio-stop": {
+		usage:  "radio-stop <room>",
+		desc:   "退出电台模式（管理员）",
+		detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要 room_admin 角色。",
+		run: func(args []string) error {
+			if len(args) < 1 {
+				return errUsage("radio-stop")
+			}
+			return withCtx(func(ctx context.Context) error {
+				return cmdRadioStop(ctx, args[0])
+			})
+		},
+	},
 	"qrlogin": {
 		usage: "qrlogin <provider>",
 		desc:  "扫码登录 provider（管理员）",
@@ -268,7 +423,7 @@ func main() {
 }
 
 // parseFlagsAnywhere 允许 flag 出现在子命令前后任意位置。
-// 我们所有 flag 都是带值类型，逐个扫描即可安全分离；-h/--help 单独拦截。
+// 带值 flag 消费下一个参数；布尔 flag 不消费（由 flag 包的 IsBoolFlag 判定）。
 func parseFlagsAnywhere() []string {
 	var positional, flagArgs []string
 	args := os.Args[1:]
@@ -279,7 +434,8 @@ func parseFlagsAnywhere() []string {
 			helpWanted = true
 		case strings.HasPrefix(a, "-"):
 			flagArgs = append(flagArgs, a)
-			if !strings.Contains(a, "=") && i+1 < len(args) {
+			name := strings.TrimLeft(a, "-")
+			if !strings.Contains(name, "=") && !isBoolFlag(name) && i+1 < len(args) {
 				i++
 				flagArgs = append(flagArgs, args[i])
 			}
@@ -291,6 +447,16 @@ func parseFlagsAnywhere() []string {
 		os.Exit(2)
 	}
 	return positional
+}
+
+// isBoolFlag 判断已注册 flag 是否为布尔型（布尔 flag 不带值参数）。
+func isBoolFlag(name string) bool {
+	f := flag.CommandLine.Lookup(name)
+	if f == nil {
+		return false
+	}
+	bf, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && bf.IsBoolFlag()
 }
 
 // ---------- 帮助 ----------
@@ -523,6 +689,150 @@ func cmdCredential(ctx context.Context, providerID, payload string) error {
 		return err
 	}
 	return client.RESTSetCredential(ctx, *server, token, providerID, payload)
+}
+
+func cmdPlaylists(ctx context.Context) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	playlists, err := client.RESTListPlaylists(ctx, *server, token)
+	if err != nil {
+		return err
+	}
+	if len(playlists) == 0 {
+		fmt.Println("(no playlists — create one with: yuzu-cli playlist-create <name>)")
+		return nil
+	}
+	for _, p := range playlists {
+		fmt.Printf("%-14s %-24s %d 首\n", p.ID, p.Name, p.TrackCount)
+	}
+	return nil
+}
+
+func cmdPlaylistShow(ctx context.Context, id string, offset int) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	pl, items, err := client.RESTGetPlaylist(ctx, *server, token, id, offset, *limit)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s《%s》 共 %d 首（显示 %d-%d）\n", pl.ID, pl.Name, pl.TrackCount, offset, offset+len(items))
+	for _, it := range items {
+		fmt.Printf("  %-6d %-24s %-30s %-18s %ds\n", it.Ord, it.TrackRef, it.Title, it.Artist, it.DurationMs/1000)
+	}
+	return nil
+}
+
+func cmdPlaylistCreate(ctx context.Context, plName, desc string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	pl, err := client.RESTCreatePlaylist(ctx, *server, token, plName, desc)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created: %s《%s》\n", pl.ID, pl.Name)
+	return nil
+}
+
+func cmdPlaylistDelete(ctx context.Context, id string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTDeletePlaylist(ctx, *server, token, id); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdPlaylistAdd(ctx context.Context, id string, refs []string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTAddPlaylistItems(ctx, *server, token, id, refs); err != nil {
+		return err
+	}
+	fmt.Printf("added %d tracks\n", len(refs))
+	return nil
+}
+
+func cmdPlaylistDelItem(ctx context.Context, id string, ord int) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTDeletePlaylistItem(ctx, *server, token, id, ord); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdPlaylistImport(ctx context.Context, what, plName string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	// 判定导入形态：provider:<纯数字id> 或 URL → 外部歌单；其余 → 曲目源物化
+	pid, rest, splitErr := client.SplitRef(what)
+	isNumericRef := splitErr == nil && isDigits(rest)
+	isURL := strings.Contains(what, "://")
+	var pl client.Playlist
+	switch {
+	case isURL:
+		pl, err = client.RESTImportPlaylist(ctx, *server, token, "ncm", what, "", plName)
+	case isNumericRef:
+		pl, err = client.RESTImportPlaylist(ctx, *server, token, pid, rest, "", plName)
+	default:
+		pl, err = client.RESTImportPlaylist(ctx, *server, token, "", "", what, plName)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("imported: %s《%s》 %d 首\n", pl.ID, pl.Name, pl.TrackCount)
+	return nil
+}
+
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func cmdRadioPlay(ctx context.Context, roomID, source string) error {
+	cli, err := connect(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	if err := cli.RadioPlay(ctx, roomID, source, *shuffle, *once); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdRadioStop(ctx context.Context, roomID string) error {
+	cli, err := connect(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	if err := cli.RadioStop(ctx, roomID); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
 }
 
 func cmdProviders(ctx context.Context) error {

@@ -137,9 +137,32 @@ yuzu-cli qrlogin ncm
 | `seek <room> <秒>` | `room_admin` | 跳转进度 |
 | `mkroom <id> <名称>` | `room_admin` | 创建持久房间 |
 | `upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
+| `playlists` | `requester` | 歌单列表 |
+| `playlist-show <id> [offset]` | `requester` | 歌单条目分页（`-limit`） |
+| `playlist-create / playlist-delete` | `media_admin` | 歌单创建 / 删除 |
+| `playlist-add <id> <ref>...` | `media_admin` | 追加条目（≤100/次） |
+| `playlist-delitem <id> <ord>` | `media_admin` | 删除条目 |
+| `playlist-import <ncm:id|URL|ncm:daily>` | `media_admin` | 导入外部歌单或曲目源快照 |
+| `radio-play <room> <source>` | `room_admin` | 电台模式（`-shuffle` / `-once`） |
+| `radio-stop <room>` | `room_admin` | 退出电台 |
 | `credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
+
+### 电台模式
+
+房间可绑定**曲目源**实现无人值守续播（队列见底自动批量补充）：
+
+```bash
+yuzu-cli radio-play lobby playlist:pl_xxx -shuffle   # 通用歌单，洗牌袋
+yuzu-cli radio-play lobby ncm:daily                  # 每日推荐（跨日自动刷新）
+yuzu-cli radio-play lobby ncm:fm                     # 私人FM（无限流）
+yuzu-cli radio-play lobby ncm:simi:347230            # 相似歌曲电台（跟随当前曲目）
+yuzu-cli radio-play lobby ncm:heart:347230           # 心动模式
+yuzu-cli radio-stop lobby                            # 退出电台
+```
+
+无限源（fm/simi/heart）不接受 `-shuffle`/`-once`；链式源有 seen 去重防绕圈。
 
 每个子命令都有独立帮助文档，如 `yuzu-cli search --help`。
 
@@ -190,9 +213,13 @@ go test ./... -race
 已实现：
 
 - 房间 actor 模型（持久房间、队列持久化、服务端权威时钟、自然结束检测）
-- local Provider（上传、WAV/ffprobe 时长探测）、ncm Provider、bili Provider
-- 凭据热更新（先校验再生效）、扫码登录（ncm / bili）、流式缓存、票据化出流
-- MPV 播放代理、控制 CLI（含子命令帮助）、端到端冒烟测试
+- local / ncm / bili 三个 Provider
+- 通用歌单（CRUD、分页、ncm 歌单导入、曲目源物化）
+- 电台模式（TrackSource 抽象：歌单/每日推荐/私人FM/相似歌曲/心动模式，
+  洗牌袋、once、链式种子、seen 去重）
+- 凭据热更新、扫码登录（ncm / bili）、凭据定期健康检查（credmon）
+- 流式缓存（tee + 后台续传 + LRU）、下载进度可观测、票据化出流
+- MPV 播放代理（防抖渲染）、控制 CLI（子命令帮助）、端到端冒烟测试
 
 规划中（spec §8 也列了明确不做的）：
 

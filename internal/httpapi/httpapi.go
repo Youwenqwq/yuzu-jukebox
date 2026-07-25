@@ -52,6 +52,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/media/upload", s.upload)
 	mux.HandleFunc("GET /api/v1/media/cache", s.listCache)
 	mux.HandleFunc("DELETE /api/v1/media/cache/{ref}", s.evictCache)
+	mux.HandleFunc("GET /api/v1/playlists", s.listPlaylists)
+	mux.HandleFunc("POST /api/v1/playlists", s.createPlaylist)
+	mux.HandleFunc("GET /api/v1/playlists/{id}", s.getPlaylist)
+	mux.HandleFunc("DELETE /api/v1/playlists/{id}", s.deletePlaylist)
+	mux.HandleFunc("POST /api/v1/playlists/{id}/items", s.addPlaylistItems)
+	mux.HandleFunc("DELETE /api/v1/playlists/{id}/items/{ord}", s.deletePlaylistItem)
+	mux.HandleFunc("POST /api/v1/playlists/import", s.importPlaylist)
 	mux.HandleFunc("GET /stream/v1/{ref}", s.stream)
 	mux.Handle("/ws/v1", s.ws)
 	return mux

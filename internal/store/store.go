@@ -257,6 +257,143 @@ func (s *Store) DeleteCacheRow(ctx context.Context, trackRef string) error {
 	return err
 }
 
+// ---------- 歌单 ----------
+
+type Playlist struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CreatedBy   string `json:"created_by"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+	TrackCount  int    `json:"track_count"`
+}
+
+type PlaylistItem struct {
+	Ord        int    `json:"ord"`
+	TrackRef   string `json:"track_ref"`
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	DurationMs int64  `json:"duration_ms"`
+	AddedAt    int64  `json:"added_at"`
+}
+
+func (s *Store) CreatePlaylist(ctx context.Context, p Playlist) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO playlists (id, name, description, created_by, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Description, p.CreatedBy, p.CreatedAt, p.UpdatedAt)
+	return err
+}
+
+func (s *Store) DeletePlaylist(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM playlists WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) GetPlaylist(ctx context.Context, id string) (Playlist, error) {
+	var p Playlist
+	err := s.db.QueryRowContext(ctx,
+		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
+		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
+		 FROM playlists p WHERE p.id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.TrackCount)
+	return p, err
+}
+
+func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
+		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
+		 FROM playlists p ORDER BY p.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Playlist
+	for rows.Next() {
+		var p Playlist
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.TrackCount); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// AppendPlaylistItems 事务批量追加（ord 从当前最大值续排）。
+func (s *Store) AppendPlaylistItems(ctx context.Context, playlistID string, items []PlaylistItem) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var maxOrd sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT MAX(ord) FROM playlist_items WHERE playlist_id = ?`, playlistID).Scan(&maxOrd); err != nil {
+		return err
+	}
+	ord := maxOrd.Int64 + 1
+	for _, it := range items {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO playlist_items (playlist_id, ord, track_ref, title, artist, duration_ms, added_at)
+			 VALUES (?,?,?,?,?,?,?)`,
+			playlistID, ord, it.TrackRef, it.Title, it.Artist, it.DurationMs, it.AddedAt); err != nil {
+			return err
+		}
+		ord++
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE playlists SET updated_at = ? WHERE id = ?`, nowMs(), playlistID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PlaylistItems 分页读取（按 ord 升序）。
+func (s *Store) PlaylistItems(ctx context.Context, playlistID string, offset, limit int) ([]PlaylistItem, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ord, track_ref, title, artist, duration_ms, added_at
+		 FROM playlist_items WHERE playlist_id = ? ORDER BY ord LIMIT ? OFFSET ?`,
+		playlistID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PlaylistItem
+	for rows.Next() {
+		var it PlaylistItem
+		if err := rows.Scan(&it.Ord, &it.TrackRef, &it.Title, &it.Artist, &it.DurationMs, &it.AddedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// DeletePlaylistItem 按 ord 删除一条并重排后续 ord（低频操作，重写换简单）。
+func (s *Store) DeletePlaylistItem(ctx context.Context, playlistID string, ord int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM playlist_items WHERE playlist_id = ? AND ord = ?`, playlistID, ord)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE playlist_items SET ord = ord - 1 WHERE playlist_id = ? AND ord > ?`,
+		playlistID, ord); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ---------- 凭据 ---------
 
 // GetCredential 取某 provider 的凭据原文；未设置返回空串。

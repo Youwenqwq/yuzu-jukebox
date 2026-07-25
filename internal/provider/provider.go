@@ -67,6 +67,34 @@ type Provider interface {
 	Resolve(ctx context.Context, ref TrackRef) (StreamLocator, error)
 }
 
+// TrackSource 是曲目源抽象：radio 模式的供给端。
+// 实现方可以是通用歌单（DB 游标）、ncm 每日推荐（TTL 物化）、
+// 相似歌曲/心动模式（链式种子）、私人FM（无限流）等。
+type TrackSource interface {
+	// NextBatch 取下一批曲目（至多 n 首）。
+	// seed 为房间当前播放曲目的 ref（无播放时为零值），链式源用它换批。
+	// exhausted=true 表示源耗尽（仅有限源在 once 语义下会为 true）。
+	NextBatch(ctx context.Context, n int, seed TrackRef) (tracks []Track, exhausted bool, err error)
+	// Description 展示用描述，如 "歌单《古典精选》" / "网易云每日推荐"。
+	Description() string
+	// Finite 有限源返回 true（接受 shuffle/once 语义）；无限流返回 false。
+	Finite() bool
+}
+
+// SourceFactory 是可选接口：能充当曲目源工厂的 Provider 实现它。
+// spec 为 "<provider>:" 之后的部分（如 "daily" "fm" "simi:<id>"）。
+type SourceFactory interface {
+	Provider
+	NewSource(ctx context.Context, spec string) (TrackSource, error)
+}
+
+// PlaylistImporter 是可选接口：支持导入外部歌单的 Provider 实现它。
+type PlaylistImporter interface {
+	Provider
+	// ImportPlaylist 拉取外部歌单全量曲目；playlistID 可为裸 id 或完整 URL。
+	ImportPlaylist(ctx context.Context, playlistID string) (name string, tracks []Track, err error)
+}
+
 // QRLoginAware 是可选接口：支持二维码登录的 Provider 实现它。
 // status 取值：expired | waiting | scanned | ok。
 type QRLoginAware interface {

@@ -247,6 +247,20 @@ func (c *Client) PlaybackOp(ctx context.Context, op, roomID string, positionMs i
 	return err
 }
 
+// RadioPlay 让房间进入电台模式。
+func (c *Client) RadioPlay(ctx context.Context, roomID, source string, shuffle, once bool) error {
+	_, err := c.call(ctx, "radio.play", map[string]any{
+		"room_id": roomID, "source": source, "shuffle": shuffle, "once": once,
+	})
+	return err
+}
+
+// RadioStop 退出电台模式。
+func (c *Client) RadioStop(ctx context.Context, roomID string) error {
+	_, err := c.call(ctx, "radio.stop", map[string]any{"room_id": roomID})
+	return err
+}
+
 // ---------- 房间状态（客户端视图） ----------
 
 type QueueEntry struct {
@@ -333,11 +347,101 @@ func RESTListProviders(ctx context.Context, server, token string) ([]ProviderInf
 	return out.Providers, err
 }
 
+// SplitRef 拆解 track_ref / 源规格为 provider 与 id 部分。
+func SplitRef(spec string) (providerID, id string, err error) {
+	p, rest, ok := strings.Cut(spec, ":")
+	if !ok || p == "" || rest == "" {
+		return "", "", fmt.Errorf("invalid ref %q, want \"provider:id\"", spec)
+	}
+	return p, rest, nil
+}
+
 type Track struct {
 	Ref        string `json:"track_ref"`
 	Title      string `json:"title"`
 	Artist     string `json:"artist"`
 	DurationMs int64  `json:"duration_ms"`
+}
+
+// ---------- 歌单 ----------
+
+type Playlist struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CreatedBy   string `json:"created_by"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+	TrackCount  int    `json:"track_count"`
+}
+
+type PlaylistItem struct {
+	Ord        int    `json:"ord"`
+	TrackRef   string `json:"track_ref"`
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	DurationMs int64  `json:"duration_ms"`
+	AddedAt    int64  `json:"added_at"`
+}
+
+func RESTListPlaylists(ctx context.Context, server, token string) ([]Playlist, error) {
+	var out struct {
+		Playlists []Playlist `json:"playlists"`
+	}
+	err := restCall(ctx, server, "GET", "/api/v1/playlists", token, nil, &out)
+	return out.Playlists, err
+}
+
+func RESTGetPlaylist(ctx context.Context, server, token, id string, offset, limit int) (Playlist, []PlaylistItem, error) {
+	var out struct {
+		Playlist Playlist       `json:"playlist"`
+		Items    []PlaylistItem `json:"items"`
+	}
+	path := fmt.Sprintf("/api/v1/playlists/%s?offset=%d&limit=%d", id, offset, limit)
+	err := restCall(ctx, server, "GET", path, token, nil, &out)
+	return out.Playlist, out.Items, err
+}
+
+func RESTCreatePlaylist(ctx context.Context, server, token, name, description string) (Playlist, error) {
+	var out struct {
+		Playlist Playlist `json:"playlist"`
+	}
+	err := restCall(ctx, server, "POST", "/api/v1/playlists", token,
+		map[string]any{"name": name, "description": description}, &out)
+	return out.Playlist, err
+}
+
+func RESTDeletePlaylist(ctx context.Context, server, token, id string) error {
+	return restCall(ctx, server, "DELETE", "/api/v1/playlists/"+id, token, nil, &struct{}{})
+}
+
+func RESTAddPlaylistItems(ctx context.Context, server, token, id string, refs []string) error {
+	return restCall(ctx, server, "POST", "/api/v1/playlists/"+id+"/items", token,
+		map[string]any{"track_refs": refs}, &struct{}{})
+}
+
+func RESTDeletePlaylistItem(ctx context.Context, server, token, id string, ord int) error {
+	return restCall(ctx, server, "DELETE",
+		fmt.Sprintf("/api/v1/playlists/%s/items/%d", id, ord), token, nil, &struct{}{})
+}
+
+// RESTImportPlaylist 导入外部歌单或曲目源快照。provider+playlistID 或 source 二选一。
+func RESTImportPlaylist(ctx context.Context, server, token, prov, playlistID, source, name string) (Playlist, error) {
+	var out struct {
+		Playlist Playlist `json:"playlist"`
+	}
+	body := map[string]any{}
+	if source != "" {
+		body["source"] = source
+	} else {
+		body["provider"] = prov
+		body["playlist_id"] = playlistID
+	}
+	if name != "" {
+		body["name"] = name
+	}
+	err := restCall(ctx, server, "POST", "/api/v1/playlists/import", token, body, &out)
+	return out.Playlist, err
 }
 
 func RESTSearch(ctx context.Context, server, token, provider, query string) ([]Track, error) {

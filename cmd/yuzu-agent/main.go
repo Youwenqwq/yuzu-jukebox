@@ -80,6 +80,24 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	// 防抖：快速连续的 playback.changed（如管理员连切）塌缩成最后一次 apply。
+	// 否则每次 skip 都会触发一次完整的 loadfile + 探测下载 + 校偏，
+	// 除了最后一首其余全是浪费。
+	const debounceWindow = 400 * time.Millisecond
+	applyCh := make(chan client.Playback, 1)
+	var debounce *time.Timer
+	scheduleApply := func(pb client.Playback) {
+		if debounce != nil {
+			debounce.Stop()
+		}
+		debounce = time.AfterFunc(debounceWindow, func() {
+			select {
+			case applyCh <- pb:
+			default:
+			}
+		})
+	}
+
 	apply := func(pb client.Playback) {
 		cur = pb
 		if pb.Current == nil {
@@ -93,6 +111,7 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 				return
 			}
 			loadedRef = pb.Current.TrackRef
+			mpv.SetSpeed(1.0) // 上一首可能残留变速
 			log.Printf("playing %s (%s)", pb.Current.Title, pb.Current.TrackRef)
 		}
 		mpv.SetPause(!pb.Playing)
@@ -110,9 +129,11 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 			if m.Type == "playback.changed" {
 				pb, err := client.ParsePlayback(m)
 				if err == nil {
-					apply(pb)
+					scheduleApply(pb)
 				}
 			}
+		case pb := <-applyCh:
+			apply(pb)
 		case <-ticker.C:
 			if cur.Current != nil && cur.Playing {
 				correct(mpv, cli, cur)

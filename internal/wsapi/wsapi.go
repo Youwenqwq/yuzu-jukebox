@@ -274,6 +274,32 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		}
 		c.replyResult(ref, c.room.Move(d.EntryID, d.ToIndex))
 
+	case "radio.play":
+		var d struct {
+			RoomID  string `json:"room_id"`
+			Source  string `json:"source"`
+			Shuffle bool   `json:"shuffle"`
+			Once    bool   `json:"once"`
+		}
+		if err := json.Unmarshal(data, &d); err != nil {
+			c.replyErr(ref, "bad_request", "invalid radio.play payload")
+			return
+		}
+		if !c.requireRole(ref, auth.RoleRoomAdmin) || !c.requireRoom(ref, d.RoomID) {
+			return
+		}
+		c.replyResult(ref, c.room.PlayRadio(d.Source, d.Shuffle, d.Once))
+
+	case "radio.stop":
+		var d struct {
+			RoomID string `json:"room_id"`
+		}
+		json.Unmarshal(data, &d)
+		if !c.requireRole(ref, auth.RoleRoomAdmin) || !c.requireRoom(ref, d.RoomID) {
+			return
+		}
+		c.replyResult(ref, c.room.StopRadio())
+
 	case "playback.pause", "playback.resume", "playback.skip", "playback.seek":
 		var d struct {
 			RoomID     string `json:"room_id"`
@@ -343,7 +369,7 @@ func (c *client) replyResult(ref string, err error) {
 	switch {
 	case errors.Is(err, room.ErrEntryNotFound):
 		code = "not_found"
-	case errors.Is(err, room.ErrNoPlayback), errors.Is(err, room.ErrQueueEmpty):
+	case errors.Is(err, room.ErrNoPlayback), errors.Is(err, room.ErrQueueEmpty), errors.Is(err, room.ErrInvalidSource):
 		code = "bad_request"
 	case errors.Is(err, room.ErrForbidden):
 		code = "forbidden"

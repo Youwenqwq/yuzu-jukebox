@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
@@ -62,6 +63,8 @@ const (
 	actSeek
 	actSkip
 	actTimerEnd
+	actRadioPlay
+	actRadioStop
 )
 
 type action struct {
@@ -73,6 +76,10 @@ type action struct {
 	toIndex int
 	posMs   int64
 	timerID uint64
+	// radio
+	source  string
+	shuffle bool
+	once    bool
 	result  chan error
 }
 
@@ -82,6 +89,14 @@ var (
 	ErrNoPlayback    = errors.New("nothing is playing")
 	ErrForbidden     = errors.New("forbidden")
 )
+
+// radioState 电台模式状态（运行时，不落库）。
+type radioState struct {
+	src     provider.TrackSource
+	spec    string
+	shuffle bool
+	once    bool
+}
 
 type Room struct {
 	ID           string
@@ -138,10 +153,19 @@ func (r *Room) Resume() error        { return r.call(action{kind: actResume}) }
 func (r *Room) SeekTo(posMs int64) error { return r.call(action{kind: actSeek, posMs: posMs}) }
 func (r *Room) Skip() error          { return r.call(action{kind: actSkip}) }
 
+// PlayRadio 让房间进入电台模式：绑定曲目源，队列见底自动补充。
+func (r *Room) PlayRadio(sourceSpec string, shuffle, once bool) error {
+	return r.call(action{kind: actRadioPlay, source: sourceSpec, shuffle: shuffle, once: once})
+}
+
+// StopRadio 退出电台模式（队列已有内容继续播）。
+func (r *Room) StopRadio() error { return r.call(action{kind: actRadioStop}) }
+
 // Run 是 actor 主循环。阻塞直到进程退出。
 func (r *Room) Run(ctx context.Context) {
 	queue := r.loadQueue()
 	var playback *Playback
+	var radio *radioState
 	clients := map[string]ClientConn{}
 
 	var timer *time.Timer
@@ -207,6 +231,65 @@ func (r *Room) Run(ctx context.Context) {
 		return map[string]any{"type": "listeners.changed", "data": map[string]any{"listeners": ls}}
 	}
 
+	// radioMsg 生成 radio.changed（radio 为 null 表示未开启电台）
+	radioMsg := func() any {
+		var payload any
+		if radio != nil {
+			payload = map[string]any{
+				"source":      radio.spec,
+				"description": radio.src.Description(),
+				"finite":      radio.src.Finite(),
+				"shuffle":     radio.shuffle,
+				"once":        radio.once,
+			}
+		}
+		return map[string]any{"type": "radio.changed", "data": map[string]any{"radio": payload}}
+	}
+
+	// stopRadio 退出电台并广播
+	stopRadio := func() {
+		radio = nil
+		broadcast(func(ClientConn) any { return radioMsg() })
+	}
+
+	// refill 电台补充：从源取一批曲目追加到队列。
+	// 源耗尽（once 语义）或出错时停止电台。
+	refill := func() {
+		if radio == nil {
+			return
+		}
+		seed := provider.TrackRef("")
+		if playback != nil && playback.Current != nil {
+			seed = provider.TrackRef(playback.Current.TrackRef)
+		}
+		bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		tracks, exhausted, err := radio.src.NextBatch(bctx, 10, seed)
+		cancel()
+		if err != nil {
+			log.Printf("[room %s] radio %s: %v (stopping)", r.ID, radio.spec, err)
+			stopRadio()
+			return
+		}
+		for _, t := range tracks {
+			queue = append(queue, QueueEntry{
+				EntryID:     NewEntryID(),
+				TrackRef:    t.Ref.String(),
+				Title:       t.Title,
+				Artist:      t.Artist,
+				DurationMs:  t.DurationMs,
+				RequestedBy: "radio",
+				AddedAt:     nowMs(),
+			})
+		}
+		if len(tracks) > 0 {
+			persistQueue()
+			broadcast(func(ClientConn) any { return queueMsg() })
+		}
+		if exhausted {
+			stopRadio()
+		}
+	}
+
 	// scheduleEnd 按剩余时长设置自然结束 timer
 	scheduleEnd := func() {
 		if timer != nil {
@@ -238,10 +321,13 @@ func (r *Room) Run(ctx context.Context) {
 		r.authm.RevokeTrack(cur.TrackRef)
 	}
 
-	// advance 切到队首（或进入空闲）
+	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充
 	advance := func(reason string) {
 		now := nowMs()
 		finishCurrent(reason, now)
+		if len(queue) == 0 && radio != nil {
+			refill()
+		}
 		if len(queue) == 0 {
 			playback = &Playback{Rate: 1.0}
 			if timer != nil {
@@ -256,6 +342,9 @@ func (r *Room) Run(ctx context.Context) {
 		persistQueue()
 		playback = &Playback{
 			Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
+		}
+		if radio != nil && len(queue) < 3 {
+			refill()
 		}
 		// 预取当前曲目（通常 Prefetch 已做过）与下一首
 		if len(queue) > 0 {
@@ -275,9 +364,10 @@ func (r *Room) Run(ctx context.Context) {
 			switch a.kind {
 			case actJoin:
 				clients[a.client.ID()] = a.client
-				// 给新成员发全量快照：playback（含其专属票据）、队列、听众
+				// 给新成员发全量快照：playback（含其专属票据）、队列、听众、电台
 				a.client.Send(playbackMsg(a.client))
 				a.client.Send(queueMsg())
+				a.client.Send(radioMsg())
 				broadcast(func(ClientConn) any { return listenersMsg() })
 
 			case actLeave:
@@ -395,6 +485,27 @@ func (r *Room) Run(ctx context.Context) {
 					break // 过期 timer，忽略
 				}
 				advance("finished")
+
+			case actRadioPlay:
+				sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				src, err := NewSourceFromSpec(sctx, a.source, r.st, r.reg, a.shuffle, a.once)
+				cancel()
+				if err != nil {
+					a.result <- err
+					break
+				}
+				radio = &radioState{src: src, spec: a.source, shuffle: a.shuffle, once: a.once}
+				broadcast(func(ClientConn) any { return radioMsg() })
+				if playback == nil || playback.Current == nil {
+					advance("") // 空闲时电台立即开播
+				} else if len(queue) < 3 {
+					refill()
+				}
+				a.result <- nil
+
+			case actRadioStop:
+				stopRadio()
+				a.result <- nil
 			}
 		}
 	}
