@@ -9,6 +9,10 @@
 //	yuzu-cli seek <room> <seconds>
 //	yuzu-cli credential <provider> <payload>
 //	yuzu-cli qrlogin <provider>          # 终端渲染二维码，扫码后凭据自动生效
+//	yuzu-cli mkroom <id> <name>           # 建房（访客密码取 -room-password）
+//	yuzu-cli upload <file>               # 上传本地媒体（-title/-artist/-duration-ms）
+//
+// flag 可出现在子命令前后任意位置。
 //
 // 全局参数：-server -name -password（管理员口令）-room-password（房间访客密码），
 // 均可用环境变量 YUZU_SERVER / YUZU_NAME / YUZU_PASSWORD / YUZU_ROOM_PASSWORD 代替。
@@ -20,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
@@ -33,13 +38,38 @@ var (
 	password     = flag.String("password", envOr("YUZU_PASSWORD", ""), "global admin password")
 	roomPassword = flag.String("room-password", envOr("YUZU_ROOM_PASSWORD", ""), "room guest password")
 	provider     = flag.String("provider", "local", "search provider")
+	title        = flag.String("title", "", "upload title")
+	artist       = flag.String("artist", "", "upload artist")
+	durationMs   = flag.Int64("duration-ms", 0, "upload duration in milliseconds (auto-detected if 0)")
 )
 
+// parseFlagsAnywhere 允许 flag 出现在子命令前后任意位置。
+// 我们所有 flag 都是带值类型，逐个扫描即可安全分离。
+func parseFlagsAnywhere() []string {
+	var positional, flagArgs []string
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			flagArgs = append(flagArgs, a)
+			if !strings.Contains(a, "=") && i+1 < len(args) {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	if err := flag.CommandLine.Parse(flagArgs); err != nil {
+		os.Exit(2)
+	}
+	return positional
+}
+
 func main() {
-	flag.Parse()
-	args := flag.Args()
+	args := parseFlagsAnywhere()
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: yuzu-cli <rooms|search|queue|add|skip|pause|resume|seek> [args...]")
+		fmt.Fprintln(os.Stderr, "usage: yuzu-cli <rooms|search|queue|add|skip|pause|resume|seek|upload|mkroom|credential|qrlogin> [args...]")
 		os.Exit(2)
 	}
 
@@ -103,6 +133,18 @@ func main() {
 		} else {
 			err = cmdQRLogin(args[1])
 		}
+	case "mkroom":
+		if len(args) < 3 {
+			err = usageErr("mkroom <id> <name>")
+		} else {
+			err = cmdMkRoom(ctx, args[1], args[2])
+		}
+	case "upload":
+		if len(args) < 2 {
+			err = usageErr("upload <file> [-title t] [-artist a] [-duration-ms n]")
+		} else {
+			err = cmdUpload(ctx, args[1])
+		}
 	default:
 		err = usageErr("unknown command: " + args[0])
 	}
@@ -123,6 +165,10 @@ func cmdRooms(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(rooms) == 0 {
+		fmt.Println("(no rooms — create one with: yuzu-cli mkroom <id> <name>)")
+		return nil
+	}
 	for _, r := range rooms {
 		fmt.Printf("%-20s %s\n", r.ID, r.Name)
 	}
@@ -137,6 +183,10 @@ func cmdSearch(ctx context.Context, query string) error {
 	tracks, err := client.RESTSearch(ctx, *server, token, *provider, query)
 	if err != nil {
 		return err
+	}
+	if len(tracks) == 0 {
+		fmt.Println("(no results)")
+		return nil
 	}
 	for _, t := range tracks {
 		fmt.Printf("%-24s %-30s %-20s %ds\n", t.Ref, t.Title, t.Artist, t.DurationMs/1000)
@@ -277,6 +327,38 @@ func cmdQRLogin(providerID string) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func cmdMkRoom(ctx context.Context, id, roomName string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTCreateRoom(ctx, *server, token, id, roomName, *roomPassword); err != nil {
+		return err
+	}
+	fmt.Printf("room %q created (guest password: %s)\n", id, orNone(*roomPassword))
+	return nil
+}
+
+func cmdUpload(ctx context.Context, filePath string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	track, err := client.RESTUpload(ctx, *server, token, filePath, *title, *artist, *durationMs)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("uploaded: %s — %s (%ds) ref=%s\n", track.Title, track.Artist, track.DurationMs/1000, track.Ref)
+	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 func usageErr(msg string) error { return fmt.Errorf("usage: %s", msg) }

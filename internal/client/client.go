@@ -4,12 +4,18 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -328,6 +334,68 @@ func RESTSearch(ctx context.Context, server, token, provider, query string) ([]T
 	path := fmt.Sprintf("/api/v1/search?provider=%s&q=%s", provider, url.QueryEscape(query))
 	err := restCall(ctx, server, "GET", path, token, nil, &out)
 	return out.Tracks, err
+}
+
+// RESTCreateRoom 创建房间（room_admin）。guestPassword 为空表示无密码房间。
+func RESTCreateRoom(ctx context.Context, server, token, id, roomName, guestPassword string) error {
+	return restCall(ctx, server, "POST", "/api/v1/rooms", token, map[string]any{
+		"id": id, "name": roomName, "guest_password": guestPassword,
+	}, &struct{}{})
+}
+
+// RESTUpload 上传本地媒体文件（media_admin）。
+func RESTUpload(ctx context.Context, server, token, filePath, title, artist string, durationMs int64) (Track, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return Track{}, err
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return Track{}, err
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return Track{}, err
+	}
+	if title != "" {
+		mw.WriteField("title", title)
+	}
+	if artist != "" {
+		mw.WriteField("artist", artist)
+	}
+	if durationMs > 0 {
+		mw.WriteField("duration_ms", strconv.FormatInt(durationMs, 10))
+	}
+	mw.Close()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", server+"/api/v1/media/upload", &buf)
+	if err != nil {
+		return Track{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return Track{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var e struct {
+			Error ErrorMsg `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&e)
+		return Track{}, fmt.Errorf("HTTP %d: %s %s", resp.StatusCode, e.Error.Code, e.Error.Message)
+	}
+	var out struct {
+		Track Track `json:"track"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return Track{}, err
+	}
+	return out.Track, nil
 }
 
 // RESTSetCredential 热更新 provider 凭据。
