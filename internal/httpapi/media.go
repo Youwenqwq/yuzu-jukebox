@@ -18,9 +18,6 @@ var coverClient = &http.Client{Timeout: 10 * time.Second}
 //   - 其他 provider：GetTrack 取源站 URL，带 CoverAware 头转发
 //     （B 站图床无 Referer 会 403，与音频流同坑同解）
 func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
-		return
-	}
 	ref := provider.TrackRef(r.PathValue("ref"))
 	p, id, err := s.reg.ForRef(ref)
 	if err != nil {
