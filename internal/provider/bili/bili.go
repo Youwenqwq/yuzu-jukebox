@@ -187,16 +187,28 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 	var resp struct {
 		Title      string `json:"title"`
 		Author     string `json:"author"`
-		DurationMs int64  `json:"duration_ms"`
+		DurationMs int64  `json:"duration_ms"` // 顶层：所有分 P 总时长
+		Pages      []struct {
+			Page       int    `json:"page"`
+			Part       string `json:"part"`
+			DurationMs int64  `json:"duration_ms"`
+		} `json:"pages"`
 	}
 	if err := p.get(ctx, "/detail", url.Values{"bvid": {id}}, "", &resp); err != nil {
 		return provider.Track{}, err
+	}
+	// Resolve 固定播放第 1 P（page=1），时长必须与之一致：
+	// 多分 P 视频的顶层 duration 是全集合计，直接用它会让
+	// 房间的结束 timer 严重超调（流早完了，状态机还以为在放）。
+	duration := resp.DurationMs
+	if len(resp.Pages) > 0 && resp.Pages[0].DurationMs > 0 {
+		duration = resp.Pages[0].DurationMs
 	}
 	return provider.Track{
 		Ref:        ref,
 		Title:      resp.Title,
 		Artist:     resp.Author,
-		DurationMs: resp.DurationMs,
+		DurationMs: duration,
 	}, nil
 }
 
