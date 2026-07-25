@@ -152,7 +152,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "conflict", err.Error())
 		return
 	}
-	s.rooms.Spawn(r.Context(), row)
+	s.rooms.Spawn(row)
 	s.st.Audit(r.Context(), id.ID, "room.create", row.ID, `{"name":`+strconv.Quote(row.Name)+`}`)
 	writeJSON(w, http.StatusCreated, map[string]any{"room": map[string]any{"id": row.ID, "name": row.Name}})
 }

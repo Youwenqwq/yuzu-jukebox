@@ -20,34 +20,35 @@ type Manager struct {
 	cache *cache.Cache
 	reg   *provider.Registry
 
+	ctx   context.Context // actor 生命周期绑定进程，而非任何请求
 	rooms map[string]*Room
 }
 
-func NewManager(st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Manager {
-	return &Manager{st: st, authm: authm, cache: c, reg: reg, rooms: map[string]*Room{}}
+func NewManager(ctx context.Context, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Manager {
+	return &Manager{ctx: ctx, st: st, authm: authm, cache: c, reg: reg, rooms: map[string]*Room{}}
 }
 
 // Load 从 DB 加载全部房间并启动 actor。
-func (m *Manager) Load(ctx context.Context) error {
-	rows, err := m.st.ListRooms(ctx)
+func (m *Manager) Load() error {
+	rows, err := m.st.ListRooms(m.ctx)
 	if err != nil {
 		return err
 	}
 	for _, row := range rows {
-		m.spawn(ctx, row)
+		m.spawn(row)
 	}
 	return nil
 }
 
 // Spawn 新建房间（REST 管理接口调用）。
-func (m *Manager) Spawn(ctx context.Context, row store.Room) *Room {
-	return m.spawn(ctx, row)
+func (m *Manager) Spawn(row store.Room) *Room {
+	return m.spawn(row)
 }
 
-func (m *Manager) spawn(ctx context.Context, row store.Room) *Room {
+func (m *Manager) spawn(row store.Room) *Room {
 	r := New(row.ID, row.Name, row.PasswordHash, m.st, m.authm, m.cache, m.reg)
 	m.rooms[row.ID] = r
-	go r.Run(ctx)
+	go r.Run(m.ctx)
 	return r
 }
 

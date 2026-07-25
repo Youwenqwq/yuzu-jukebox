@@ -84,7 +84,7 @@ should_be = position_ms                                        (paused 时)
 
 ### 4.1 房间快照（`room.state`）
 
-服务端在 join 成功时下发全量快照，此后客户端靠增量事件维护本地副本：
+- `room.join` 成功时服务端依次推送 `room.joined`（回带 ref）→ `playback.changed` → `queue.changed` → `listeners.changed`（全量快照三件套）。此后客户端靠增量事件维护本地副本：
 
 ```json
 {
@@ -132,9 +132,10 @@ should_be = position_ms                                        (paused 时)
 
 ### 4.4 出流票据
 
-- `stream_url` 中的 `ticket` 为一次性、短时效（建议 5 分钟）、绑定身份与 track 的令牌。
+- `stream_url` 中的 `ticket` 为短时效（5 分钟）、绑定身份与 track 的令牌。
+- 票据在 TTL 内**可复用**：客户端的 Range 请求与断线重试都依赖同一 URL。曲目播完（切歌/自然结束）时该曲目所有票据立即失效。
 - 目的：凭据永不下发；`/stream` 端点无 cookie 会话也可鉴权（`<audio>` 标签、MPV 均适用）。
-- 仅当前播放曲目和"即将播放的下一首"会附带 `stream_url`；队列更深条目只给元数据。
+- 仅**当前播放曲目**附带 `stream_url`；队列条目只给元数据。下一首的可播放性由服务端缓存预取保证（进入 PLAYING 时对队首做 Resolve + 预拉取），待其成为当前曲目时才下发 URL。
 
 ## 5. 房间状态机
 

@@ -198,8 +198,8 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.room.Leave(c)
 		}
 		c.room = r
-		r.Join(c) // 快照由 actor 直接推送给该客户端
 		c.Send(map[string]any{"type": "room.joined", "ref": ref, "data": map[string]any{"room_id": d.RoomID}})
+		r.Join(c) // 快照由 actor 随后推送
 
 	case "room.leave":
 		if c.room == nil {

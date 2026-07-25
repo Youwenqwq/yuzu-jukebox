@@ -45,6 +45,9 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB 暴露底层连接（测试与运维脚本用）。
+func (s *Store) DB() *sql.DB { return s.db }
+
 // ---------- 房间 ----------
 
 type Room struct {
