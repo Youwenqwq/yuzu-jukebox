@@ -13,6 +13,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
+	"github.com/youwenqwq/yuzu-jukebox/internal/provider/ncm"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
@@ -39,6 +40,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	reg := provider.NewRegistry()
 	lp := local.New(cfg.MediaDir, st)
 	reg.Register(lp)
+	if cfg.NCM.Enabled {
+		reg.Register(ncm.New(cfg.NCM.BaseURL, cfg.NCM.Level, st))
+	}
 
 	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, st, reg)
 

@@ -67,6 +67,15 @@ type Provider interface {
 	Resolve(ctx context.Context, ref TrackRef) (StreamLocator, error)
 }
 
+// CredentialAware 是可选接口：支持凭据热更新的 Provider 实现它。
+type CredentialAware interface {
+	Provider
+	// SetCredential 校验并热更新凭据；校验失败必须返回错误且不生效。
+	SetCredential(ctx context.Context, payload string) error
+	// CredentialStatus 返回 unset | ok | invalid。
+	CredentialStatus(ctx context.Context) string
+}
+
 // Registry 是 provider 注册表。
 type Registry struct {
 	providers map[string]Provider
@@ -98,6 +107,15 @@ func (r *Registry) IDs() []string {
 	out := make([]string, 0, len(r.providers))
 	for id := range r.providers {
 		out = append(out, id)
+	}
+	return out
+}
+
+// All 返回全部已注册 provider。
+func (r *Registry) All() []Provider {
+	out := make([]Provider, 0, len(r.providers))
+	for _, p := range r.providers {
+		out = append(out, p)
 	}
 	return out
 }

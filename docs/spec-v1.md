@@ -200,6 +200,8 @@ pause│  │resume
 | `GET /api/v1/rooms` | 已认证 | 房间列表（大厅目录） |
 | `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 后台建/改房间（名称、访客密码、policy_json） |
 | `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |
+| `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
+| `POST /api/v1/providers/{id}/credential` | `media_admin` | 热更新 Provider 凭据（如 ncm 的 MUSIC_U cookie）；服务端先校验再生效，凭据存 credentials 表，永不下发 |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |
 | `GET /api/v1/media/cache` / `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 缓存查看/手动清理 |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |
@@ -215,9 +217,10 @@ pause│  │resume
 | `provider_error` | Provider 调用失败（附 message） |
 | `rate_limited` | 预留 |
 
-## 8. 明确不做的（v1）
+## 8. 明确不做的（当前版本）
 
 - 投票切歌、DJ 模式（policy_json 预留字段，不实现逻辑）
 - 播放进度持久化（重启后房间恢复为 IDLE，队列保留在 DB）
 - 队列事件的增量 diff 下发
 - OIDC / 账号密码登录
+- 凭据加密存储（v1 明文存 credentials 表；加密需引入密钥管理，随凭据种类增多再做）

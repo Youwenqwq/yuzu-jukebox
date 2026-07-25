@@ -7,6 +7,7 @@
 //	yuzu-cli add <room> <track_ref>
 //	yuzu-cli skip|pause|resume <room>
 //	yuzu-cli seek <room> <seconds>
+//	yuzu-cli credential <provider> <payload>
 //
 // 全局参数：-server -name -password（管理员口令）-room-password（房间访客密码），
 // 均可用环境变量 YUZU_SERVER / YUZU_NAME / YUZU_PASSWORD / YUZU_ROOM_PASSWORD 代替。
@@ -86,6 +87,12 @@ func main() {
 					return cli.PlaybackOp(ctx, "playback.seek", room, int64(sec*1000))
 				})
 			}
+		}
+	case "credential":
+		if len(args) < 3 {
+			err = usageErr("credential <provider> <payload>")
+		} else {
+			err = cmdCredential(ctx, args[1], args[2])
 		}
 	default:
 		err = usageErr("unknown command: " + args[0])
@@ -206,6 +213,14 @@ func cmdQueue(ctx context.Context, roomID string) error {
 		fmt.Printf("  %d. [%s] %s — %s (%ds)\n", i, e.EntryID, e.Title, e.Artist, e.DurationMs/1000)
 	}
 	return nil
+}
+
+func cmdCredential(ctx context.Context, providerID, payload string) error {
+	token, err := client.RESTAuth(ctx, *server, *name, *password)
+	if err != nil {
+		return err
+	}
+	return client.RESTSetCredential(ctx, *server, token, providerID, payload)
 }
 
 func usageErr(msg string) error { return fmt.Errorf("usage: %s", msg) }

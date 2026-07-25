@@ -257,6 +257,29 @@ func (s *Store) DeleteCacheRow(ctx context.Context, trackRef string) error {
 	return err
 }
 
+// ---------- 凭据 ---------
+
+// GetCredential 取某 provider 的凭据原文；未设置返回空串。
+func (s *Store) GetCredential(ctx context.Context, providerID string) (string, error) {
+	var payload string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1`,
+		providerID).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return payload, err
+}
+
+// UpsertCredential 写入凭据并记录校验状态。
+// v1 明文存储——加密需要引入密钥管理，待凭据种类变多时再做。
+func (s *Store) UpsertCredential(ctx context.Context, providerID, payload, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO credentials (provider, payload, status, last_check_at) VALUES (?,?,?,?)`,
+		providerID, payload, status, nowMs())
+	return err
+}
+
 func (s *Store) ListCacheRows(ctx context.Context) ([]CacheRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT track_ref, file_path, size_bytes, last_accessed_at, created_at FROM media_cache

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -324,9 +325,15 @@ func RESTSearch(ctx context.Context, server, token, provider, query string) ([]T
 	var out struct {
 		Tracks []Track `json:"tracks"`
 	}
-	path := fmt.Sprintf("/api/v1/search?provider=%s&q=%s", provider, query)
+	path := fmt.Sprintf("/api/v1/search?provider=%s&q=%s", provider, url.QueryEscape(query))
 	err := restCall(ctx, server, "GET", path, token, nil, &out)
 	return out.Tracks, err
+}
+
+// RESTSetCredential 热更新 provider 凭据。
+func RESTSetCredential(ctx context.Context, server, token, providerID, payload string) error {
+	return restCall(ctx, server, "POST", "/api/v1/providers/"+providerID+"/credential",
+		token, map[string]any{"payload": payload}, &struct{}{})
 }
 
 func restCall(ctx context.Context, server, method, path, token string, body, out any) error {

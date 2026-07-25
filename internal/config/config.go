@@ -20,6 +20,14 @@ type Config struct {
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
 	// v1 没有账号体系，这是唯一的管理员入口。
 	AdminPassword string `json:"admin_password"`
+	// NCM Provider（NeteaseCloudMusicApi 实例）
+	NCM NCMConfig `json:"ncm"`
+}
+
+type NCMConfig struct {
+	Enabled bool   `json:"enabled"`
+	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3000
+	Level   string `json:"level"`    // 音质等级，默认 exhigh
 }
 
 func Default() Config {
@@ -29,6 +37,11 @@ func Default() Config {
 		MediaDir:      "data/media",
 		CacheDir:      "data/cache",
 		CacheMaxBytes: 20 << 30, // 20 GiB
+		NCM: NCMConfig{
+			Enabled: false,
+			BaseURL: "http://127.0.0.1:3000",
+			Level:   "exhigh",
+		},
 	}
 }
 

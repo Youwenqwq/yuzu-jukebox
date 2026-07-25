@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -44,6 +45,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
 	mux.HandleFunc("GET /api/v1/search", s.search)
+	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
+	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
 	mux.HandleFunc("POST /api/v1/media/upload", s.upload)
 	mux.HandleFunc("GET /api/v1/media/cache", s.listCache)
 	mux.HandleFunc("DELETE /api/v1/media/cache/{ref}", s.evictCache)
@@ -199,6 +202,56 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	s.st.Audit(r.Context(), id.ID, "room.update", roomID, "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"room": map[string]any{"id": roomID, "name": name}})
+}
+
+func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+		return
+	}
+	type info struct {
+		ID string `json:"id"`
+	}
+	out := []info{}
+	for _, p := range s.reg.All() {
+		out = append(out, info{ID: p.ID()})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": out})
+}
+
+// setCredential 热更新 provider 凭据（media_admin）。
+// body: {"payload": "MUSIC_U=xxx"}
+func (s *Server) setCredential(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	pid := r.PathValue("id")
+	p, okp := s.reg.Get(pid)
+	if !okp {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown provider: "+pid)
+		return
+	}
+	ca, okc := p.(provider.CredentialAware)
+	if !okc {
+		writeErr(w, http.StatusBadRequest, "bad_request", "provider does not accept credentials: "+pid)
+		return
+	}
+	var body struct {
+		Payload string `json:"payload"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	// 校验可能涉及外部调用，放宽超时
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	if err := ca.SetCredential(ctx, body.Payload); err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), id.ID, "provider.set_credential", pid, "{}")
+	writeJSON(w, http.StatusOK, map[string]any{"provider": pid, "status": "ok"})
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
