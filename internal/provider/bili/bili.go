@@ -247,8 +247,9 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 		URL         string `json:"url"`
 		ContentType string `json:"content_type"`
 		DurationMs  int64  `json:"duration_ms"`
-		// 预留：sidecar 暂不返回 size/bandwidth，为 0 = 未知（合法）。
-		SizeBytes int64 `json:"size"`
+		// sidecar 的 size 字段名历史上为 "bytes"；同时兼容 "size"。
+		Size      int64 `json:"size"`
+		Bytes     int64 `json:"bytes"`
 		Bandwidth int   `json:"bandwidth"` // bps
 	}
 	if err := p.get(ctx, "/audio-url", url.Values{"bvid": {id}}, p.cookie.Load().(string), &resp); err != nil {
@@ -257,12 +258,16 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 	if resp.URL == "" {
 		return provider.StreamLocator{}, fmt.Errorf("no playable url for %s (可能需要登录或视频不可用)", ref)
 	}
+	sizeBytes := resp.Size
+	if sizeBytes == 0 {
+		sizeBytes = resp.Bytes
+	}
 	return provider.StreamLocator{
 		URL:         resp.URL,
 		Header:      streamHeaders,
 		Format:      "m4a", // content_type 恒为 audio/mp4
 		DurationMs:  resp.DurationMs,
-		SizeBytes:   resp.SizeBytes,
+		SizeBytes:   sizeBytes,
 		BitrateKbps: resp.Bandwidth / 1000, // bandwidth 单位 bps；0 = 未知
 		ExpiresAt:   time.Now().Add(streamURLTTL),
 	}, nil
