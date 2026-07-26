@@ -3,8 +3,10 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -164,6 +166,44 @@ func (s *Server) deletePlaylistItem(w http.ResponseWriter, r *http.Request) {
 	}
 	s.st.Audit(r.Context(), id.ID, "playlist.delete_item", plID, "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": ord})
+}
+
+// movePlaylistItem 移动条目到 to_ord（media_admin）。body: {"to_ord": N}。
+// to_ord clamp 到 [1, len]；移动后序号重排保持连续。
+func (s *Server) movePlaylistItem(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	plID := r.PathValue("id")
+	if _, err := s.st.GetPlaylist(r.Context(), plID); err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	ord, err := strconv.Atoi(r.PathValue("ord"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid ord")
+		return
+	}
+	var body struct {
+		ToOrd *int `json:"to_ord"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ToOrd == nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "to_ord required")
+		return
+	}
+	finalOrd, err := s.st.MovePlaylistItem(r.Context(), plID, ord, *body.ToOrd)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "item not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), id.ID, "playlist.move_item", plID,
+		`{"ord":`+strconv.Itoa(ord)+`,"to_ord":`+strconv.Itoa(finalOrd)+`}`)
+	writeJSON(w, http.StatusOK, map[string]any{"moved": ord, "to_ord": finalOrd})
 }
 
 // importPlaylist 导入外部歌单或曲目源快照（media_admin）。

@@ -29,6 +29,8 @@ type Config struct {
 	CacheDir string `json:"cache_dir"`
 	// 缓存容量上限（字节），超过后按 LRU 清理
 	CacheMaxBytes int64 `json:"cache_max_bytes"`
+	// 自动清理超过指定天数未访问的缓存；0 表示关闭
+	CacheAutoPruneDays int `json:"cache_auto_prune_days"`
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
 	// v1 没有账号体系，这是唯一的管理员入口。
 	AdminPassword string `json:"admin_password"`
@@ -50,6 +52,9 @@ type OIDCConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Issuer   string `json:"issuer"`    // IdP issuer，如 https://id.example.org
 	ClientID string `json:"client_id"` // Native 应用的 client_id（aud 校验）
+	// 额外接受的 client_id（如 WebUI 的 PKCE 应用）。aud 命中 client_id
+	// 或任一 extra 即通过；不配时行为与单 client_id 完全一致。
+	ExtraClientIDs []string `json:"extra_client_ids,omitempty"`
 	// Zitadel project role → yuzu roles。命中任一 key 即授予对应 value。
 	// 未命中者保持 listener/requester 基础角色。
 	RoleMapping map[string][]string `json:"role_mapping"`
@@ -68,19 +73,20 @@ type BiliConfig struct {
 
 func Default() Config {
 	return Config{
-		Addr:          ":8080",
-		DBPath:        "data/yuzu.db",
-		MediaDir:      "data/media",
-		CacheDir:      "data/cache",
-		CacheMaxBytes: 20 << 30, // 20 GiB
+		Addr:               ":8080",
+		DBPath:             "data/yuzu.db",
+		MediaDir:           "data/media",
+		CacheDir:           "data/cache",
+		CacheMaxBytes:      20 << 30, // 20 GiB
+		CacheAutoPruneDays: 0,
 		NCM: NCMConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3000",
 			Level:   "exhigh",
 		},
 		CORS: CORSConfig{
-			Enabled:        false,
-			AllowedOrigins: []string{"*"},
+			Enabled:          false,
+			AllowedOrigins:   []string{"*"},
 			AllowCredentials: false,
 		},
 		Bili: BiliConfig{

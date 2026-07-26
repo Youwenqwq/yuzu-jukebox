@@ -74,6 +74,24 @@ func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *C
 	}
 }
 
+// MaxBytes 返回当前缓存容量上限。
+func (c *Cache) MaxBytes() int64 {
+	return c.maxBytes
+}
+
+// TotalBytes 返回全部缓存索引条目记录的字节数总和。
+func (c *Cache) TotalBytes() int64 {
+	rows, err := c.st.ListCacheRows(context.Background())
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, row := range rows {
+		total += row.SizeBytes
+	}
+	return total
+}
+
 // Downloads 返回进行中的下载快照。
 func (c *Cache) Downloads() []DownloadStatus {
 	c.mu.Lock()
@@ -426,33 +444,79 @@ func (c *Cache) Prefetch(ref provider.TrackRef) {
 func (c *Cache) evict() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	rows, err := c.st.ListCacheRows(ctx) // 按 last_accessed_at 升序
 	if err != nil {
 		return
 	}
 	var total int64
-	for _, r := range rows {
-		total += r.SizeBytes
+	for _, row := range rows {
+		total += row.SizeBytes
 	}
-	for _, r := range rows {
+	for _, row := range rows {
 		if total <= c.maxBytes {
 			break
 		}
-		if err := os.Remove(r.FilePath); err == nil {
-			c.st.DeleteCacheRow(ctx, r.TrackRef)
-			total -= r.SizeBytes
+		if _, downloading := c.inflight[provider.TrackRef(row.TrackRef)]; downloading {
+			continue
+		}
+		if err := c.removeRow(ctx, row); err == nil {
+			total -= row.SizeBytes
 		}
 	}
 }
 
+// PruneUnused 驱逐最后访问时间早于指定时长的缓存条目。
+// olderThan 为 0 时驱逐全部条目；正在下载的条目始终跳过。
+func (c *Cache) PruneUnused(ctx context.Context, olderThan time.Duration) (evicted int, freed int64, err error) {
+	if olderThan < 0 {
+		return 0, 0, errors.New("olderThan must not be negative")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	rows, err := c.st.ListCacheRows(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	cutoff := time.Now().Add(-olderThan).UnixMilli()
+	for _, row := range rows {
+		if olderThan > 0 && row.LastAccessedAt >= cutoff {
+			continue
+		}
+		if _, downloading := c.inflight[provider.TrackRef(row.TrackRef)]; downloading {
+			continue
+		}
+		if err := c.removeRow(ctx, row); err != nil {
+			return evicted, freed, err
+		}
+		evicted++
+		freed += row.SizeBytes
+	}
+	return evicted, freed, nil
+}
+
+func (c *Cache) removeRow(ctx context.Context, row store.CacheRow) error {
+	if err := os.Remove(row.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return c.st.DeleteCacheRow(ctx, row.TrackRef)
+}
+
 // EvictTrack 手动清理单条（管理接口用）。
 func (c *Cache) EvictTrack(ctx context.Context, ref provider.TrackRef) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	row, err := c.st.GetCacheRow(ctx, ref.String())
 	if err != nil {
 		return ErrNotFound
 	}
-	os.Remove(row.FilePath)
-	return c.st.DeleteCacheRow(ctx, ref.String())
+	return c.removeRow(ctx, row)
 }
 
 func sanitize(s string) string {

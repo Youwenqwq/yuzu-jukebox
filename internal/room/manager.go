@@ -73,6 +73,31 @@ func (m *Manager) Get(id string) (*Room, error) {
 	return r, nil
 }
 
+// DirectoryRoom 是 manager 汇总后的大厅目录条目。
+type DirectoryRoom struct {
+	ID            string
+	Name          string
+	PolicyRaw     string
+	ListenerCount int
+	NowPlaying    *NowPlayingSummary
+}
+
+// Directory 汇总各房间 actor 的实时非敏感摘要。
+func (m *Manager) Directory() []DirectoryRoom {
+	out := make([]DirectoryRoom, 0, len(m.rooms))
+	for _, r := range m.rooms {
+		snapshot, err := r.DirectorySnapshot()
+		if err != nil {
+			continue
+		}
+		out = append(out, DirectoryRoom{
+			ID: r.ID, Name: r.Name, PolicyRaw: r.PolicyRaw(),
+			ListenerCount: snapshot.ListenerCount, NowPlaying: snapshot.NowPlaying,
+		})
+	}
+	return out
+}
+
 func (m *Manager) List() []*Room {
 	out := make([]*Room, 0, len(m.rooms))
 	for _, r := range m.rooms {

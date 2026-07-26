@@ -60,7 +60,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/providers/{id}/qrlogin", s.qrLoginStart)
 	mux.HandleFunc("GET /api/v1/providers/{id}/qrlogin/{key}", s.qrLoginPoll)
 	mux.HandleFunc("POST /api/v1/media/upload", s.upload)
+	mux.HandleFunc("GET /api/v1/media", s.listMedia)
+	mux.HandleFunc("DELETE /api/v1/media/{ref}", s.deleteMedia)
 	mux.HandleFunc("GET /api/v1/media/cache", s.listCache)
+	mux.HandleFunc("POST /api/v1/media/cache/prune", s.pruneCache)
 	mux.HandleFunc("DELETE /api/v1/media/cache/{ref}", s.evictCache)
 	mux.HandleFunc("GET /api/v1/playlists", s.listPlaylists)
 	mux.HandleFunc("POST /api/v1/playlists", s.createPlaylist)
@@ -68,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/playlists/{id}", s.deletePlaylist)
 	mux.HandleFunc("POST /api/v1/playlists/{id}/items", s.addPlaylistItems)
 	mux.HandleFunc("DELETE /api/v1/playlists/{id}/items/{ord}", s.deletePlaylistItem)
+	mux.HandleFunc("PATCH /api/v1/playlists/{id}/items/{ord}", s.movePlaylistItem)
 	mux.HandleFunc("POST /api/v1/playlists/import", s.importPlaylist)
 	mux.HandleFunc("GET /stream/v1/{ref}", s.stream)
 	mux.HandleFunc("GET /api/v1/cover/{ref}", s.cover)
@@ -133,6 +137,7 @@ func (s *Server) oidcConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer": s.oidc.Issuer(), "client_id": s.oidc.ClientID(),
+		"client_ids": s.oidc.ClientIDs(),
 	})
 }
 
@@ -157,8 +162,9 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Zitadel 颁发 access token 时会把 profile claims 从 id_token 剥掉，
-	// 且角色 claim 也可能只在 userinfo 里（Assert Roles on Authentication
-	// 作用于 userinfo；id_token 需单独勾 User Roles Inside ID Token）。
+	// 且角色 claim 也可能只在 userinfo 里（Project 级 Assert Roles on
+	// Authentication 只作用于 userinfo；roles 进 id_token 由 Application 级
+	// Token Settings 的同名选项控制，旧名 User Roles Inside ID Token）。
 	// 有 access_token 就统一走 userinfo：补显示名 + 合并角色。
 	if body.AccessToken != "" {
 		if info, err := s.oidc.Userinfo(r.Context(), body.AccessToken); err == nil {
@@ -233,17 +239,22 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type roomInfo struct {
-		ID     string          `json:"id"`
-		Name   string          `json:"name"`
-		Policy json.RawMessage `json:"policy"`
+		ID            string                  `json:"id"`
+		Name          string                  `json:"name"`
+		Policy        json.RawMessage         `json:"policy"`
+		ListenerCount int                     `json:"listener_count"`
+		NowPlaying    *room.NowPlayingSummary `json:"now_playing"`
 	}
 	out := []roomInfo{}
-	for _, rm := range s.rooms.List() {
-		pol := json.RawMessage(rm.PolicyRaw())
+	for _, rm := range s.rooms.Directory() {
+		pol := json.RawMessage(rm.PolicyRaw)
 		if len(pol) == 0 {
 			pol = json.RawMessage(`{}`)
 		}
-		out = append(out, roomInfo{ID: rm.ID, Name: rm.Name, Policy: pol})
+		out = append(out, roomInfo{
+			ID: rm.ID, Name: rm.Name, Policy: pol,
+			ListenerCount: rm.ListenerCount, NowPlaying: rm.NowPlaying,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})
 }
@@ -641,10 +652,39 @@ func (s *Server) listCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"entries":   rows,
-		"downloads": s.cache.Downloads(),
-		"history":   s.cache.History(),
+		"entries":     rows,
+		"downloads":   s.cache.Downloads(),
+		"history":     s.cache.History(),
+		"total_bytes": s.cache.TotalBytes(),
+		"max_bytes":   s.cache.MaxBytes(),
 	})
+}
+func (s *Server) pruneCache(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	var body struct {
+		UnusedDays *int `json:"unused_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UnusedDays == nil || *body.UnusedDays < 0 {
+		writeErr(w, http.StatusBadRequest, "bad_request", "unused_days must be a non-negative integer")
+		return
+	}
+
+	evicted, freed, err := s.cache.PruneUnused(r.Context(), time.Duration(*body.UnusedDays)*24*time.Hour)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	result := map[string]any{"evicted": evicted, "freed_bytes": freed}
+	detail, _ := json.Marshal(map[string]any{
+		"unused_days": *body.UnusedDays,
+		"evicted":     evicted,
+		"freed_bytes": freed,
+	})
+	s.st.Audit(r.Context(), id.ID, "media.cache_prune", "", string(detail))
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) evictCache(w http.ResponseWriter, r *http.Request) {

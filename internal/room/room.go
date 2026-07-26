@@ -36,20 +36,21 @@ type ClientConn interface {
 // CoverURL 存源站原始地址，广播时改写为服务端代理路径。
 // SizeBytes/BitrateKbps 仅当前播放条目在广播时填充（物理层，来自缓存索引）。
 type QueueEntry struct {
-	EntryID      string                 `json:"entry_id"`
-	TrackRef     string                 `json:"track_ref"`
-	Title        string                 `json:"title"`
-	Artist       string                 `json:"artist"`
-	DurationMs   int64                  `json:"duration_ms"`
-	Album        string                 `json:"album,omitempty"`
-	CoverURL     string                 `json:"cover_url,omitempty"`
-	SourceURL    string                 `json:"source_url,omitempty"`
-	Contributors []provider.Contributor `json:"contributors,omitempty"`
-	RequestedBy  string                 `json:"requested_by"`
-	AddedAt      int64                  `json:"added_at"`
-	StreamURL    string                 `json:"stream_url,omitempty"`
-	SizeBytes    int64                  `json:"size_bytes,omitempty"`
-	BitrateKbps  int                    `json:"bitrate_kbps,omitempty"`
+	EntryID       string                 `json:"entry_id"`
+	TrackRef      string                 `json:"track_ref"`
+	Title         string                 `json:"title"`
+	Artist        string                 `json:"artist"`
+	DurationMs    int64                  `json:"duration_ms"`
+	Album         string                 `json:"album,omitempty"`
+	CoverURL      string                 `json:"cover_url,omitempty"`
+	SourceURL     string                 `json:"source_url,omitempty"`
+	Contributors  []provider.Contributor `json:"contributors,omitempty"`
+	RequestedBy   string                 `json:"requested_by"`
+	RequesterName string                 `json:"requester_name"`
+	AddedAt       int64                  `json:"added_at"`
+	StreamURL     string                 `json:"stream_url,omitempty"`
+	SizeBytes     int64                  `json:"size_bytes,omitempty"`
+	BitrateKbps   int                    `json:"bitrate_kbps,omitempty"`
 }
 
 // EntryFromTrack 以入队快照语义从 Track 构造队列条目。
@@ -71,6 +72,25 @@ type Playback struct {
 	Rate       float64     `json:"rate"`
 }
 
+// NowPlayingSummary 是大厅目录可公开的当前播放裁剪信息。
+// 它不含 track_ref、requested_by 或按身份签发的 stream_url。
+type NowPlayingSummary struct {
+	Title      string  `json:"title"`
+	Artist     string  `json:"artist"`
+	DurationMs int64   `json:"duration_ms"`
+	CoverURL   string  `json:"cover_url"`
+	PositionMs int64   `json:"position_ms"`
+	UpdatedAt  int64   `json:"updated_at"`
+	Playing    bool    `json:"playing"`
+	Rate       float64 `json:"rate"`
+}
+
+// DirectorySnapshot 是 actor 内存态在大厅目录中的非敏感摘要。
+type DirectorySnapshot struct {
+	ListenerCount int
+	NowPlaying    *NowPlayingSummary
+}
+
 type actKind int
 
 const (
@@ -87,6 +107,7 @@ const (
 	actRadioPlay
 	actRadioStop
 	actSetPolicy
+	actDirectorySnapshot
 )
 
 type action struct {
@@ -94,6 +115,7 @@ type action struct {
 	client  ClientConn
 	actor   auth.Identity
 	entry   QueueEntry
+	entries []QueueEntry // 批量入队（actAdd；非空时优先于 entry）
 	entryID string
 	toIndex int
 	posMs   int64
@@ -104,6 +126,7 @@ type action struct {
 	once      bool
 	policyRaw string
 	result    chan error
+	snapshot  chan DirectorySnapshot
 }
 
 var (
@@ -194,6 +217,15 @@ func (r *Room) AddFor(id auth.Identity, e QueueEntry) error {
 	return r.call(action{kind: actAdd, actor: id, entry: e})
 }
 
+// AddBatchFor 原子批量点歌：整体预校验（max_queue 与按身份限额均按批量后
+// 投影值计算），任一不通过则一条不加；全部通过按顺序队尾追加。
+func (r *Room) AddBatchFor(id auth.Identity, entries []QueueEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	return r.call(action{kind: actAdd, actor: id, entries: entries})
+}
+
 func (r *Room) Remove(entryID string) error { return r.call(action{kind: actRemove, entryID: entryID}) }
 
 // RemoveFor 带权限校验的移除：room_admin 或条目所有者可移除。
@@ -221,6 +253,22 @@ func (r *Room) StopRadio() error { return r.call(action{kind: actRadioStop}) }
 // SetPolicy 热更新房间策略：校验 → 落库 → actor 内生效。
 func (r *Room) SetPolicy(raw string) error {
 	return r.call(action{kind: actSetPolicy, policyRaw: raw})
+}
+
+// DirectorySnapshot 串行读取 actor 的听众数与播放五元组摘要。
+func (r *Room) DirectorySnapshot() (DirectorySnapshot, error) {
+	ch := make(chan DirectorySnapshot, 1)
+	select {
+	case r.inbound <- action{kind: actDirectorySnapshot, snapshot: ch}:
+	case <-r.done:
+		return DirectorySnapshot{}, ErrRoomClosed
+	}
+	select {
+	case snapshot := <-ch:
+		return snapshot, nil
+	case <-r.done:
+		return DirectorySnapshot{}, ErrRoomClosed
+	}
 }
 
 // Run 是 actor 主循环。阻塞直到 ctx 取消（进程退出或房间被删除）。
@@ -258,6 +306,7 @@ func (r *Room) Run(ctx context.Context) {
 				Album: e.Album, CoverURL: e.CoverURL, SourceURL: e.SourceURL,
 				ContributorsJSON: string(contrib),
 				RequestedBy:      e.RequestedBy, AddedAt: e.AddedAt,
+				RequesterName: e.RequesterName,
 			}
 		}
 		// DB 写入很快，actor 内同步执行换取简单的一致性
@@ -471,7 +520,13 @@ func (r *Room) Run(ctx context.Context) {
 				broadcast(func(ClientConn) any { return listenersMsg() })
 
 			case actAdd:
-				if policy.MaxQueue > 0 && len(queue) >= policy.MaxQueue {
+				entries := a.entries
+				if len(entries) == 0 {
+					entries = []QueueEntry{a.entry}
+				}
+				n := len(entries)
+				// 原子预校验：上限按批量后投影值计算，任一不通过一条不加
+				if policy.MaxQueue > 0 && len(queue)+n > policy.MaxQueue {
 					a.result <- ErrQueueFull
 					break
 				}
@@ -482,20 +537,25 @@ func (r *Room) Run(ctx context.Context) {
 							pending++
 						}
 					}
-					if pending >= lim {
+					if pending+n > lim {
 						a.result <- ErrQuotaExceeded
 						break
 					}
 				}
-				queue = append(queue, a.entry)
+				wasEmpty := len(queue) == 0
+				firstAdded := len(queue)
+				queue = append(queue, entries...)
+				for i := firstAdded; i < len(queue); i++ {
+					queue[i].RequesterName = a.actor.Name
+				}
 				persistQueue()
 				if playback == nil || playback.Current == nil {
 					advance("") // 空闲时自动开播（内部会广播 queue + playback）
 				} else {
 					broadcast(func(ClientConn) any { return queueMsg() })
-					if len(queue) == 1 {
-						// 这是队首候补，预热缓存
-						go r.cache.Prefetch(provider.TrackRef(a.entry.TrackRef))
+					if wasEmpty {
+						// 追加前队列为空：新条目即队首候补，预热缓存
+						go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
 					}
 				}
 				a.result <- nil
@@ -619,6 +679,22 @@ func (r *Room) Run(ctx context.Context) {
 				stopRadio()
 				a.result <- nil
 
+			case actDirectorySnapshot:
+				snapshot := DirectorySnapshot{ListenerCount: len(clients)}
+				if playback != nil && playback.Current != nil {
+					cur := playback.Current
+					coverURL := cur.CoverURL
+					if coverURL != "" {
+						coverURL = "/api/v1/cover/" + url.PathEscape(cur.TrackRef)
+					}
+					snapshot.NowPlaying = &NowPlayingSummary{
+						Title: cur.Title, Artist: cur.Artist, DurationMs: cur.DurationMs,
+						CoverURL: coverURL, PositionMs: playback.PositionMs,
+						UpdatedAt: playback.UpdatedAt, Playing: playback.Playing, Rate: playback.Rate,
+					}
+				}
+				a.snapshot <- snapshot
+
 			case actSetPolicy:
 				p, err := ParsePolicy(a.policyRaw)
 				if err != nil {
@@ -662,6 +738,7 @@ func (r *Room) loadQueue() []QueueEntry {
 			Album: row.Album, CoverURL: row.CoverURL, SourceURL: row.SourceURL,
 			Contributors: contributors,
 			RequestedBy:  row.RequestedBy, AddedAt: row.AddedAt,
+			RequesterName: row.RequesterName,
 		}
 	}
 	return out

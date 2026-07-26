@@ -24,9 +24,10 @@ import (
 // （应对密钥轮换）。access token 在 Zitadel 默认是 opaque，本验证器
 // 只处理 ID token（恒为 JWT）。
 type OIDCValidator struct {
-	issuer   string
-	clientID string
-	hc       *http.Client
+	issuer    string
+	clientID  string
+	audiences []string // clientID + extra client ids，命中任一即通过
+	hc        *http.Client
 
 	mu          sync.Mutex
 	jwksURI     string
@@ -34,18 +35,23 @@ type OIDCValidator struct {
 	keys        map[string]*rsa.PublicKey // kid → 公钥
 }
 
-func NewOIDCValidator(issuer, clientID string) *OIDCValidator {
+func NewOIDCValidator(issuer, clientID string, extraClientIDs ...string) *OIDCValidator {
+	audiences := append([]string{clientID}, extraClientIDs...)
 	return &OIDCValidator{
-		issuer:   strings.TrimSuffix(issuer, "/"),
-		clientID: clientID,
-		hc:       &http.Client{Timeout: 10 * time.Second},
-		keys:     map[string]*rsa.PublicKey{},
+		issuer:    strings.TrimSuffix(issuer, "/"),
+		clientID:  clientID,
+		audiences: audiences,
+		hc:        &http.Client{Timeout: 10 * time.Second},
+		keys:      map[string]*rsa.PublicKey{},
 	}
 }
 
 // Issuer / ClientID 供公开配置端点展示。
 func (v *OIDCValidator) Issuer() string   { return v.issuer }
 func (v *OIDCValidator) ClientID() string { return v.clientID }
+
+// ClientIDs 返回全部接受的 client_id（主在前，extra 在后）。
+func (v *OIDCValidator) ClientIDs() []string { return append([]string(nil), v.audiences...) }
 
 // OIDCClaims 从 ID token 提取的最小身份集。
 type OIDCClaims struct {
@@ -115,7 +121,14 @@ func (v *OIDCValidator) Validate(ctx context.Context, idToken string) (OIDCClaim
 	if iss := get("iss"); iss != v.issuer {
 		return OIDCClaims{}, fmt.Errorf("%w: issuer %q", ErrOIDCToken, iss)
 	}
-	if !audContains(payload["aud"], v.clientID) {
+	audOK := false
+	for _, a := range v.audiences {
+		if audContains(payload["aud"], a) {
+			audOK = true
+			break
+		}
+	}
+	if !audOK {
 		return OIDCClaims{}, fmt.Errorf("%w: audience mismatch", ErrOIDCToken)
 	}
 	var exp int64

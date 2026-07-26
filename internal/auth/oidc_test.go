@@ -146,6 +146,67 @@ func TestOIDCAudienceArray(t *testing.T) {
 	}
 }
 
+func TestOIDCExtraClientIDs(t *testing.T) {
+	f := newFakeIdP(t)
+	v := NewOIDCValidator(f.s.URL, "yuzu-cli", "yuzu-web")
+	ctx := context.Background()
+
+	t.Run("extra client id accepted", func(t *testing.T) {
+		c := f.baseClaims()
+		c["aud"] = "yuzu-web"
+		if _, err := v.Validate(ctx, f.sign(c)); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("primary client id still accepted", func(t *testing.T) {
+		if _, err := v.Validate(ctx, f.sign(f.baseClaims())); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("unknown audience rejected", func(t *testing.T) {
+		c := f.baseClaims()
+		c["aud"] = "unknown-client"
+		if _, err := v.Validate(ctx, f.sign(c)); err == nil {
+			t.Fatal("expected rejection, got nil error")
+		}
+	})
+
+	t.Run("audience array mixed hit", func(t *testing.T) {
+		c := f.baseClaims()
+		c["aud"] = []string{"someone-else", "yuzu-web"}
+		if _, err := v.Validate(ctx, f.sign(c)); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("audience array no hit rejected", func(t *testing.T) {
+		c := f.baseClaims()
+		c["aud"] = []string{"someone-else", "another-one"}
+		if _, err := v.Validate(ctx, f.sign(c)); err == nil {
+			t.Fatal("expected rejection, got nil error")
+		}
+	})
+}
+
+func TestOIDCClientIDsOrder(t *testing.T) {
+	v := NewOIDCValidator("https://id.example", "yuzu-cli", "yuzu-web", "yuzu-admin")
+	got := v.ClientIDs()
+	want := []string{"yuzu-cli", "yuzu-web", "yuzu-admin"}
+	if len(got) != len(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("want %v, got %v", want, got)
+		}
+	}
+	if noExtra := NewOIDCValidator("https://id.example", "yuzu-cli"); len(noExtra.ClientIDs()) != 1 {
+		t.Fatalf("no extras: want 1 client id, got %v", noExtra.ClientIDs())
+	}
+}
+
 func TestOIDCUnknownKid(t *testing.T) {
 	f := newFakeIdP(t)
 	v := NewOIDCValidator(f.s.URL, "yuzu-cli")

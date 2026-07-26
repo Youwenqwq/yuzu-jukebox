@@ -128,6 +128,7 @@ type QueueRow struct {
 	SourceURL        string
 	ContributorsJSON string
 	RequestedBy      string
+	RequesterName    string
 	AddedAt          int64
 }
 
@@ -144,10 +145,10 @@ func (s *Store) ReplaceQueue(ctx context.Context, roomID string, rows []QueueRow
 	for i, r := range rows {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO room_queue (room_id, ord, entry_id, track_ref, title, artist, duration_ms,
-			 album, cover_url, source_url, contributors_json, requested_by, added_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 album, cover_url, source_url, contributors_json, requested_by, requester_name, added_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			roomID, i, r.EntryID, r.TrackRef, r.Title, r.Artist, r.DurationMs,
-			r.Album, r.CoverURL, r.SourceURL, r.ContributorsJSON, r.RequestedBy, r.AddedAt); err != nil {
+			r.Album, r.CoverURL, r.SourceURL, r.ContributorsJSON, r.RequestedBy, r.RequesterName, r.AddedAt); err != nil {
 			return err
 		}
 	}
@@ -156,8 +157,8 @@ func (s *Store) ReplaceQueue(ctx context.Context, roomID string, rows []QueueRow
 
 func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT entry_id, track_ref, title, artist, duration_ms, album, cover_url, source_url, contributors_json, requested_by, added_at
-		 FROM room_queue WHERE room_id = ? ORDER BY ord`, roomID)
+		`SELECT entry_id, track_ref, title, artist, duration_ms, album, cover_url, source_url, contributors_json,
+		        requested_by, requester_name, added_at FROM room_queue WHERE room_id = ? ORDER BY ord`, roomID)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +167,7 @@ func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, error
 	for rows.Next() {
 		var r QueueRow
 		if err := rows.Scan(&r.EntryID, &r.TrackRef, &r.Title, &r.Artist, &r.DurationMs,
-			&r.Album, &r.CoverURL, &r.SourceURL, &r.ContributorsJSON, &r.RequestedBy, &r.AddedAt); err != nil {
+			&r.Album, &r.CoverURL, &r.SourceURL, &r.ContributorsJSON, &r.RequestedBy, &r.RequesterName, &r.AddedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -357,6 +358,39 @@ func (s *Store) GetMediaFile(ctx context.Context, id string) (MediaFile, error) 
 		Scan(&m.ID, &m.Filename, &m.Title, &m.Artist, &m.DurationMs, &m.SizeBytes, &m.UploadedBy,
 			&m.Album, &m.CoverPath, &m.BitrateKbps, &m.CreatedAt)
 	return m, err
+}
+
+func (s *Store) ListMediaFiles(ctx context.Context) ([]MediaFile, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, filename, title, artist, duration_ms, size_bytes, uploaded_by, album, cover_path, bitrate_kbps, created_at
+		 FROM media_files ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]MediaFile, 0)
+	for rows.Next() {
+		var m MediaFile
+		if err := rows.Scan(&m.ID, &m.Filename, &m.Title, &m.Artist, &m.DurationMs, &m.SizeBytes, &m.UploadedBy,
+			&m.Album, &m.CoverPath, &m.BitrateKbps, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteMediaFile(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM media_files WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) SearchMediaFiles(ctx context.Context, query string, limit int) ([]MediaFile, error) {
@@ -563,6 +597,71 @@ func (s *Store) DeletePlaylistItem(ctx context.Context, playlistID string, ord i
 		return err
 	}
 	return tx.Commit()
+}
+
+// MovePlaylistItem 把 ord 处的条目移动到 toOrd（clamp 到 [1, len]），
+// 事务内完成，重排后序号保持 1-based 连续。ord 超界返回 sql.ErrNoRows。
+// 返回最终落位序号。
+func (s *Store) MovePlaylistItem(ctx context.Context, playlistID string, ord, toOrd int) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// (playlist_id, ord) 有唯一约束，区间平移会逐行撞约束；
+	// 与 Delete 同哲学：读出序号序列，在内存里重排，再整体重写。
+	rows, err := tx.QueryContext(ctx,
+		`SELECT ord FROM playlist_items WHERE playlist_id = ? ORDER BY ord`, playlistID)
+	if err != nil {
+		return 0, err
+	}
+	var ords []int
+	for rows.Next() {
+		var o int
+		if err := rows.Scan(&o); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ords = append(ords, o)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	n := len(ords)
+	if ord < 1 || ord > n {
+		return 0, sql.ErrNoRows
+	}
+	if toOrd < 1 {
+		toOrd = 1
+	}
+	if toOrd > n {
+		toOrd = n
+	}
+	if ord == toOrd {
+		return toOrd, tx.Commit()
+	}
+
+	moved := ords[ord-1]
+	rest := append(ords[:ord-1:ord-1], ords[ord:]...)
+	rest = append(rest[:toOrd-1], append([]int{moved}, rest[toOrd-1:]...)...)
+
+	// 先全部取负腾出空间，再按新顺序落位。
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE playlist_items SET ord = -ord WHERE playlist_id = ?`, playlistID); err != nil {
+		return 0, err
+	}
+	for newOrd, oldOrd := range rest {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE playlist_items SET ord = ? WHERE playlist_id = ? AND ord = ?`,
+			newOrd+1, playlistID, -oldOrd); err != nil {
+			return 0, err
+		}
+	}
+	return toOrd, tx.Commit()
 }
 
 // ---------- 凭据 ---------

@@ -5,9 +5,12 @@ package local
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +18,11 @@ import (
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
+)
+
+var (
+	ErrInvalidRef = errors.New("invalid local media ref")
+	ErrNotFound   = errors.New("local media not found")
 )
 
 type Provider struct {
@@ -85,6 +93,28 @@ func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, 
 	return out, nil
 }
 
+func (p *Provider) List(ctx context.Context) ([]store.MediaFile, error) {
+	return p.st.ListMediaFiles(ctx)
+}
+
+// Delete 先删除数据库行，再尽力删除磁盘文件，避免留下指向缺失文件的行。
+func (p *Provider) Delete(ctx context.Context, ref provider.TrackRef) error {
+	m, err := p.mediaOf(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if err := p.st.DeleteMediaFile(ctx, m.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if err := os.Remove(filepath.Join(p.dir, m.Filename)); err != nil {
+		log.Printf("local: remove media %s: %v", ref, err)
+	}
+	return nil
+}
+
 func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provider.Track, error) {
 	m, err := p.mediaOf(ctx, ref)
 	if err != nil {
@@ -113,13 +143,16 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 }
 
 func (p *Provider) mediaOf(ctx context.Context, ref provider.TrackRef) (store.MediaFile, error) {
-	_, id, err := ref.Split()
-	if err != nil {
-		return store.MediaFile{}, err
+	providerID, id, err := ref.Split()
+	if err != nil || providerID != p.ID() {
+		return store.MediaFile{}, ErrInvalidRef
 	}
 	m, err := p.st.GetMediaFile(ctx, id)
 	if err != nil {
-		return store.MediaFile{}, fmt.Errorf("track not found: %s", ref)
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.MediaFile{}, ErrNotFound
+		}
+		return store.MediaFile{}, err
 	}
 	return m, nil
 }

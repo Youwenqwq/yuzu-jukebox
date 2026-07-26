@@ -4,10 +4,12 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
@@ -67,12 +69,49 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	var oidcValidator *auth.OIDCValidator
 	if cfg.OIDC.Enabled && cfg.OIDC.Issuer != "" {
-		oidcValidator = auth.NewOIDCValidator(cfg.OIDC.Issuer, cfg.OIDC.ClientID)
-		log.Printf("oidc: issuer %s (client_id %s)", cfg.OIDC.Issuer, cfg.OIDC.ClientID)
+		oidcValidator = auth.NewOIDCValidator(cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.ExtraClientIDs...)
+		log.Printf("oidc: issuer %s (client_id %s, extras %v)", cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.ExtraClientIDs)
 	}
 
 	ws := wsapi.NewServer(authm, rooms, reg)
 	api := httpapi.NewServer(st, authm, rooms, reg, lp, c, ws, oidcValidator, cfg.OIDC.RoleMapping)
 
+	if cfg.CacheAutoPruneDays > 0 {
+		go runCacheJanitor(ctx, c, cfg.CacheAutoPruneDays)
+	}
+
 	return &App{Handler: httpapi.CORSMiddleware(cfg.CORS, api.Handler()), Store: st}, nil
+}
+
+func runCacheJanitor(ctx context.Context, c *cache.Cache, unusedDays int) {
+	initial := time.NewTimer(time.Minute)
+	defer initial.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-initial.C:
+	}
+
+	prune := func() {
+		evicted, freed, err := c.PruneUnused(ctx, time.Duration(unusedDays)*24*time.Hour)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("[cache] auto prune failed: %v", err)
+			}
+			return
+		}
+		log.Printf("[cache] auto prune: evicted %d entries, freed %d bytes", evicted, freed)
+	}
+	prune()
+
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
