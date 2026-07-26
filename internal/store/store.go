@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,7 +29,7 @@ func nowMs() int64 { return time.Now().UnixMilli() }
 func Open(path string, secretKey []byte) (*Store, error) {
 	// WAL：读写不互斥；busy_timeout：写锁竞争时等待而非立刻报错；
 	// foreign_keys：SQLite 默认不开外键约束。
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -113,6 +114,215 @@ func (s *Store) ListRooms(ctx context.Context) ([]Room, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ---------- 全局主体与 Room 授权 ----------
+
+type Principal struct {
+	ID          string
+	Name        string
+	Kind        string
+	OIDCSubject string
+	Roles       []string
+	Active      bool
+	CreatedAt   int64
+	UpdatedAt   int64
+}
+
+func (s *Store) UpsertPrincipal(ctx context.Context, p Principal) error {
+	roles := p.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	rolesJSON, err := json.Marshal(roles)
+	if err != nil {
+		return err
+	}
+	now := nowMs()
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO users
+			(id, kind, name, oidc_subject, roles_json, active, created_at, updated_at)
+		 VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			kind = excluded.kind,
+			name = excluded.name,
+			oidc_subject = COALESCE(NULLIF(users.oidc_subject, ''), excluded.oidc_subject),
+			roles_json = excluded.roles_json,
+			active = excluded.active,
+			updated_at = excluded.updated_at`,
+		p.ID, p.Kind, p.Name, p.OIDCSubject, string(rolesJSON), p.Active, now, now)
+	return err
+}
+
+func (s *Store) GetPrincipal(ctx context.Context, id string) (Principal, error) {
+	return scanPrincipal(s.db.QueryRowContext(ctx,
+		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
+		 FROM users WHERE id = ?`, id))
+}
+
+func (s *Store) GetPrincipalByOIDCSubject(ctx context.Context, subject string) (Principal, error) {
+	return scanPrincipal(s.db.QueryRowContext(ctx,
+		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
+		 FROM users WHERE oidc_subject = ?`, subject))
+}
+
+func scanPrincipal(row *sql.Row) (Principal, error) {
+	var p Principal
+	var rolesJSON string
+	err := row.Scan(
+		&p.ID,
+		&p.Name,
+		&p.Kind,
+		&p.OIDCSubject,
+		&rolesJSON,
+		&p.Active,
+		&p.CreatedAt,
+		&p.UpdatedAt,
+	)
+	if err != nil {
+		return Principal{}, err
+	}
+	if err := json.Unmarshal([]byte(rolesJSON), &p.Roles); err != nil {
+		return Principal{}, fmt.Errorf("decode principal roles: %w", err)
+	}
+	return p, nil
+}
+
+func (s *Store) UpsertExternalIdentityLink(
+	ctx context.Context,
+	integrationID, adapterID, scopeType, scopeID, subjectID, principalID string,
+) error {
+	now := nowMs()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO external_identity_links
+			(integration_id, adapter_id, scope_type, scope_id, subject_id, principal_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(integration_id, adapter_id, scope_type, scope_id, subject_id)
+		 DO UPDATE SET principal_id = excluded.principal_id, updated_at = excluded.updated_at`,
+		integrationID, adapterID, scopeType, scopeID, subjectID, principalID, now, now)
+	return err
+}
+
+func (s *Store) ResolveExternalIdentityLink(
+	ctx context.Context,
+	integrationID, adapterID, scopeType, scopeID, subjectID string,
+) (string, error) {
+	var principalID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT principal_id FROM external_identity_links
+		 WHERE integration_id = ? AND adapter_id = ? AND scope_type = ? AND scope_id = ? AND subject_id = ?`,
+		integrationID, adapterID, scopeType, scopeID, subjectID).Scan(&principalID)
+	return principalID, err
+}
+
+func (s *Store) RemoveExternalIdentityLink(
+	ctx context.Context,
+	integrationID, adapterID, scopeType, scopeID, subjectID string,
+) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM external_identity_links
+		 WHERE integration_id = ? AND adapter_id = ? AND scope_type = ? AND scope_id = ? AND subject_id = ?`,
+		integrationID, adapterID, scopeType, scopeID, subjectID)
+	return err
+}
+
+func (s *Store) BindExternalScopeRoom(
+	ctx context.Context,
+	integrationID, adapterID, scopeType, scopeID, roomID string,
+) error {
+	now := nowMs()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO external_scope_rooms
+			(integration_id, adapter_id, scope_type, scope_id, room_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(integration_id, adapter_id, scope_type, scope_id)
+		 DO UPDATE SET room_id = excluded.room_id, updated_at = excluded.updated_at`,
+		integrationID, adapterID, scopeType, scopeID, roomID, now, now)
+	return err
+}
+
+func (s *Store) ResolveExternalScopeRoom(
+	ctx context.Context,
+	integrationID, adapterID, scopeType, scopeID string,
+) (string, error) {
+	var roomID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT room_id FROM external_scope_rooms
+		 WHERE integration_id = ? AND adapter_id = ? AND scope_type = ? AND scope_id = ?`,
+		integrationID, adapterID, scopeType, scopeID).Scan(&roomID)
+	return roomID, err
+}
+
+func (s *Store) RemoveExternalScopeRoom(
+	ctx context.Context,
+	integrationID, adapterID, scopeType, scopeID string,
+) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM external_scope_rooms
+		 WHERE integration_id = ? AND adapter_id = ? AND scope_type = ? AND scope_id = ?`,
+		integrationID, adapterID, scopeType, scopeID)
+	return err
+}
+
+type RoomGrant struct {
+	RoomID      string
+	PrincipalID string
+	Capability  string
+	GrantedAt   int64
+}
+
+func (s *Store) GrantRoomGrant(ctx context.Context, roomID, principalID, capability string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO room_principal_grants (room_id, principal_id, capability, granted_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(room_id, principal_id, capability)
+		 DO UPDATE SET granted_at = excluded.granted_at`,
+		roomID, principalID, capability, nowMs())
+	return err
+}
+
+func (s *Store) RevokeRoomGrant(ctx context.Context, roomID, principalID, capability string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM room_principal_grants
+		 WHERE room_id = ? AND principal_id = ? AND capability = ?`,
+		roomID, principalID, capability)
+	return err
+}
+
+func (s *Store) ListRoomGrants(ctx context.Context, roomID string) ([]RoomGrant, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT room_id, principal_id, capability, granted_at
+		 FROM room_principal_grants
+		 WHERE room_id = ?
+		 ORDER BY principal_id, capability`,
+		roomID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var grants []RoomGrant
+	for rows.Next() {
+		var grant RoomGrant
+		if err := rows.Scan(&grant.RoomID, &grant.PrincipalID, &grant.Capability, &grant.GrantedAt); err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	return grants, rows.Err()
+}
+
+func (s *Store) HasRoomGrant(
+	ctx context.Context,
+	roomID, principalID, capability string,
+) (bool, error) {
+	var granted bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM room_principal_grants
+			WHERE room_id = ? AND principal_id = ? AND capability = ?
+		)`,
+		roomID, principalID, capability).Scan(&granted)
+	return granted, err
 }
 
 // ---------- 队列持久化 ----------

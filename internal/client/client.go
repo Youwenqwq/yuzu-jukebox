@@ -369,12 +369,11 @@ type Listener struct {
 	Name string `json:"name"`
 }
 
-// Snapshot 进房快照四件套：播放状态、队列、电台、听众。
 type Snapshot struct {
-	Playback  Playback
-	Queue     []QueueEntry
-	Radio     *RadioInfo
-	Listeners []Listener
+	Playback  Playback     `json:"playback"`
+	Queue     []QueueEntry `json:"queue"`
+	Radio     *RadioInfo   `json:"radio"`
+	Listeners []Listener   `json:"listeners"`
 }
 
 // AwaitSnapshot 在 Join 之后调用，收齐服务端按序推送的快照消息。
@@ -414,6 +413,228 @@ func (c *Client) AwaitSnapshot(timeout time.Duration) (*Snapshot, error) {
 		}
 	}
 	return snap, nil
+}
+
+// RoomState 是无状态控制 REST 返回的房间完整状态。
+type RoomState = Snapshot
+
+// RoomQueueAddRequest 是 POST /api/v1/rooms/{id}/queue 的请求。
+// TrackRef 与 TrackRefs 必须二选一。
+type RoomQueueAddRequest struct {
+	TrackRef  string   `json:"track_ref,omitempty"`
+	TrackRefs []string `json:"track_refs,omitempty"`
+}
+
+// RoomQueueAddResponse 是入队结果，EntryIDs 与请求顺序一致。
+type RoomQueueAddResponse struct {
+	EntryIDs []string `json:"entry_ids"`
+}
+
+// RoomQueueMoveRequest 是队列移动请求。
+type RoomQueueMoveRequest struct {
+	ToIndex int `json:"to_index"`
+}
+
+// RoomPlaybackSeekRequest 是播放定位请求。
+type RoomPlaybackSeekRequest struct {
+	PositionMs int64 `json:"position_ms"`
+}
+
+// RoomRadioPlayRequest 是电台播放请求。
+type RoomRadioPlayRequest struct {
+	Source  string `json:"source"`
+	Shuffle bool   `json:"shuffle"`
+	Once    bool   `json:"once"`
+}
+
+// RESTRoomState 无副作用地读取指定身份可见的房间状态。
+func RESTRoomState(ctx context.Context, server, actorToken, roomID string) (RoomState, error) {
+	var out RoomState
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/state", actorToken, nil, &out)
+	return out, err
+}
+
+// RESTRoomQueueAdd 添加一首曲目并返回创建的队列 entry_id。
+func RESTRoomQueueAdd(ctx context.Context, server, actorToken, roomID, trackRef string) (string, error) {
+	out, err := restRoomQueueAdd(ctx, server, actorToken, roomID, RoomQueueAddRequest{TrackRef: trackRef})
+	if err != nil {
+		return "", err
+	}
+	if len(out.EntryIDs) != 1 {
+		return "", fmt.Errorf("queue add returned %d entry IDs, want 1", len(out.EntryIDs))
+	}
+	return out.EntryIDs[0], nil
+}
+
+// RESTRoomQueueAddMany 原子批量添加曲目并返回对应的 entry_id。
+func RESTRoomQueueAddMany(ctx context.Context, server, actorToken, roomID string, trackRefs []string) ([]string, error) {
+	out, err := restRoomQueueAdd(ctx, server, actorToken, roomID, RoomQueueAddRequest{TrackRefs: trackRefs})
+	return out.EntryIDs, err
+}
+
+func restRoomQueueAdd(ctx context.Context, server, actorToken, roomID string, body RoomQueueAddRequest) (RoomQueueAddResponse, error) {
+	var out RoomQueueAddResponse
+	err := restCall(ctx, server, http.MethodPost,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/queue", actorToken, body, &out)
+	return out, err
+}
+
+// RESTRoomQueueRemove 移除指定队列条目。
+func RESTRoomQueueRemove(ctx context.Context, server, actorToken, roomID, entryID string) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/queue/"+url.PathEscape(entryID),
+		actorToken, nil, &struct{}{})
+}
+
+// RESTRoomQueueMove 移动指定队列条目。
+func RESTRoomQueueMove(ctx context.Context, server, actorToken, roomID, entryID string, toIndex int) error {
+	return restCall(ctx, server, http.MethodPatch,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/queue/"+url.PathEscape(entryID),
+		actorToken, RoomQueueMoveRequest{ToIndex: toIndex}, &struct{}{})
+}
+
+// RESTRoomPlaybackPause 暂停房间播放。
+func RESTRoomPlaybackPause(ctx context.Context, server, actorToken, roomID string) error {
+	return restRoomPlaybackOp(ctx, server, actorToken, roomID, "pause", nil)
+}
+
+// RESTRoomPlaybackResume 恢复房间播放。
+func RESTRoomPlaybackResume(ctx context.Context, server, actorToken, roomID string) error {
+	return restRoomPlaybackOp(ctx, server, actorToken, roomID, "resume", nil)
+}
+
+// RESTRoomPlaybackSkip 跳过当前曲目。
+func RESTRoomPlaybackSkip(ctx context.Context, server, actorToken, roomID string) error {
+	return restRoomPlaybackOp(ctx, server, actorToken, roomID, "skip", nil)
+}
+
+// RESTRoomPlaybackSeek 定位到指定毫秒位置。
+func RESTRoomPlaybackSeek(ctx context.Context, server, actorToken, roomID string, positionMs int64) error {
+	return restRoomPlaybackOp(ctx, server, actorToken, roomID, "seek",
+		RoomPlaybackSeekRequest{PositionMs: positionMs})
+}
+
+func restRoomPlaybackOp(ctx context.Context, server, actorToken, roomID, op string, body any) error {
+	return restCall(ctx, server, http.MethodPost,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/playback/"+url.PathEscape(op),
+		actorToken, body, &struct{}{})
+}
+
+// RESTRoomRadioPlay 启动房间电台模式。
+func RESTRoomRadioPlay(ctx context.Context, server, actorToken, roomID, source string, shuffle, once bool) error {
+	return restCall(ctx, server, http.MethodPost,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/radio", actorToken,
+		RoomRadioPlayRequest{Source: source, Shuffle: shuffle, Once: once}, &struct{}{})
+}
+
+// RESTRoomRadioStop 停止房间电台模式。
+func RESTRoomRadioStop(ctx context.Context, server, actorToken, roomID string) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/radio", actorToken, nil, &struct{}{})
+}
+
+// IntegrationActorScope 标识 Integration 上报的外部作用域。
+type IntegrationActorScope struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// IntegrationActorSubject 标识 Integration 上报的外部用户。
+type IntegrationActorSubject struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
+// IntegrationActorResolveRequest 是可信 Integration 的 actor 解析请求。
+type IntegrationActorResolveRequest struct {
+	AdapterID string                  `json:"adapter_id"`
+	Scope     IntegrationActorScope   `json:"scope"`
+	Subject   IntegrationActorSubject `json:"subject"`
+}
+
+// IntegrationActorResolveResponse 返回可供标准 REST/WS 使用的短期 actor token。
+type IntegrationActorResolveResponse struct {
+	Identity      Identity `json:"identity"`
+	DefaultRoomID string   `json:"default_room_id,omitempty"`
+	ActorToken    string   `json:"actor_token"`
+	ExpiresAt     int64    `json:"expires_at"`
+}
+
+// RESTResolveIntegrationActor 用 Integration token 解析外部身份。
+func RESTResolveIntegrationActor(ctx context.Context, server, integrationToken string, request IntegrationActorResolveRequest) (IntegrationActorResolveResponse, error) {
+	var out IntegrationActorResolveResponse
+	err := restCall(ctx, server, http.MethodPost, "/api/v1/integrations/actors/resolve",
+		integrationToken, request, &out)
+	return out, err
+}
+
+// IntegrationScopeBinding 是 external scope 与默认 Room 的绑定。
+type IntegrationScopeBinding struct {
+	AdapterID string `json:"adapter_id"`
+	ScopeType string `json:"scope_type"`
+	ScopeID   string `json:"scope_id"`
+	RoomID    string `json:"room_id"`
+}
+
+// RESTBindIntegrationScope 创建或更新 external scope 的默认 Room。
+func RESTBindIntegrationScope(ctx context.Context, server, actorToken, integrationID string, binding IntegrationScopeBinding) error {
+	return restCall(ctx, server, http.MethodPut,
+		"/api/v1/integrations/"+url.PathEscape(integrationID)+"/scopes",
+		actorToken, binding, &struct{}{})
+}
+
+// RESTUnbindIntegrationScope 删除 external scope 的默认 Room 绑定。
+func RESTUnbindIntegrationScope(ctx context.Context, server, actorToken, integrationID string, binding IntegrationScopeBinding) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/integrations/"+url.PathEscape(integrationID)+"/scopes",
+		actorToken, binding, &struct{}{})
+}
+
+// IntegrationSubjectLink 是 external subject 与持久 Principal 的关联。
+type IntegrationSubjectLink struct {
+	AdapterID   string `json:"adapter_id"`
+	ScopeType   string `json:"scope_type"`
+	ScopeID     string `json:"scope_id"`
+	SubjectID   string `json:"subject_id"`
+	PrincipalID string `json:"principal_id"`
+}
+
+// RESTLinkIntegrationSubject 创建或更新 external subject 的 Principal 关联。
+func RESTLinkIntegrationSubject(ctx context.Context, server, actorToken, integrationID string, link IntegrationSubjectLink) error {
+	return restCall(ctx, server, http.MethodPut,
+		"/api/v1/integrations/"+url.PathEscape(integrationID)+"/subjects",
+		actorToken, link, &struct{}{})
+}
+
+// RESTUnlinkIntegrationSubject 删除 external subject 的 Principal 关联。
+func RESTUnlinkIntegrationSubject(ctx context.Context, server, actorToken, integrationID string, link IntegrationSubjectLink) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/integrations/"+url.PathEscape(integrationID)+"/subjects",
+		actorToken, link, &struct{}{})
+}
+
+// RoomControllerGrant 是 Room controller capability 的显式管理请求。
+type RoomControllerGrant struct {
+	RoomID      string `json:"room_id"`
+	PrincipalID string `json:"principal_id"`
+	Capability  string `json:"capability"`
+}
+
+// RESTGrantRoomController 为 Principal 授予指定 Room 的 controller capability。
+func RESTGrantRoomController(ctx context.Context, server, actorToken, roomID, principalID string) error {
+	body := RoomControllerGrant{RoomID: roomID, PrincipalID: principalID, Capability: "controller"}
+	return restCall(ctx, server, http.MethodPut,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/grants/"+url.PathEscape(principalID),
+		actorToken, body, &struct{}{})
+}
+
+// RESTRevokeRoomController 撤销 Principal 在指定 Room 的 controller capability。
+func RESTRevokeRoomController(ctx context.Context, server, actorToken, roomID, principalID string) error {
+	body := RoomControllerGrant{RoomID: roomID, PrincipalID: principalID, Capability: "controller"}
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/grants/"+url.PathEscape(principalID),
+		actorToken, body, &struct{}{})
 }
 
 var ErrNoSuchRoom = errors.New("room not found")

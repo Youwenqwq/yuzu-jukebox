@@ -14,6 +14,7 @@ import (
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
+	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
@@ -52,7 +53,11 @@ func setupMediaEndpoints(t *testing.T) mediaEndpointFixture {
 	authm := auth.NewManager("", st)
 	adminTok := authm.IssueSession(auth.Identity{ID: "u_admin", Name: "admin", Roles: []string{auth.RoleMediaAdmin}})
 	readerTok := authm.IssueSession(auth.Identity{ID: "u_reader", Name: "reader", Roles: []string{auth.RoleRequester}})
-	s := &Server{st: st, authm: authm, reg: reg, local: lp, cache: c, ws: wsapi.NewServer(authm, nil, reg)}
+	controls := control.NewService(nil, reg, control.NewAuthorizer(st))
+	s := &Server{
+		st: st, authm: authm, reg: reg, local: lp, cache: c, controls: controls,
+		ws: wsapi.NewServer(authm, controls),
+	}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return mediaEndpointFixture{srv: srv, st: st, local: lp, mediaDir: mediaDir, cacheDir: cacheDir, adminTok: adminTok, readerTok: readerTok}

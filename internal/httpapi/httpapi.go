@@ -15,6 +15,7 @@ import (
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
+	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
@@ -25,21 +26,38 @@ import (
 )
 
 type Server struct {
-	st    *store.Store
-	authm *auth.Manager
-	rooms *room.Manager
-	reg   *provider.Registry
-	local *local.Provider
-	cache *cache.Cache
-	ws    *wsapi.Server
+	st           *store.Store
+	authm        *auth.Manager
+	integrations *auth.IntegrationRegistry
+	rooms        *room.Manager
+	reg          *provider.Registry
+	local        *local.Provider
+	cache        *cache.Cache
+	controls     *control.Service
+	ws           *wsapi.Server
 
 	oidc        *auth.OIDCValidator // nil = OIDC 未启用
 	oidcRoleMap map[string][]string
 }
 
-func NewServer(st *store.Store, authm *auth.Manager, rooms *room.Manager, reg *provider.Registry, lp *local.Provider, c *cache.Cache, ws *wsapi.Server, oidc *auth.OIDCValidator, oidcRoleMap map[string][]string) *Server {
-	return &Server{st: st, authm: authm, rooms: rooms, reg: reg, local: lp, cache: c, ws: ws,
-		oidc: oidc, oidcRoleMap: oidcRoleMap}
+func NewServer(
+	st *store.Store,
+	authm *auth.Manager,
+	integrations *auth.IntegrationRegistry,
+	rooms *room.Manager,
+	reg *provider.Registry,
+	lp *local.Provider,
+	c *cache.Cache,
+	controls *control.Service,
+	ws *wsapi.Server,
+	oidc *auth.OIDCValidator,
+	oidcRoleMap map[string][]string,
+) *Server {
+	return &Server{
+		st: st, authm: authm, integrations: integrations,
+		rooms: rooms, reg: reg, local: lp, cache: c, controls: controls, ws: ws,
+		oidc: oidc, oidcRoleMap: oidcRoleMap,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -48,12 +66,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/oidc", s.oidcAuth)
 	mux.HandleFunc("GET /api/v1/auth/oidc/config", s.oidcConfig)
 	mux.HandleFunc("DELETE /api/v1/auth/session", s.logout)
+	mux.HandleFunc("POST /api/v1/integrations/actors/resolve", s.resolveIntegrationActor)
+	mux.HandleFunc("PUT /api/v1/integrations/{id}/scopes", s.manageIntegrationScope)
+	mux.HandleFunc("DELETE /api/v1/integrations/{id}/scopes", s.manageIntegrationScope)
+	mux.HandleFunc("PUT /api/v1/integrations/{id}/subjects", s.manageIntegrationSubject)
+	mux.HandleFunc("DELETE /api/v1/integrations/{id}/subjects", s.manageIntegrationSubject)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}", s.deleteRoom)
+	mux.HandleFunc("PUT /api/v1/rooms/{id}/grants/{principal_id}", s.manageRoomGrant)
+	mux.HandleFunc("DELETE /api/v1/rooms/{id}/grants/{principal_id}", s.manageRoomGrant)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/history", s.roomHistory)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/stats", s.roomStats)
+	mux.HandleFunc("GET /api/v1/rooms/{id}/state", s.roomState)
+	mux.HandleFunc("POST /api/v1/rooms/{id}/queue", s.queueAdd)
+	mux.HandleFunc("DELETE /api/v1/rooms/{id}/queue/{entry_id}", s.queueRemove)
+	mux.HandleFunc("PATCH /api/v1/rooms/{id}/queue/{entry_id}", s.queueMove)
+	mux.HandleFunc("POST /api/v1/rooms/{id}/playback/{op}", s.playbackControl)
+	mux.HandleFunc("POST /api/v1/rooms/{id}/radio", s.radioPlay)
+	mux.HandleFunc("DELETE /api/v1/rooms/{id}/radio", s.radioStop)
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
@@ -173,6 +205,11 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	// 有 access_token 就统一走 userinfo：补显示名 + 合并角色。
 	if body.AccessToken != "" {
 		if info, err := s.oidc.Userinfo(r.Context(), body.AccessToken); err == nil {
+			userinfoSub, _ := info["sub"].(string)
+			if userinfoSub == "" || userinfoSub != claims.Sub {
+				writeErr(w, http.StatusUnauthorized, "unauthorized", "userinfo subject does not match id_token")
+				return
+			}
 			if claims.Username == claims.Sub {
 				if name, _ := info["preferred_username"].(string); name != "" {
 					claims.Username = name
@@ -194,7 +231,11 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id := auth.OIDCIdentity(claims, roles)
-	token := s.authm.IssueSession(id)
+	token, err := s.authm.IssueAuthenticatedSession(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to issue session")
+		return
+	}
 	auth.LogAdminGrant(id, "oidc", r.RemoteAddr)
 	s.st.Audit(r.Context(), id.ID, "auth.oidc", "", `{"name":`+strconv.Quote(id.Name)+`}`)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,10 +26,11 @@ const (
 )
 
 type Identity struct {
-	ID    string   `json:"id"`
-	Name  string   `json:"name"`
-	Kind  string   `json:"kind"` // guest | password | oidc
-	Roles []string `json:"roles"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Kind        string   `json:"kind"` // guest | password | oidc
+	Roles       []string `json:"roles"`
+	OIDCSubject string   `json:"-"`
 }
 
 func (id Identity) HasRole(role string) bool {
@@ -80,20 +82,62 @@ func NewManager(adminPassword string, st *store.Store) *Manager {
 		tickets:        map[string]ticket{},
 		passwordProbes: newPasswordProbeLimiter(),
 	}
-	if st != nil {
-		m.st = st
-		// 恢复未过期会话；失败的行静默跳过（可能是旧格式）
-		if rows, err := st.LoadSessions(context.Background(), time.Now().UnixMilli()); err == nil {
-			for _, r := range rows {
-				var id Identity
-				if json.Unmarshal([]byte(r.IdentityJSON), &id) == nil {
-					m.sessions[r.Token] = session{identity: id, expiresAt: time.UnixMilli(r.ExpiresAt)}
-				}
+	if st == nil {
+		return m
+	}
+
+	m.st = st
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	// identity_json is retained only to migrate sessions created before
+	// principals became authoritative. Runtime authorization always reloads
+	// the current principal below in Session.
+	if rows, err := st.LoadSessions(ctx, now); err == nil {
+		type legacyPrincipal struct {
+			identity  Identity
+			expiresAt int64
+		}
+		legacyPrincipals := make(map[string]legacyPrincipal)
+		for _, r := range rows {
+			var id Identity
+			if json.Unmarshal([]byte(r.IdentityJSON), &id) != nil || id.ID == "" {
+				continue
+			}
+			m.sessions[r.Token] = session{identity: id, expiresAt: time.UnixMilli(r.ExpiresAt)}
+			previous, ok := legacyPrincipals[id.ID]
+			if !ok || r.ExpiresAt > previous.expiresAt {
+				legacyPrincipals[id.ID] = legacyPrincipal{identity: id, expiresAt: r.ExpiresAt}
 			}
 		}
-		_ = st.PruneSessions(context.Background(), time.Now().UnixMilli())
+		for _, legacy := range legacyPrincipals {
+			if _, err := st.GetPrincipal(ctx, legacy.identity.ID); errors.Is(err, sql.ErrNoRows) {
+				_ = st.UpsertPrincipal(ctx, principalFromIdentity(legacy.identity, true))
+			}
+		}
 	}
+	_ = st.PruneSessions(ctx, now)
 	return m
+}
+
+func principalFromIdentity(id Identity, active bool) store.Principal {
+	return store.Principal{
+		ID:          id.ID,
+		Name:        id.Name,
+		Kind:        id.Kind,
+		OIDCSubject: id.OIDCSubject,
+		Roles:       id.Roles,
+		Active:      active,
+	}
+}
+
+func identityFromPrincipal(p store.Principal) Identity {
+	return Identity{
+		ID:          p.ID,
+		Name:        p.Name,
+		Kind:        p.Kind,
+		Roles:       p.Roles,
+		OIDCSubject: p.OIDCSubject,
+	}
 }
 
 // GuestAuth 访客认证。adminPassword 命中全局管理员口令时授予管理角色。
@@ -106,37 +150,101 @@ func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, s
 		return Identity{}, "", errors.New("name required")
 	}
 	roles := []string{RoleListener, RoleRequester}
+	kind := "guest"
+	idPrefix := "g_"
+	hashInput := "guest:" + name
 	if adminMatched {
 		roles = append(roles, RoleRoomAdmin, RoleMediaAdmin)
+		// A shared display name is not authentication. Password-authenticated
+		// administrators therefore use a distinct principal namespace so a
+		// pre-existing ordinary guest session can never inherit the grant.
+		kind = "password"
+		idPrefix = "p_"
+		hashInput = "password:" + name
 	}
-	// 访客 ID 由名字确定性派生：同名重连仍是同一人。点歌限额、
-	// 移除自己点的歌等按 ID 归属的语义才能跨会话成立。
-	sum := sha256.Sum256([]byte("guest:" + name))
+	sum := sha256.Sum256([]byte(hashInput))
 	id := Identity{
-		ID:    "g_" + hex.EncodeToString(sum[:])[:12],
+		ID:    idPrefix + hex.EncodeToString(sum[:])[:12],
 		Name:  name,
-		Kind:  "guest",
+		Kind:  kind,
 		Roles: roles,
 	}
-	token := m.IssueSession(id)
+	token, err := m.IssueAuthenticatedSession(id)
+	if err != nil {
+		return Identity{}, "", err
+	}
 	return id, token, nil
 }
 
-// IssueSession 为一个已认证身份签发会话 token。
-// 供 guest 之外的认证路径（OIDC 等）复用。
+// IssueAuthenticatedSession persists the freshly authenticated identity as the
+// current principal and issues a normal 24-hour session.
+func (m *Manager) IssueAuthenticatedSession(id Identity) (string, error) {
+	if err := m.persistPrincipal(id); err != nil {
+		return "", err
+	}
+	token, _, err := m.issueSession(id, m.sessionTTL)
+	return token, err
+}
+
+// IssueSession preserves the existing convenience API for trusted in-process
+// callers and tests. Authentication handlers should use IssueAuthenticatedSession
+// so persistence failures are observable.
 func (m *Manager) IssueSession(id Identity) string {
+	token, err := m.IssueAuthenticatedSession(id)
+	if err != nil {
+		return ""
+	}
+	return token
+}
+
+// IssueSessionWithTTL issues a short-lived session for an existing principal.
+// It never writes authorization state supplied by the caller.
+func (m *Manager) IssueSessionWithTTL(id Identity, ttl time.Duration) (string, int64, error) {
+	if m.st != nil {
+		principal, err := m.st.GetPrincipal(context.Background(), id.ID)
+		if err != nil {
+			return "", 0, err
+		}
+		if !principal.Active {
+			return "", 0, ErrSessionNotFound
+		}
+		id = identityFromPrincipal(principal)
+	}
+	return m.issueSession(id, ttl)
+}
+
+func (m *Manager) persistPrincipal(id Identity) error {
+	if m.st == nil {
+		return nil
+	}
+	if current, err := m.st.GetPrincipal(context.Background(), id.ID); err == nil {
+		if !current.Active {
+			return ErrSessionNotFound
+		}
+		return m.st.UpsertPrincipal(context.Background(), principalFromIdentity(id, true))
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return m.st.UpsertPrincipal(context.Background(), principalFromIdentity(id, true))
+}
+
+func (m *Manager) issueSession(id Identity, ttl time.Duration) (string, int64, error) {
 	token := randHex(16)
-	expiresAt := time.Now().Add(m.sessionTTL)
+	expiresAt := time.Now().Add(ttl).UTC().Truncate(time.Millisecond)
+	expiresAtMS := expiresAt.UnixMilli()
+	if m.st != nil {
+		data, err := json.Marshal(id)
+		if err != nil {
+			return "", 0, err
+		}
+		if err := m.st.SaveSession(context.Background(), token, string(data), expiresAtMS); err != nil {
+			return "", 0, err
+		}
+	}
 	m.mu.Lock()
 	m.sessions[token] = session{identity: id, expiresAt: expiresAt}
 	m.mu.Unlock()
-	if m.st != nil {
-		if data, err := json.Marshal(id); err == nil {
-			// 落库失败不阻断登录（内存仍有效），仅丧失重启恢复
-			_ = m.st.SaveSession(context.Background(), token, string(data), expiresAt.UnixMilli())
-		}
-	}
-	return token
+	return token, expiresAtMS, nil
 }
 
 // Revoke 吊销会话（logout）。幂等。
@@ -152,12 +260,27 @@ func (m *Manager) Revoke(token string) {
 // Session 按 token 取身份。
 func (m *Manager) Session(token string) (Identity, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s, ok := m.sessions[token]
-	if !ok || time.Now().After(s.expiresAt) {
+	if ok && time.Now().After(s.expiresAt) {
+		delete(m.sessions, token)
+		ok = false
+	}
+	m.mu.Unlock()
+	if !ok {
 		return Identity{}, ErrSessionNotFound
 	}
-	return s.identity, nil
+	if m.st == nil {
+		return s.identity, nil
+	}
+
+	principal, err := m.st.GetPrincipal(context.Background(), s.identity.ID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !principal.Active) {
+		return Identity{}, ErrSessionNotFound
+	}
+	if err != nil {
+		return Identity{}, err
+	}
+	return identityFromPrincipal(principal), nil
 }
 
 // IssueTicket 签发某身份拉取某曲目的出流票据。

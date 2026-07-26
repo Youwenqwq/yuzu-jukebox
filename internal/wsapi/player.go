@@ -82,7 +82,7 @@ func (s *Server) JoinPlayerRoom(id, roomID string) error {
 	if err != nil {
 		return err
 	}
-	r, err := s.rooms.Get(roomID)
+	r, err := s.control.GetRoom(roomID)
 	if err != nil {
 		return fmt.Errorf("room not found: %s", roomID)
 	}

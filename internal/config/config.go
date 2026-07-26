@@ -18,6 +18,11 @@ type CORSConfig struct {
 	AllowCredentials bool `json:"allow_credentials"`
 }
 
+type IntegrationConfig struct {
+	ID    string `json:"id"`
+	Token string `json:"token"`
+}
+
 type Config struct {
 	// 监听地址，如 ":8080"
 	Addr string `json:"addr"`
@@ -37,6 +42,9 @@ type Config struct {
 	// 凭据加密主密钥（64 位 hex = 32 字节）。缺省时 LoadOrCreate 自动生成并回写。
 	// 用于 credentials 表 AES-GCM 加密；丢失则已存凭据不可解密。
 	SecretKey string `json:"secret_key"`
+	// 可信 Integration 的静态凭据。token 仅用于换取短期 actor session，
+	// 不直接授予任何 Yuzu 角色。
+	Integrations []IntegrationConfig `json:"integrations"`
 	// OIDC 认证（Zitadel 等 IdP）。enabled 且配置完整时
 	// 开放 POST /api/v1/auth/oidc。
 	OIDC OIDCConfig `json:"oidc"`
@@ -79,6 +87,7 @@ func Default() Config {
 		CacheDir:           "data/cache",
 		CacheMaxBytes:      20 << 30, // 20 GiB
 		CacheAutoPruneDays: 0,
+		Integrations:       []IntegrationConfig{},
 		NCM: NCMConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3000",

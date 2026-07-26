@@ -190,10 +190,11 @@ func (v *OIDCValidator) Userinfo(ctx context.Context, accessToken string) (map[s
 func OIDCIdentity(c OIDCClaims, roles []string) Identity {
 	sum := sha256.Sum256([]byte("oidc:" + c.Sub))
 	return Identity{
-		ID:    "o_" + hex.EncodeToString(sum[:])[:12],
-		Name:  c.Username,
-		Kind:  "oidc",
-		Roles: roles,
+		ID:          "o_" + hex.EncodeToString(sum[:])[:12],
+		Name:        c.Username,
+		Kind:        "oidc",
+		Roles:       roles,
+		OIDCSubject: c.Sub,
 	}
 }
 

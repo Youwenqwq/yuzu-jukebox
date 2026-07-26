@@ -198,3 +198,57 @@ func TestAddSnapshotsRequesterName(t *testing.T) {
 		t.Fatalf("persisted queue = %#v, want requester_name %q", rows, id.Name)
 	}
 }
+
+func TestSnapshotIsReadOnlyAndDoesNotJoin(t *testing.T) {
+	r, _ := newTestRoom(t, "")
+	id := auth.Identity{
+		ID: "u_snapshot", Name: "Snapshot Reader", Kind: "guest",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+	playing := mkEntry("local:playing", id.ID)
+	playing.Contributors = []provider.Contributor{{Role: "artist", Name: "Playing Artist"}}
+	if err := r.AddFor(id, playing); err != nil {
+		t.Fatal(err)
+	}
+	queued := mkEntry("local:queued", id.ID)
+	queued.Contributors = []provider.Contributor{{Role: "artist", Name: "Queued Artist"}}
+	if err := r.AddFor(id, queued); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := r.Snapshot(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Listeners) != 0 {
+		t.Fatalf("snapshot listeners = %#v, want no implicit listener", snapshot.Listeners)
+	}
+	if snapshot.Playback.Current == nil || len(snapshot.Queue) != 1 {
+		t.Fatalf("snapshot state = %#v, want current track and one queued track", snapshot)
+	}
+
+	snapshot.Playback.Current.Title = "mutated current"
+	snapshot.Playback.Current.Contributors[0].Name = "mutated current contributor"
+	snapshot.Queue[0].Title = "mutated queue"
+	snapshot.Queue[0].Contributors[0].Name = "mutated queue contributor"
+
+	again, err := r.Snapshot(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := again.Playback.Current.Title; got != "local:playing" {
+		t.Fatalf("current title after returned snapshot mutation = %q", got)
+	}
+	if got := again.Playback.Current.Contributors[0].Name; got != "Playing Artist" {
+		t.Fatalf("current contributors after returned snapshot mutation = %q", got)
+	}
+	if got := again.Queue[0].Title; got != "local:queued" {
+		t.Fatalf("queue title after returned snapshot mutation = %q", got)
+	}
+	if got := again.Queue[0].Contributors[0].Name; got != "Queued Artist" {
+		t.Fatalf("queue contributors after returned snapshot mutation = %q", got)
+	}
+	if len(again.Listeners) != 0 {
+		t.Fatalf("second snapshot listeners = %#v, want no implicit listener", again.Listeners)
+	}
+}

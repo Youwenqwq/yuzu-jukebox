@@ -1,0 +1,171 @@
+package control
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
+	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
+	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
+	"github.com/youwenqwq/yuzu-jukebox/internal/room"
+	"github.com/youwenqwq/yuzu-jukebox/internal/store"
+)
+
+type grantKey struct {
+	roomID      string
+	principalID string
+	capability  string
+}
+
+type fakeGrantStore struct {
+	grants map[grantKey]bool
+	err    error
+	calls  int
+}
+
+func (s *fakeGrantStore) HasRoomGrant(_ context.Context, roomID, principalID, capability string) (bool, error) {
+	s.calls++
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.grants[grantKey{roomID: roomID, principalID: principalID, capability: capability}], nil
+}
+
+func TestAuthorizerControllerContract(t *testing.T) {
+	storeFailure := errors.New("grant lookup failed")
+	globalStore := &fakeGrantStore{err: storeFailure}
+	global := auth.Identity{ID: "global", Roles: []string{auth.RoleRoomAdmin}}
+	allowed, err := NewAuthorizer(globalStore).IsController(context.Background(), "room-a", global)
+	if err != nil || !allowed {
+		t.Fatalf("global room_admin = (%v, %v), want (true, nil)", allowed, err)
+	}
+	if globalStore.calls != 0 {
+		t.Fatalf("global room_admin performed %d grant lookups, want 0", globalStore.calls)
+	}
+
+	grants := &fakeGrantStore{grants: map[grantKey]bool{
+		{roomID: "room-a", principalID: "principal", capability: CapabilityController}: true,
+	}}
+	principal := auth.Identity{ID: "principal"}
+	authorizer := NewAuthorizer(grants)
+	allowed, err = authorizer.IsController(context.Background(), "room-a", principal)
+	if err != nil || !allowed {
+		t.Fatalf("room-a controller grant = (%v, %v), want (true, nil)", allowed, err)
+	}
+	allowed, err = authorizer.IsController(context.Background(), "room-b", principal)
+	if err != nil || allowed {
+		t.Fatalf("room-b controller grant = (%v, %v), want (false, nil)", allowed, err)
+	}
+}
+
+type testRoomSource map[string]*room.Room
+
+func (rooms testRoomSource) Get(id string) (*room.Room, error) {
+	r, ok := rooms[id]
+	if !ok {
+		return nil, room.ErrRoomNotFound
+	}
+	return r, nil
+}
+
+type staticProvider struct{}
+
+func (*staticProvider) ID() string                                               { return "test" }
+func (*staticProvider) Search(context.Context, string) ([]provider.Track, error) { return nil, nil }
+func (*staticProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
+	return provider.Track{
+		Ref: ref, Title: ref.String(), DurationMs: int64(10 * time.Minute / time.Millisecond),
+	}, nil
+}
+func (*staticProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{}, errors.New("not needed in control test")
+}
+
+func newServiceFixture(t *testing.T) (*Service, *fakeGrantStore) {
+	t.Helper()
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(root, "test.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.NewRegistry()
+	reg.Register(&staticProvider{})
+	authm := auth.NewManager("", st)
+	trackCache := cache.New(filepath.Join(root, "cache"), 1<<20, st, reg)
+	r := room.New("room-a", "Room A", "", "", st, authm, trackCache, reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	go r.Run(ctx)
+	t.Cleanup(func() {
+		cancel()
+		st.Close()
+	})
+	grants := &fakeGrantStore{grants: map[grantKey]bool{}}
+	return NewService(testRoomSource{"room-a": r}, reg, NewAuthorizer(grants)), grants
+}
+
+func TestServiceRequesterOwnershipAndControllers(t *testing.T) {
+	service, grants := newServiceFixture(t)
+	ctx := context.Background()
+	owner := auth.Identity{
+		ID: "owner", Name: "Owner", Kind: "guest",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+	other := auth.Identity{
+		ID: "other", Name: "Other", Kind: "guest",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+
+	ids, err := service.QueueAdd(ctx, "room-a", owner, []string{"test:a", "test:b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("entry IDs = %v, want two", ids)
+	}
+	if err := service.QueueRemove(ctx, "room-a", other, ids[1]); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("non-owner remove error = %v, want forbidden", err)
+	}
+	if err := service.QueueRemove(ctx, "room-a", owner, ids[1]); err != nil {
+		t.Fatalf("owner remove: %v", err)
+	}
+
+	if _, err := service.QueueAdd(ctx, "room-a", auth.Identity{ID: "listener"}, []string{"test:x"}); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("listener queue add error = %v, want forbidden", err)
+	}
+
+	moreIDs, err := service.QueueAdd(ctx, "room-a", owner, []string{"test:c", "test:d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := auth.Identity{ID: "controller", Name: "Controller"}
+	grants.grants[grantKey{
+		roomID: "room-a", principalID: controller.ID, capability: CapabilityController,
+	}] = true
+	if err := service.QueueMove(ctx, "room-a", controller, moreIDs[1], 0); err != nil {
+		t.Fatalf("room controller move: %v", err)
+	}
+	snapshot, err := service.RoomSnapshot(ctx, "room-a", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Queue) != 2 || snapshot.Queue[0].EntryID != moreIDs[1] {
+		t.Fatalf("queue after controller move = %#v", snapshot.Queue)
+	}
+	if err := service.QueueRemove(ctx, "room-a", controller, moreIDs[0]); err != nil {
+		t.Fatalf("room controller remove any: %v", err)
+	}
+
+	global := auth.Identity{ID: "global", Roles: []string{auth.RoleRoomAdmin}}
+	if err := service.Pause(ctx, "room-a", global); err != nil {
+		t.Fatalf("global room_admin pause: %v", err)
+	}
+	if err := service.Resume(ctx, "room-a", controller); err != nil {
+		t.Fatalf("room controller resume: %v", err)
+	}
+	if err := service.Pause(ctx, "room-b", controller); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("cross-room controller error = %v, want forbidden", err)
+	}
+}

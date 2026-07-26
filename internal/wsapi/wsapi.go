@@ -1,6 +1,5 @@
-// Package wsapi 实现 /ws/v1：实时会话通道。
-// 职责：校时、认证、房间进出、队列/播放操作的鉴权与转发。
-// 状态全部在 room actor 内，这里只做协议适配。
+// Package wsapi implements the /ws/v1 transport adapter.
+// It owns envelopes and connection state; room authorization and commands live in control.Service.
 package wsapi
 
 import (
@@ -17,21 +16,20 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
-	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
+	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 )
 
 type Server struct {
-	authm *auth.Manager
-	rooms *room.Manager
-	reg   *provider.Registry
+	authm   *auth.Manager
+	control *control.Service
 
 	playersMu sync.Mutex
 	players   map[string]*client // 已注册的播放端（player.hello）
 }
 
-func NewServer(authm *auth.Manager, rooms *room.Manager, reg *provider.Registry) *Server {
-	return &Server{authm: authm, rooms: rooms, reg: reg, players: map[string]*client{}}
+func NewServer(authm *auth.Manager, controlService *control.Service) *Server {
+	return &Server{authm: authm, control: controlService, players: map[string]*client{}}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +227,7 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		if !c.requireAuth(ref) {
 			return
 		}
-		r, err := c.server.rooms.Get(d.RoomID)
+		r, err := c.server.control.GetRoom(d.RoomID)
 		if err != nil {
 			c.replyErr(ref, "not_found", "room not found")
 			return
@@ -282,31 +280,13 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.replyErr(ref, "bad_request", "track_refs limited to 100")
 			return
 		}
-		if !c.requireRole(ref, auth.RoleRequester) || !c.requireRoom(ref, d.RoomID) {
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
-		// 整体预取：任一 ref 无效或 provider 失败，一条都不入队
-		entries := make([]room.QueueEntry, 0, len(refs))
-		for _, tr := range refs {
-			p, _, err := c.server.reg.ForRef(provider.TrackRef(tr))
-			if err != nil {
-				c.replyErr(ref, "bad_request", err.Error())
-				return
-			}
-			track, err := p.GetTrack(context.Background(), provider.TrackRef(tr))
-			if err != nil {
-				c.replyErr(ref, "provider_error", err.Error())
-				return
-			}
-			entries = append(entries, room.EntryFromTrack(track, c.identity.ID))
-		}
-		if err := c.room.AddBatchFor(c.Identity(), entries); err != nil {
+		ids, err := c.server.control.QueueAdd(context.Background(), d.RoomID, c.Identity(), refs)
+		if err != nil {
 			c.replyResult(ref, err)
 			return
-		}
-		ids := make([]string, len(entries))
-		for i, e := range entries {
-			ids[i] = e.EntryID
 		}
 		c.Send(map[string]any{"type": "ack", "ref": ref, "data": map[string]any{"entry_ids": ids}})
 
@@ -322,9 +302,9 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
-		// 权限：room_admin 或条目所有者（actor 内校验）
-		err := c.room.RemoveFor(c.Identity(), d.EntryID)
-		c.replyResult(ref, err)
+		c.replyResult(ref, c.server.control.QueueRemove(
+			context.Background(), d.RoomID, c.Identity(), d.EntryID,
+		))
 
 	case "queue.move":
 		var d struct {
@@ -336,10 +316,12 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.replyErr(ref, "bad_request", "invalid queue.move payload")
 			return
 		}
-		if !c.requireRole(ref, auth.RoleRoomAdmin) || !c.requireRoom(ref, d.RoomID) {
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
-		c.replyResult(ref, c.room.Move(d.EntryID, d.ToIndex))
+		c.replyResult(ref, c.server.control.QueueMove(
+			context.Background(), d.RoomID, c.Identity(), d.EntryID, d.ToIndex,
+		))
 
 	case "radio.play":
 		var d struct {
@@ -352,20 +334,22 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.replyErr(ref, "bad_request", "invalid radio.play payload")
 			return
 		}
-		if !c.requireRole(ref, auth.RoleRoomAdmin) || !c.requireRoom(ref, d.RoomID) {
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
-		c.replyResult(ref, c.room.PlayRadio(d.Source, d.Shuffle, d.Once))
+		c.replyResult(ref, c.server.control.RadioPlay(
+			context.Background(), d.RoomID, c.Identity(), d.Source, d.Shuffle, d.Once,
+		))
 
 	case "radio.stop":
 		var d struct {
 			RoomID string `json:"room_id"`
 		}
 		json.Unmarshal(data, &d)
-		if !c.requireRole(ref, auth.RoleRoomAdmin) || !c.requireRoom(ref, d.RoomID) {
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
-		c.replyResult(ref, c.room.StopRadio())
+		c.replyResult(ref, c.server.control.RadioStop(context.Background(), d.RoomID, c.Identity()))
 
 	case "playback.pause", "playback.resume", "playback.skip", "playback.seek":
 		var d struct {
@@ -373,19 +357,20 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			PositionMs int64  `json:"position_ms"`
 		}
 		json.Unmarshal(data, &d)
-		if !c.requireRole(ref, auth.RoleRoomAdmin) || !c.requireRoom(ref, d.RoomID) {
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
+		ctx := context.Background()
 		var err error
 		switch typ {
 		case "playback.pause":
-			err = c.room.Pause()
+			err = c.server.control.Pause(ctx, d.RoomID, c.Identity())
 		case "playback.resume":
-			err = c.room.Resume()
+			err = c.server.control.Resume(ctx, d.RoomID, c.Identity())
 		case "playback.skip":
-			err = c.room.Skip()
+			err = c.server.control.Skip(ctx, d.RoomID, c.Identity())
 		case "playback.seek":
-			err = c.room.SeekTo(d.PositionMs)
+			err = c.server.control.Seek(ctx, d.RoomID, c.Identity(), d.PositionMs)
 		}
 		c.replyResult(ref, err)
 
@@ -399,17 +384,6 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 func (c *client) requireAuth(ref string) bool {
 	if c.identity == nil {
 		c.replyErr(ref, "unauthorized", "auth first")
-		return false
-	}
-	return true
-}
-
-func (c *client) requireRole(ref, role string) bool {
-	if !c.requireAuth(ref) {
-		return false
-	}
-	if !c.identity.HasRole(role) {
-		c.replyErr(ref, "forbidden", "role required: "+role)
 		return false
 	}
 	return true
@@ -434,6 +408,10 @@ func (c *client) replyResult(ref string, err error) {
 	}
 	code := "internal"
 	switch {
+	case errors.Is(err, control.ErrProvider):
+		code = "provider_error"
+	case errors.Is(err, control.ErrInvalidArgument):
+		code = "bad_request"
 	case errors.Is(err, room.ErrEntryNotFound):
 		code = "not_found"
 	case errors.Is(err, room.ErrNoPlayback), errors.Is(err, room.ErrQueueEmpty), errors.Is(err, room.ErrInvalidSource),

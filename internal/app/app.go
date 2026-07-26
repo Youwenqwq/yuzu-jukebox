@@ -14,6 +14,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/config"
+	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/credmon"
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -28,9 +29,21 @@ import (
 type App struct {
 	Handler http.Handler
 	Store   *store.Store
+	Control *control.Service
 }
 
 func New(ctx context.Context, cfg config.Config) (*App, error) {
+	integrationCredentials := make([]auth.IntegrationCredential, len(cfg.Integrations))
+	for i, credential := range cfg.Integrations {
+		integrationCredentials[i] = auth.IntegrationCredential{
+			ID: credential.ID, Token: credential.Token,
+		}
+	}
+	integrations, err := auth.NewIntegrationRegistry(integrationCredentials)
+	if err != nil {
+		return nil, fmt.Errorf("integrations: %w", err)
+	}
+
 	for _, dir := range []string{cfg.MediaDir, cfg.CacheDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
@@ -64,6 +77,8 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	controls := control.NewService(rooms, reg, control.NewAuthorizer(st))
+
 	mon := credmon.New(reg, st)
 	go mon.Run(ctx)
 
@@ -73,14 +88,18 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		log.Printf("oidc: issuer %s (client_id %s, extras %v)", cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.ExtraClientIDs)
 	}
 
-	ws := wsapi.NewServer(authm, rooms, reg)
-	api := httpapi.NewServer(st, authm, rooms, reg, lp, c, ws, oidcValidator, cfg.OIDC.RoleMapping)
+	ws := wsapi.NewServer(authm, controls)
+	api := httpapi.NewServer(st, authm, integrations, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping)
 
 	if cfg.CacheAutoPruneDays > 0 {
 		go runCacheJanitor(ctx, c, cfg.CacheAutoPruneDays)
 	}
 
-	return &App{Handler: httpapi.CORSMiddleware(cfg.CORS, api.Handler()), Store: st}, nil
+	return &App{
+		Handler: httpapi.CORSMiddleware(cfg.CORS, api.Handler()),
+		Store:   st,
+		Control: controls,
+	}, nil
 }
 
 func runCacheJanitor(ctx context.Context, c *cache.Cache, unusedDays int) {

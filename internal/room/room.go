@@ -58,8 +58,9 @@ func EntryFromTrack(t provider.Track, requestedBy string) QueueEntry {
 	return QueueEntry{
 		EntryID: NewEntryID(), TrackRef: t.Ref.String(), Title: t.Title,
 		Artist: t.Artist, DurationMs: t.DurationMs, Album: t.Album,
-		CoverURL: t.CoverURL, SourceURL: t.SourceURL, Contributors: t.Contributors,
-		RequestedBy: requestedBy, AddedAt: time.Now().UnixMilli(),
+		CoverURL: t.CoverURL, SourceURL: t.SourceURL,
+		Contributors: append([]provider.Contributor(nil), t.Contributors...),
+		RequestedBy:  requestedBy, AddedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -91,6 +92,29 @@ type DirectorySnapshot struct {
 	NowPlaying    *NowPlayingSummary
 }
 
+// ListenerSnapshot 是房间快照中的已连接听众。
+type ListenerSnapshot struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// RadioSnapshot 是房间当前电台绑定的只读投影。
+type RadioSnapshot struct {
+	Source      string `json:"source"`
+	Description string `json:"description"`
+	Finite      bool   `json:"finite"`
+	Shuffle     bool   `json:"shuffle"`
+	Once        bool   `json:"once"`
+}
+
+// Snapshot 是与进房广播同源的房间完整状态。返回值不引用 actor 内部可变数据。
+type Snapshot struct {
+	Playback  Playback           `json:"playback"`
+	Queue     []QueueEntry       `json:"queue"`
+	Radio     *RadioSnapshot     `json:"radio"`
+	Listeners []ListenerSnapshot `json:"listeners"`
+}
+
 type actKind int
 
 const (
@@ -108,32 +132,36 @@ const (
 	actRadioStop
 	actSetPolicy
 	actDirectorySnapshot
+	actSnapshot
 )
 
 type action struct {
-	kind    actKind
-	client  ClientConn
-	actor   auth.Identity
-	entry   QueueEntry
-	entries []QueueEntry // 批量入队（actAdd；非空时优先于 entry）
-	entryID string
-	toIndex int
-	posMs   int64
-	timerID uint64
+	kind      actKind
+	client    ClientConn
+	actor     auth.Identity
+	entry     QueueEntry
+	entries   []QueueEntry // 批量入队（actAdd；非空时优先于 entry）
+	entryID   string
+	removeAny bool
+	toIndex   int
+	posMs     int64
+	timerID   uint64
 	// radio
-	source    string
-	shuffle   bool
-	once      bool
-	policyRaw string
-	result    chan error
-	snapshot  chan DirectorySnapshot
+	source        string
+	shuffle       bool
+	once          bool
+	policyRaw     string
+	result        chan error
+	snapshot      chan DirectorySnapshot
+	stateSnapshot chan Snapshot
 }
 
 var (
-	ErrQueueEmpty    = errors.New("queue is empty")
-	ErrEntryNotFound = errors.New("queue entry not found")
-	ErrNoPlayback    = errors.New("nothing is playing")
-	ErrForbidden     = errors.New("forbidden")
+	ErrQueueEmpty        = errors.New("queue is empty")
+	ErrEntryNotFound     = errors.New("queue entry not found")
+	ErrInvalidQueueIndex = errors.New("to_index out of range")
+	ErrNoPlayback        = errors.New("nothing is playing")
+	ErrForbidden         = errors.New("forbidden")
 )
 
 // radioState 电台模式状态（运行时，不落库）。
@@ -226,13 +254,15 @@ func (r *Room) AddBatchFor(id auth.Identity, entries []QueueEntry) error {
 	return r.call(action{kind: actAdd, actor: id, entries: entries})
 }
 
-func (r *Room) Remove(entryID string) error { return r.call(action{kind: actRemove, entryID: entryID}) }
+// Remove 无条件移除待播条目。调用方必须已经完成 controller 授权。
+func (r *Room) Remove(entryID string) error {
+	return r.call(action{kind: actRemove, entryID: entryID, removeAny: true})
+}
 
-// RemoveFor 带权限校验的移除：room_admin 或条目所有者可移除。
-// 校验在 actor 内做，与队列状态读取天然串行，无竞态。
+// RemoveFor 仅允许条目所有者移除。controller 授权由 control.Service 统一处理。
+// 所有权校验在 actor 内完成，与队列状态读取天然串行。
 func (r *Room) RemoveFor(id auth.Identity, entryID string) error {
-	a := action{kind: actRemove, entryID: entryID, actor: id}
-	return r.call(a)
+	return r.call(action{kind: actRemove, entryID: entryID, actor: id})
 }
 func (r *Room) Move(entryID string, to int) error {
 	return r.call(action{kind: actMove, entryID: entryID, toIndex: to})
@@ -268,6 +298,22 @@ func (r *Room) DirectorySnapshot() (DirectorySnapshot, error) {
 		return snapshot, nil
 	case <-r.done:
 		return DirectorySnapshot{}, ErrRoomClosed
+	}
+}
+
+// Snapshot 同步读取与进房广播同源的完整状态，但不把查询者加入听众。
+func (r *Room) Snapshot(id auth.Identity) (Snapshot, error) {
+	ch := make(chan Snapshot, 1)
+	select {
+	case r.inbound <- action{kind: actSnapshot, actor: id, stateSnapshot: ch}:
+	case <-r.done:
+		return Snapshot{}, ErrRoomClosed
+	}
+	select {
+	case snapshot := <-ch:
+		return snapshot, nil
+	case <-r.done:
+		return Snapshot{}, ErrRoomClosed
 	}
 }
 
@@ -319,61 +365,85 @@ func (r *Room) Run(ctx context.Context) {
 		}
 	}
 
-	// playbackMsg 生成携带该客户端专属 stream_url 的 playback.changed
-	playbackMsg := func(c ClientConn) any {
-		if playback == nil {
-			playback = &Playback{Rate: 1.0}
+	cloneEntry := func(entry QueueEntry) QueueEntry {
+		cloned := entry
+		cloned.Contributors = append([]provider.Contributor(nil), entry.Contributors...)
+		return cloned
+	}
+
+	playbackSnapshot := func(id auth.Identity) Playback {
+		pb := Playback{Rate: 1.0}
+		if playback != nil {
+			pb = *playback
 		}
-		pb := *playback
 		if pb.Current != nil {
-			cur := *pb.Current
-			cur.StreamURL = r.streamURL(c.Identity(), cur.TrackRef)
+			cur := cloneEntry(*pb.Current)
+			cur.StreamURL = r.streamURL(id, cur.TrackRef)
 			if cur.CoverURL != "" {
 				cur.CoverURL = "/api/v1/cover/" + url.PathEscape(cur.TrackRef)
 			}
 			pb.Current = &cur
 		}
-		return map[string]any{"type": "playback.changed", "data": pb}
+		return pb
+	}
+
+	queueSnapshot := func() []QueueEntry {
+		q := make([]QueueEntry, len(queue))
+		for i, entry := range queue {
+			entry = cloneEntry(entry)
+			if entry.CoverURL != "" {
+				entry.CoverURL = "/api/v1/cover/" + url.PathEscape(entry.TrackRef)
+			}
+			q[i] = entry
+		}
+		return q
+	}
+
+	listenersSnapshot := func() []ListenerSnapshot {
+		listeners := make([]ListenerSnapshot, 0, len(clients))
+		for _, c := range clients {
+			id := c.Identity()
+			listeners = append(listeners, ListenerSnapshot{ID: id.ID, Name: id.Name})
+		}
+		return listeners
+	}
+
+	radioSnapshot := func() *RadioSnapshot {
+		if radio == nil {
+			return nil
+		}
+		return &RadioSnapshot{
+			Source: radio.spec, Description: radio.src.Description(), Finite: radio.src.Finite(),
+			Shuffle: radio.shuffle, Once: radio.once,
+		}
+	}
+
+	snapshotFor := func(id auth.Identity) Snapshot {
+		return Snapshot{
+			Playback:  playbackSnapshot(id),
+			Queue:     queueSnapshot(),
+			Radio:     radioSnapshot(),
+			Listeners: listenersSnapshot(),
+		}
+	}
+
+	playbackMsg := func(c ClientConn) any {
+		return map[string]any{"type": "playback.changed", "data": playbackSnapshot(c.Identity())}
 	}
 
 	queueMsg := func() any {
-		// 封面改写为服务端代理路径（广播一次组装，浅拷贝条目）
-		q := make([]QueueEntry, len(queue))
-		for i, e := range queue {
-			if e.CoverURL != "" {
-				e.CoverURL = "/api/v1/cover/" + url.PathEscape(e.TrackRef)
-			}
-			q[i] = e
-		}
-		return map[string]any{"type": "queue.changed", "data": map[string]any{"queue": q}}
+		return map[string]any{"type": "queue.changed", "data": map[string]any{"queue": queueSnapshot()}}
 	}
 
 	listenersMsg := func() any {
-		type listener struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+		return map[string]any{
+			"type": "listeners.changed",
+			"data": map[string]any{"listeners": listenersSnapshot()},
 		}
-		ls := make([]listener, 0, len(clients))
-		for _, c := range clients {
-			id := c.Identity()
-			ls = append(ls, listener{ID: id.ID, Name: id.Name})
-		}
-		return map[string]any{"type": "listeners.changed", "data": map[string]any{"listeners": ls}}
 	}
 
-	// radioMsg 生成 radio.changed（radio 为 null 表示未开启电台）
 	radioMsg := func() any {
-		var payload any
-		if radio != nil {
-			payload = map[string]any{
-				"source":      radio.spec,
-				"description": radio.src.Description(),
-				"finite":      radio.src.Finite(),
-				"shuffle":     radio.shuffle,
-				"once":        radio.once,
-			}
-		}
-		return map[string]any{"type": "radio.changed", "data": map[string]any{"radio": payload}}
+		return map[string]any{"type": "radio.changed", "data": map[string]any{"radio": radioSnapshot()}}
 	}
 
 	// stopRadio 退出电台并广播
@@ -572,7 +642,7 @@ func (r *Room) Run(ctx context.Context) {
 					a.result <- ErrEntryNotFound
 					break
 				}
-				if !a.actor.HasRole(auth.RoleRoomAdmin) && queue[idx].RequestedBy != a.actor.ID {
+				if !a.removeAny && queue[idx].RequestedBy != a.actor.ID {
 					a.result <- ErrForbidden
 					break
 				}
@@ -583,7 +653,7 @@ func (r *Room) Run(ctx context.Context) {
 
 			case actMove:
 				if a.toIndex < 0 || a.toIndex >= len(queue) {
-					a.result <- errors.New("to_index out of range")
+					a.result <- ErrInvalidQueueIndex
 					break
 				}
 				found := false
@@ -695,6 +765,9 @@ func (r *Room) Run(ctx context.Context) {
 				}
 				a.snapshot <- snapshot
 
+			case actSnapshot:
+				a.stateSnapshot <- snapshotFor(a.actor)
+
 			case actSetPolicy:
 				p, err := ParsePolicy(a.policyRaw)
 				if err != nil {
@@ -713,7 +786,7 @@ func (r *Room) Run(ctx context.Context) {
 	}
 }
 
-// Snapshot 供 REST 侧展示房间状态（非实时路径）。
+// streamURL 为当前观察者签发绑定身份与曲目的短期票据。
 func (r *Room) streamURL(id auth.Identity, trackRef string) string {
 	ticket := r.authm.IssueTicket(id.ID, trackRef)
 	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + ticket
