@@ -458,15 +458,21 @@ pause│  │resume
 | `POST /api/v1/auth/oidc` | — | OIDC 认证，body `{"id_token","access_token"?}`；返回 `{identity, session_token}`；未启用 404 |
 | `GET /api/v1/auth/oidc/config` | — | 公开 OIDC 配置：issuer / client_id / client_ids（含 extra_client_ids）；未启用 404 |
 | `DELETE /api/v1/auth/session` | 非空 Bearer token | 按所给 token 吊销会话（即使已失效也返回成功）；缺 Authorization 时 401 |
+| `GET /api/v1/integrations` | `room_admin` | 已配置 Integration 的公开 ID 列表；绝不返回 token |
 | `POST /api/v1/integrations/actors/resolve` | Integration token | external scope/subject → 5 分钟标准 actor session（见 3.6、6.4） |
+| `GET /api/v1/integrations/{id}/scopes` | `room_admin` | 该 Integration 的全部 external scope→Room 绑定，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/scopes` | `room_admin` | 绑定/解绑 external scope 的默认 Room |
+| `GET /api/v1/integrations/{id}/subjects` | `room_admin` | 该 Integration 的全部 external subject→Principal 链接，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/subjects` | `room_admin` | 链接/解绑 external subject 与 Principal |
+| `GET /api/v1/principals?q=&limit=` | `room_admin` | 按 ID 或名称可选搜索 Principal；默认/上限 100，稳定排序；不返回 OIDC subject |
 | `GET /api/v1/rooms` | `listener` | 房间目录；每项在 `id/name/policy` 外含实时 `listener_count`，以及空闲为 `null`、播放或暂停时为 `{title,artist,duration_ms,cover_url,position_ms,updated_at,playing,rate}` 的 `now_playing`；绝不含 `stream_url` |
 | `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 建/改房间（名称、访客密码、policy） |
 | `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
+| `GET /api/v1/rooms/{id}/grants` | `room_admin` | 该 Room 的全部显式 `controller` grants，稳定排序 |
 | `PUT/DELETE /api/v1/rooms/{id}/grants/{principal_id}` | `room_admin` | 授予/撤销该 Principal 的 Room `controller` capability |
 | `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` | 播放历史，最新在前（默认 50，上限 200） |
 | `GET /api/v1/rooms/{id}/stats?limit=` | `listener` | 曲目热度榜（默认 20，上限 100） |
+| `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability；Room 不存在为 404 |
 | `GET /api/v1/rooms/{id}/state` | 标准 session | 无副作用完整状态快照 |
 | `POST /api/v1/rooms/{id}/queue` | `requester` | 单条或 1–100 条原子入队 |
 | `DELETE /api/v1/rooms/{id}/queue/{entry_id}` | 所有者 / controller | 移除待播条目 |
@@ -510,6 +516,18 @@ pause│  │resume
 这些路径都不建立 WS 连接或 Room listener，不要求 `room.join`，也不检查房间访客密码。`controller` 的定义是全局 `room_admin` **OR** 此 Principal 在此 Room 的 `controller` grant（3.4）。
 
 **状态响应：**
+
+`GET /api/v1/rooms/{id}/capabilities` 对任意有效标准 session 返回当前身份的有效 capability：
+
+```json
+{
+  "capabilities": {
+    "controller": true
+  }
+}
+```
+
+`controller` 必须由 3.4 的统一 Authorizer 判定，Client 不得只看自身 roles 或自行缓存 grant 推导结果。查询不建立 listener；Room 不存在返回 404 `not_found`。
 
 `GET /api/v1/rooms/{id}/state` 对任意有效标准 session 返回 HTTP 200：
 
@@ -566,6 +584,18 @@ actor resolve 使用 Integration token；本节其余管理端点反而必须使
 
 - `POST /api/v1/integrations/actors/resolve` 的严格请求/响应形状见 3.6；成功为 HTTP 200。
 - Integration token 缺失/错误为 401 `unauthorized`；字段缺失、空白、类型错误或未知字段为 400 `bad_request`；链接/guest Principal disabled 为 403 `forbidden`。
+
+**管理查询：**
+
+| 方法与路径 | HTTP 200 JSON 示例 |
+|---|---|
+| `GET /api/v1/integrations` | `{"integrations":[{"id":"generic-bridge"}]}` |
+| `GET /api/v1/integrations/{id}/scopes` | `{"scopes":[{"integration_id":"generic-bridge","adapter_id":"onebot","scope_type":"group","scope_id":"42","room_id":"main"}]}` |
+| `GET /api/v1/integrations/{id}/subjects` | `{"subjects":[{"integration_id":"generic-bridge","adapter_id":"onebot","scope_type":"group","scope_id":"42","subject_id":"7","principal_id":"p_123"}]}` |
+| `GET /api/v1/principals?q=&limit=` | `{"principals":[{"id":"p_123","name":"Alice","kind":"oidc","roles":["listener"],"active":true}]}` |
+| `GET /api/v1/rooms/{id}/grants` | `{"grants":[{"room_id":"main","principal_id":"p_123","capability":"controller"}]}` |
+
+所有列表均确定排序且空结果返回 `[]`。Integration 列表绝不含 token；Principal 列表只公开 `id/name/kind/roles/active`，绝不含 `oidc_subject`。`q` 可省略，按 ID 或名称匹配；`limit` 默认 100 且最大 100。Integration scope/subject 的 `{id}` 未配置时、grant 的 Room 不存在时返回 404 `not_found`。
 
 **管理请求：**
 
@@ -668,3 +698,17 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 ### 9.6 参考实现
 
 仓库 `internal/client/` 是本协议 WS、无状态 Room REST 与 Integration actor/管理 API 的 Go 参考实现；`cmd/yuzu-agent/`（MPV 渲染代理）与 `cmd/yuzu-cli/`（控制端）是两类 Client 的最小完整示例。
+
+只读查询对应的 Go REST helper 可直接供第一方 CLI/WebUI 复用：
+
+```go
+caps, err := client.RESTRoomCapabilities(ctx, server, sessionToken, roomID)
+
+integrations, err := client.RESTListIntegrations(ctx, server, roomAdminToken)
+scopes, err := client.RESTListIntegrationScopes(ctx, server, roomAdminToken, integrationID)
+subjects, err := client.RESTListIntegrationSubjects(ctx, server, roomAdminToken, integrationID)
+principals, err := client.RESTListPrincipals(ctx, server, roomAdminToken, query, limit)
+grants, err := client.RESTListRoomGrants(ctx, server, roomAdminToken, roomID)
+```
+
+`caps.Controller` 是服务端 Authorizer 的最终判断；管理查询返回的 DTO 可用于选择目标后调用既有 `RESTBindIntegrationScope`、`RESTUnbindIntegrationScope`、`RESTLinkIntegrationSubject`、`RESTUnlinkIntegrationSubject`、`RESTGrantRoomController` 与 `RESTRevokeRoomController`，无需读取配置文件或服务端 secret。

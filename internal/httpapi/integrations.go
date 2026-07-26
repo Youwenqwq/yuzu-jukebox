@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,155 @@ type roomGrantRequest struct {
 	RoomID      string `json:"room_id"`
 	PrincipalID string `json:"principal_id"`
 	Capability  string `json:"capability"`
+}
+
+type integrationInfoResponse struct {
+	ID string `json:"id"`
+}
+
+type integrationScopeResponse struct {
+	IntegrationID string `json:"integration_id"`
+	AdapterID     string `json:"adapter_id"`
+	ScopeType     string `json:"scope_type"`
+	ScopeID       string `json:"scope_id"`
+	RoomID        string `json:"room_id"`
+}
+
+type integrationSubjectResponse struct {
+	IntegrationID string `json:"integration_id"`
+	AdapterID     string `json:"adapter_id"`
+	ScopeType     string `json:"scope_type"`
+	ScopeID       string `json:"scope_id"`
+	SubjectID     string `json:"subject_id"`
+	PrincipalID   string `json:"principal_id"`
+}
+
+type principalResponse struct {
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Kind   string   `json:"kind"`
+	Roles  []string `json:"roles"`
+	Active bool     `json:"active"`
+}
+
+func (s *Server) listIntegrations(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+	ids := s.integrations.IDs()
+	integrations := make([]integrationInfoResponse, len(ids))
+	for i, id := range ids {
+		integrations[i] = integrationInfoResponse{ID: id}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"integrations": integrations})
+}
+
+func (s *Server) listIntegrationScopes(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+	integrationID := r.PathValue("id")
+	if !s.integrationConfigured(w, integrationID) {
+		return
+	}
+	rows, err := s.st.ListExternalScopeRooms(r.Context(), integrationID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to list scope bindings")
+		return
+	}
+	scopes := make([]integrationScopeResponse, len(rows))
+	for i, row := range rows {
+		scopes[i] = integrationScopeResponse{
+			IntegrationID: row.IntegrationID,
+			AdapterID:     row.AdapterID,
+			ScopeType:     row.ScopeType,
+			ScopeID:       row.ScopeID,
+			RoomID:        row.RoomID,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scopes": scopes})
+}
+
+func (s *Server) listIntegrationSubjects(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+	integrationID := r.PathValue("id")
+	if !s.integrationConfigured(w, integrationID) {
+		return
+	}
+	rows, err := s.st.ListExternalIdentityLinks(r.Context(), integrationID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to list subject links")
+		return
+	}
+	subjects := make([]integrationSubjectResponse, len(rows))
+	for i, row := range rows {
+		subjects[i] = integrationSubjectResponse{
+			IntegrationID: row.IntegrationID,
+			AdapterID:     row.AdapterID,
+			ScopeType:     row.ScopeType,
+			ScopeID:       row.ScopeID,
+			SubjectID:     row.SubjectID,
+			PrincipalID:   row.PrincipalID,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subjects": subjects})
+}
+
+func (s *Server) listPrincipals(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	rows, err := s.st.ListPrincipals(r.Context(), r.URL.Query().Get("q"), limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to list principals")
+		return
+	}
+	principals := make([]principalResponse, len(rows))
+	for i, row := range rows {
+		principals[i] = principalResponse{
+			ID: row.ID, Name: row.Name, Kind: row.Kind,
+			Roles: row.Roles, Active: row.Active,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"principals": principals})
+}
+
+func (s *Server) listRoomGrants(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+	roomID := r.PathValue("id")
+	if _, err := s.st.GetRoom(r.Context(), roomID); errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "room not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load room")
+		return
+	}
+	rows, err := s.st.ListRoomGrants(r.Context(), roomID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to list grants")
+		return
+	}
+	grants := make([]roomGrantRequest, 0, len(rows))
+	for _, row := range rows {
+		if row.Capability != control.CapabilityController {
+			continue
+		}
+		grants = append(grants, roomGrantRequest{
+			RoomID: row.RoomID, PrincipalID: row.PrincipalID, Capability: row.Capability,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grants": grants})
 }
 
 func (s *Server) resolveIntegrationActor(w http.ResponseWriter, r *http.Request) {

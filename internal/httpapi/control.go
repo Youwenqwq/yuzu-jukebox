@@ -14,6 +14,25 @@ import (
 
 const maxControlBodyBytes = 1 << 20
 
+func (s *Server) roomCapabilities(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.controlIdentity(w, r)
+	if !ok {
+		return
+	}
+	roomID, ok := controlPathValue(w, r, "id")
+	if !ok {
+		return
+	}
+	capabilities, err := s.controls.RoomCapabilities(r.Context(), roomID, identity)
+	if err != nil {
+		writeControlErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Capabilities control.RoomCapabilities `json:"capabilities"`
+	}{Capabilities: capabilities})
+}
+
 func (s *Server) roomState(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.controlIdentity(w, r)
 	if !ok {

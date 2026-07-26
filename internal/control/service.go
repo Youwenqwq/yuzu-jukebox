@@ -38,6 +38,26 @@ func (s *Service) GetRoom(roomID string) (*room.Room, error) {
 	return s.rooms.Get(roomID)
 }
 
+// RoomCapabilities is the caller's effective room-scoped capability set.
+type RoomCapabilities struct {
+	Controller bool `json:"controller"`
+}
+
+// RoomCapabilities resolves effective capabilities through the shared Authorizer.
+func (s *Service) RoomCapabilities(ctx context.Context, roomID string, principal auth.Identity) (RoomCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return RoomCapabilities{}, err
+	}
+	if _, err := s.GetRoom(roomID); err != nil {
+		return RoomCapabilities{}, err
+	}
+	controller, err := s.authorizer.IsController(ctx, roomID, principal)
+	if err != nil {
+		return RoomCapabilities{}, err
+	}
+	return RoomCapabilities{Controller: controller}, nil
+}
+
 // RoomSnapshot returns a complete, identity-specific state projection without
 // joining the caller to the room listener set.
 func (s *Service) RoomSnapshot(ctx context.Context, roomID string, principal auth.Identity) (room.Snapshot, error) {

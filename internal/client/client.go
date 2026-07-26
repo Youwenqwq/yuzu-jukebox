@@ -418,6 +418,21 @@ func (c *Client) AwaitSnapshot(timeout time.Duration) (*Snapshot, error) {
 // RoomState 是无状态控制 REST 返回的房间完整状态。
 type RoomState = Snapshot
 
+// RoomCapabilities 是当前身份在指定 Room 的有效 capability。
+type RoomCapabilities struct {
+	Controller bool `json:"controller"`
+}
+
+// RESTRoomCapabilities 查询当前标准 session 在 Room 中的有效 capability。
+func RESTRoomCapabilities(ctx context.Context, server, actorToken, roomID string) (RoomCapabilities, error) {
+	var out struct {
+		Capabilities RoomCapabilities `json:"capabilities"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/capabilities", actorToken, nil, &out)
+	return out.Capabilities, err
+}
+
 // RoomQueueAddRequest 是 POST /api/v1/rooms/{id}/queue 的请求。
 // TrackRef 与 TrackRefs 必须二选一。
 type RoomQueueAddRequest struct {
@@ -534,6 +549,20 @@ func RESTRoomRadioStop(ctx context.Context, server, actorToken, roomID string) e
 		"/api/v1/rooms/"+url.PathEscape(roomID)+"/radio", actorToken, nil, &struct{}{})
 }
 
+// IntegrationInfo 是已配置 Integration 的公开标识。
+type IntegrationInfo struct {
+	ID string `json:"id"`
+}
+
+// RESTListIntegrations 列出已配置的 Integration，不包含 token。
+func RESTListIntegrations(ctx context.Context, server, actorToken string) ([]IntegrationInfo, error) {
+	var out struct {
+		Integrations []IntegrationInfo `json:"integrations"`
+	}
+	err := restCall(ctx, server, http.MethodGet, "/api/v1/integrations", actorToken, nil, &out)
+	return out.Integrations, err
+}
+
 // IntegrationActorScope 标识 Integration 上报的外部作用域。
 type IntegrationActorScope struct {
 	Type string `json:"type"`
@@ -569,12 +598,32 @@ func RESTResolveIntegrationActor(ctx context.Context, server, integrationToken s
 	return out, err
 }
 
-// IntegrationScopeBinding 是 external scope 与默认 Room 的绑定。
+// IntegrationScopeBinding 是 external scope 与默认 Room 的管理请求。
 type IntegrationScopeBinding struct {
 	AdapterID string `json:"adapter_id"`
 	ScopeType string `json:"scope_type"`
 	ScopeID   string `json:"scope_id"`
 	RoomID    string `json:"room_id"`
+}
+
+// IntegrationScopeBindingInfo 是 Integration scope 绑定的只读表示。
+type IntegrationScopeBindingInfo struct {
+	IntegrationID string `json:"integration_id"`
+	AdapterID     string `json:"adapter_id"`
+	ScopeType     string `json:"scope_type"`
+	ScopeID       string `json:"scope_id"`
+	RoomID        string `json:"room_id"`
+}
+
+// RESTListIntegrationScopes 列出 Integration 的全部 external scope 绑定。
+func RESTListIntegrationScopes(ctx context.Context, server, actorToken, integrationID string) ([]IntegrationScopeBindingInfo, error) {
+	var out struct {
+		Scopes []IntegrationScopeBindingInfo `json:"scopes"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/integrations/"+url.PathEscape(integrationID)+"/scopes",
+		actorToken, nil, &out)
+	return out.Scopes, err
 }
 
 // RESTBindIntegrationScope 创建或更新 external scope 的默认 Room。
@@ -591,13 +640,34 @@ func RESTUnbindIntegrationScope(ctx context.Context, server, actorToken, integra
 		actorToken, binding, &struct{}{})
 }
 
-// IntegrationSubjectLink 是 external subject 与持久 Principal 的关联。
+// IntegrationSubjectLink 是 external subject 与持久 Principal 的管理请求。
 type IntegrationSubjectLink struct {
 	AdapterID   string `json:"adapter_id"`
 	ScopeType   string `json:"scope_type"`
 	ScopeID     string `json:"scope_id"`
 	SubjectID   string `json:"subject_id"`
 	PrincipalID string `json:"principal_id"`
+}
+
+// IntegrationSubjectLinkInfo 是 Integration subject 链接的只读表示。
+type IntegrationSubjectLinkInfo struct {
+	IntegrationID string `json:"integration_id"`
+	AdapterID     string `json:"adapter_id"`
+	ScopeType     string `json:"scope_type"`
+	ScopeID       string `json:"scope_id"`
+	SubjectID     string `json:"subject_id"`
+	PrincipalID   string `json:"principal_id"`
+}
+
+// RESTListIntegrationSubjects 列出 Integration 的全部 external subject 链接。
+func RESTListIntegrationSubjects(ctx context.Context, server, actorToken, integrationID string) ([]IntegrationSubjectLinkInfo, error) {
+	var out struct {
+		Subjects []IntegrationSubjectLinkInfo `json:"subjects"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/integrations/"+url.PathEscape(integrationID)+"/subjects",
+		actorToken, nil, &out)
+	return out.Subjects, err
 }
 
 // RESTLinkIntegrationSubject 创建或更新 external subject 的 Principal 关联。
@@ -619,6 +689,45 @@ type RoomControllerGrant struct {
 	RoomID      string `json:"room_id"`
 	PrincipalID string `json:"principal_id"`
 	Capability  string `json:"capability"`
+}
+
+// RESTListRoomGrants 列出 Room 的显式 controller grants。
+func RESTListRoomGrants(ctx context.Context, server, actorToken, roomID string) ([]RoomControllerGrant, error) {
+	var out struct {
+		Grants []RoomControllerGrant `json:"grants"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/grants", actorToken, nil, &out)
+	return out.Grants, err
+}
+
+// PrincipalInfo 是管理查询公开的 Principal，不包含 OIDC subject。
+type PrincipalInfo struct {
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Kind   string   `json:"kind"`
+	Roles  []string `json:"roles"`
+	Active bool     `json:"active"`
+}
+
+// RESTListPrincipals 按 ID 或名称搜索 Principal；limit <= 0 时使用服务端默认值。
+func RESTListPrincipals(ctx context.Context, server, actorToken, query string, limit int) ([]PrincipalInfo, error) {
+	values := url.Values{}
+	if query != "" {
+		values.Set("q", query)
+	}
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/api/v1/principals"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var out struct {
+		Principals []PrincipalInfo `json:"principals"`
+	}
+	err := restCall(ctx, server, http.MethodGet, path, actorToken, nil, &out)
+	return out.Principals, err
 }
 
 // RESTGrantRoomController 为 Principal 授予指定 Room 的 controller capability。

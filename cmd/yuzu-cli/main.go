@@ -51,6 +51,145 @@ var commands map[string]command
 // 在 init 中填充，避免 commands → errUsage → commands 的包级初始化环。
 func init() {
 	commands = map[string]command{
+		"integration list": {
+			usage:  "integration list",
+			desc:   "列出已配置的 Integration",
+			detail: "列出所有已配置的 Integration；输出不包含 Integration token。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				return withCtx(cmdIntegrations)
+			},
+		},
+		"integration scope list": {
+			usage:  "integration scope list <integration_id>",
+			desc:   "列出 Integration 的 external scope 绑定",
+			detail: "输出 adapter_id、scope_type、scope_id 与默认 room_id。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("integration scope list")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationScopes(ctx, args[0])
+				})
+			},
+		},
+		"integration scope bind": {
+			usage:  "integration scope bind <integration_id> <adapter_id> <scope_type> <scope_id> <room_id>",
+			desc:   "绑定 external scope 的默认 Room",
+			detail: "创建或更新 Integration external scope 到默认 Room 的绑定。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 5 {
+					return errUsage("integration scope bind")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationScopeBind(ctx, args[0], args[1], args[2], args[3], args[4])
+				})
+			},
+		},
+		"integration scope unbind": {
+			usage:  "integration scope unbind <integration_id> <adapter_id> <scope_type> <scope_id> <room_id>",
+			desc:   "解除 external scope 的默认 Room 绑定",
+			detail: "解除指定 Integration external scope 与默认 Room 的绑定。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 5 {
+					return errUsage("integration scope unbind")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationScopeUnbind(ctx, args[0], args[1], args[2], args[3], args[4])
+				})
+			},
+		},
+		"integration subject list": {
+			usage:  "integration subject list <integration_id>",
+			desc:   "列出 Integration 的 external subject 链接",
+			detail: "输出 adapter_id、scope、subject_id 与关联的 principal_id。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("integration subject list")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationSubjects(ctx, args[0])
+				})
+			},
+		},
+		"integration subject link": {
+			usage:  "integration subject link <integration_id> <adapter_id> <scope_type> <scope_id> <subject_id> <principal_id>",
+			desc:   "关联 external subject 与 Principal",
+			detail: "创建或更新 external subject 到持久 Principal 的关联。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 6 {
+					return errUsage("integration subject link")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationSubjectLink(ctx, args[0], args[1], args[2], args[3], args[4], args[5])
+				})
+			},
+		},
+		"integration subject unlink": {
+			usage:  "integration subject unlink <integration_id> <adapter_id> <scope_type> <scope_id> <subject_id> <principal_id>",
+			desc:   "解除 external subject 与 Principal 的关联",
+			detail: "解除指定 external subject 与 Principal 的关联。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 6 {
+					return errUsage("integration subject unlink")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationSubjectUnlink(ctx, args[0], args[1], args[2], args[3], args[4], args[5])
+				})
+			},
+		},
+		"principal list": {
+			usage:  "principal list [query] [-limit 50]",
+			desc:   "列出或搜索 Principal",
+			detail: "按 ID 或名称搜索 Principal；不传 query 时列出 Principal。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				query := ""
+				if len(args) > 0 {
+					query = args[0]
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPrincipals(ctx, query)
+				})
+			},
+		},
+		"room controller list": {
+			usage:  "room controller list <room>",
+			desc:   "列出 Room controller grants",
+			detail: "列出指定 Room 的显式 controller grants。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("room controller list")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdRoomControllers(ctx, args[0])
+				})
+			},
+		},
+		"room controller grant": {
+			usage:  "room controller grant <room> <principal_id>",
+			desc:   "授予 Principal 指定 Room 的 controller capability",
+			detail: "为 Principal 授予指定 Room 的 controller capability。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("room controller grant")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdRoomControllerGrant(ctx, args[0], args[1])
+				})
+			},
+		},
+		"room controller revoke": {
+			usage:  "room controller revoke <room> <principal_id>",
+			desc:   "撤销 Principal 指定 Room 的 controller capability",
+			detail: "撤销 Principal 在指定 Room 的 controller capability。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("room controller revoke")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdRoomControllerRevoke(ctx, args[0], args[1])
+				})
+			},
+		},
 		"room list": {
 			usage: "room list",
 			desc:  "列出所有房间",
@@ -109,28 +248,28 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 		},
 		"skip": {
 			usage:  "skip <room>",
-			desc:   "切歌：结束当前曲目，播放下一首（管理员）",
-			detail: "结束当前曲目（记入播放历史），队列非空时自动播放下一首。\n\n需要 room_admin 角色（-password 携带管理员口令）。",
+			desc:   "切歌：结束当前曲目，播放下一首（Room controller）",
+			detail: "结束当前曲目（记入播放历史），队列非空时自动播放下一首。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
 			run:    playbackCmd("playback.skip"),
 		},
 		"pause": {
 			usage:  "pause <room>",
-			desc:   "暂停播放（管理员）",
-			detail: "暂停当前曲目，进度冻结。\n\n需要 room_admin 角色。",
+			desc:   "暂停播放（Room controller）",
+			detail: "暂停当前曲目，进度冻结。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
 			run:    playbackCmd("playback.pause"),
 		},
 		"resume": {
 			usage:  "resume <room>",
-			desc:   "恢复播放（管理员）",
-			detail: "从暂停位置继续播放。\n\n需要 room_admin 角色。",
+			desc:   "恢复播放（Room controller）",
+			detail: "从暂停位置继续播放。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
 			run:    playbackCmd("playback.resume"),
 		},
 		"seek": {
 			usage: "seek <room> <秒>",
-			desc:  "跳转播放进度（管理员）",
+			desc:  "跳转播放进度（Room controller）",
 			detail: `把当前曲目跳转到指定秒数，越界自动收敛到 [0, 时长]。
 
-需要 room_admin 角色。
+需要该 Room controller（全局 room_admin 或 Room grant）。
 
 示例：
   yuzu-cli seek lobby 120    # 跳到 2 分钟处`,
@@ -356,7 +495,7 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 		},
 		"radio play": {
 			usage: "radio play <room> <source> [-shuffle] [-once]",
-			desc:  "房间进入电台模式：绑定曲目源自动续播（管理员）",
+			desc:  "房间进入电台模式：绑定曲目源自动续播（Room controller）",
 			detail: `让房间绑定一个曲目源，队列见底时自动批量补充，实现无人值守续播。
 
 source 取值：
@@ -367,7 +506,7 @@ source 取值：
   ncm:heart:<song_id> 心动模式（种子=我喜欢+当前播放）
 
 -shuffle 洗牌袋随机（仅有限源）；-once 播完即停（仅有限源）。
-需要 room_admin 角色。
+需要该 Room controller（全局 room_admin 或 Room grant）。
 
 示例：
   yuzu-cli radio play lobby playlist:pl_a1b2c3 -shuffle
@@ -383,8 +522,8 @@ source 取值：
 		},
 		"radio stop": {
 			usage:  "radio stop <room>",
-			desc:   "退出电台模式（管理员）",
-			detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要 room_admin 角色。",
+			desc:   "退出电台模式（Room controller）",
+			detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
 			run: func(args []string) error {
 				if len(args) < 1 {
 					return errUsage("radio stop")
@@ -474,8 +613,8 @@ agent 自动重新渲染——无需房间密码，无需重启 agent。
 		},
 		"queue del": {
 			usage:  "queue del <room> <entry_id>",
-			desc:   "移除队列条目（本人或管理员）",
-			detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；room_admin 可移除任意。\n\nentry_id 见 queue 输出第一列。",
+			desc:   "移除队列条目（本人或 Room controller）",
+			detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；该 Room controller（全局 room_admin 或 Room grant）可移除他人点的。\n\nentry_id 见 queue 输出第一列。",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("queue del")
@@ -485,8 +624,8 @@ agent 自动重新渲染——无需房间密码，无需重启 agent。
 		},
 		"queue move": {
 			usage:  "queue move <room> <entry_id> <位置>",
-			desc:   "移动队列条目到指定位置（管理员）",
-			detail: "把队列条目移动到目标序号（0 起）。\n\n需要 room_admin 角色。",
+			desc:   "移动队列条目到指定位置（Room controller）",
+			detail: "把队列条目移动到目标序号（0 起）。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
 			run: func(args []string) error {
 				if len(args) < 3 {
 					return errUsage("queue move")
@@ -587,14 +726,16 @@ var groupMeta = map[string]struct {
 	desc string
 	def  string
 }{
-	"playlist": {"通用歌单管理", "list"},
-	"queue":    {"队列操作（queue <room> 为查看）", ""},
-	"radio":    {"电台模式", ""},
-	"policy":   {"房间治理策略", ""},
-	"room":     {"房间管理与统计", "list"},
-	"provider": {"Provider 与凭据管理", "list"},
-	"media":    {"媒体与缓存", ""},
-	"player":   {"播放端管理", "list"},
+	"integration": {"Integration scope 与 subject 管理", "list"},
+	"principal":   {"Principal 查询", "list"},
+	"playlist":    {"通用歌单管理", "list"},
+	"queue":       {"队列操作（queue <room> 为查看）", ""},
+	"radio":       {"电台模式", ""},
+	"policy":      {"房间治理策略", ""},
+	"room":        {"房间管理与统计", "list"},
+	"provider":    {"Provider 与凭据管理", "list"},
+	"media":       {"媒体与缓存", ""},
+	"player":      {"播放端管理", "list"},
 }
 
 // groupChildren 收集某组的全部子命令名（排序）。
@@ -632,14 +773,9 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	// 两级优先：playlist add / queue del / radio play / policy set
-	if len(args) >= 2 {
-		if cmd, ok := commands[args[0]+" "+args[1]]; ok {
-			run(cmd, args[2:])
-		}
-	}
-	if cmd, ok := commands[args[0]]; ok {
-		run(cmd, args[1:])
+	// 最长命令优先：支持 integration scope bind / room controller grant 等三级命令。
+	if cmd, rest, ok := commandForArgs(args); ok {
+		run(cmd, rest)
 	}
 	if meta, ok := groupMeta[args[0]]; ok {
 		if meta.def != "" {
@@ -690,13 +826,11 @@ func isBoolFlag(name string) bool {
 }
 
 // ---------- 帮助 ----------
-
 func printHelp(args []string) {
-	if len(args) >= 2 {
-		if cmd, ok := commands[args[0]+" "+args[1]]; ok {
-			printCommandHelp(cmd)
-			return
-		}
+
+	if cmd, _, ok := commandForArgs(args); ok {
+		printCommandHelp(cmd)
+		return
 	}
 	if len(args) > 0 {
 		if cmd, ok := commands[args[0]]; ok {
@@ -747,7 +881,7 @@ func printHelp(args []string) {
   -password        全局管理员口令 (YUZU_PASSWORD)
   -room-password   房间访客密码 (YUZU_ROOM_PASSWORD)
 
-高频收听操作为顶级命令；管理类操作按域分组（room/provider/media/playlist/radio/policy）。
+高频收听操作为顶级命令；管理类操作按域分组（room/integration/principal/provider/media/playlist/radio/policy）。
 查看详细帮助: yuzu-cli help <命令>，如 yuzu-cli help playlist add`)
 }
 
@@ -766,6 +900,20 @@ func printGroupHelp(prefix string) {
 		fmt.Printf("  %-26s %s\n", c.usage, c.desc)
 	}
 	fmt.Printf("\n查看子命令详细帮助: yuzu-cli help %s <子命令>\n", prefix)
+}
+
+// commandForArgs 按最长优先匹配最多三级命令，并返回命令参数。
+func commandForArgs(args []string) (command, []string, bool) {
+	words := len(args)
+	if words > 3 {
+		words = 3
+	}
+	for ; words > 0; words-- {
+		if cmd, ok := commands[strings.Join(args[:words], " ")]; ok {
+			return cmd, args[words:], true
+		}
+	}
+	return command{}, nil, false
 }
 
 func errUsage(cmdName string) error {

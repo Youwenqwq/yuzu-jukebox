@@ -166,7 +166,42 @@ func (s *Store) GetPrincipalByOIDCSubject(ctx context.Context, subject string) (
 		 FROM users WHERE oidc_subject = ?`, subject))
 }
 
-func scanPrincipal(row *sql.Row) (Principal, error) {
+// ListPrincipals returns principals whose ID or name contains query.
+// Results are ordered by ID and capped at 100 rows.
+func (s *Store) ListPrincipals(ctx context.Context, query string, limit int) ([]Principal, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	query = strings.TrimSpace(query)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
+		 FROM users
+		 WHERE ? = ''
+		    OR instr(lower(id), lower(?)) > 0
+		    OR instr(lower(name), lower(?)) > 0
+		 ORDER BY id
+		 LIMIT ?`,
+		query, query, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	principals := make([]Principal, 0)
+	for rows.Next() {
+		principal, err := scanPrincipal(rows)
+		if err != nil {
+			return nil, err
+		}
+		principals = append(principals, principal)
+	}
+	return principals, rows.Err()
+}
+
+type principalScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanPrincipal(row principalScanner) (Principal, error) {
 	var p Principal
 	var rolesJSON string
 	err := row.Scan(
@@ -186,6 +221,15 @@ func scanPrincipal(row *sql.Row) (Principal, error) {
 		return Principal{}, fmt.Errorf("decode principal roles: %w", err)
 	}
 	return p, nil
+}
+
+type ExternalIdentityLink struct {
+	IntegrationID string
+	AdapterID     string
+	ScopeType     string
+	ScopeID       string
+	SubjectID     string
+	PrincipalID   string
 }
 
 func (s *Store) UpsertExternalIdentityLink(
@@ -226,6 +270,39 @@ func (s *Store) RemoveExternalIdentityLink(
 	return err
 }
 
+func (s *Store) ListExternalIdentityLinks(ctx context.Context, integrationID string) ([]ExternalIdentityLink, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT integration_id, adapter_id, scope_type, scope_id, subject_id, principal_id
+		 FROM external_identity_links
+		 WHERE integration_id = ?
+		 ORDER BY adapter_id, scope_type, scope_id, subject_id, principal_id`,
+		integrationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	links := make([]ExternalIdentityLink, 0)
+	for rows.Next() {
+		var link ExternalIdentityLink
+		if err := rows.Scan(
+			&link.IntegrationID, &link.AdapterID, &link.ScopeType,
+			&link.ScopeID, &link.SubjectID, &link.PrincipalID,
+		); err != nil {
+			return nil, err
+		}
+		links = append(links, link)
+	}
+	return links, rows.Err()
+}
+
+type ExternalScopeRoom struct {
+	IntegrationID string
+	AdapterID     string
+	ScopeType     string
+	ScopeID       string
+	RoomID        string
+}
+
 func (s *Store) BindExternalScopeRoom(
 	ctx context.Context,
 	integrationID, adapterID, scopeType, scopeID, roomID string,
@@ -264,6 +341,31 @@ func (s *Store) RemoveExternalScopeRoom(
 	return err
 }
 
+func (s *Store) ListExternalScopeRooms(ctx context.Context, integrationID string) ([]ExternalScopeRoom, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT integration_id, adapter_id, scope_type, scope_id, room_id
+		 FROM external_scope_rooms
+		 WHERE integration_id = ?
+		 ORDER BY adapter_id, scope_type, scope_id, room_id`,
+		integrationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bindings := make([]ExternalScopeRoom, 0)
+	for rows.Next() {
+		var binding ExternalScopeRoom
+		if err := rows.Scan(
+			&binding.IntegrationID, &binding.AdapterID, &binding.ScopeType,
+			&binding.ScopeID, &binding.RoomID,
+		); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings, rows.Err()
+}
+
 type RoomGrant struct {
 	RoomID      string
 	PrincipalID string
@@ -300,7 +402,7 @@ func (s *Store) ListRoomGrants(ctx context.Context, roomID string) ([]RoomGrant,
 		return nil, err
 	}
 	defer rows.Close()
-	var grants []RoomGrant
+	grants := make([]RoomGrant, 0)
 	for rows.Next() {
 		var grant RoomGrant
 		if err := rows.Scan(&grant.RoomID, &grant.PrincipalID, &grant.Capability, &grant.GrantedAt); err != nil {

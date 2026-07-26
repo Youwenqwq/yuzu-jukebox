@@ -172,3 +172,85 @@ func TestRESTRoomControllerGrant(t *testing.T) {
 		})
 	}
 }
+
+func TestRESTManagementQueries(t *testing.T) {
+	t.Run("integrations", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodGet,
+			requestURI: "/api/v1/integrations",
+			token:      "admin-token",
+			response:   `{"integrations":[{"id":"bridge-a"}]}`,
+		})
+		items, err := RESTListIntegrations(context.Background(), server.URL, "admin-token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].ID != "bridge-a" {
+			t.Fatalf("integrations = %#v", items)
+		}
+	})
+
+	t.Run("scopes", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodGet,
+			requestURI: "/api/v1/integrations/bridge%2Fa/scopes",
+			token:      "admin-token",
+			response:   `{"scopes":[{"integration_id":"bridge/a","adapter_id":"onebot","scope_type":"group","scope_id":"42","room_id":"main"}]}`,
+		})
+		items, err := RESTListIntegrationScopes(context.Background(), server.URL, "admin-token", "bridge/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].IntegrationID != "bridge/a" || items[0].RoomID != "main" {
+			t.Fatalf("scopes = %#v", items)
+		}
+	})
+
+	t.Run("subjects", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodGet,
+			requestURI: "/api/v1/integrations/bridge%2Fa/subjects",
+			token:      "admin-token",
+			response:   `{"subjects":[{"integration_id":"bridge/a","adapter_id":"onebot","scope_type":"group","scope_id":"42","subject_id":"user-1","principal_id":"principal-1"}]}`,
+		})
+		items, err := RESTListIntegrationSubjects(context.Background(), server.URL, "admin-token", "bridge/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].SubjectID != "user-1" || items[0].PrincipalID != "principal-1" {
+			t.Fatalf("subjects = %#v", items)
+		}
+	})
+
+	t.Run("room grants", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodGet,
+			requestURI: "/api/v1/rooms/room%2Fa/grants",
+			token:      "admin-token",
+			response:   `{"grants":[{"room_id":"room/a","principal_id":"principal-1","capability":"controller"}]}`,
+		})
+		items, err := RESTListRoomGrants(context.Background(), server.URL, "admin-token", "room/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].Capability != "controller" {
+			t.Fatalf("grants = %#v", items)
+		}
+	})
+
+	t.Run("principals", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodGet,
+			requestURI: "/api/v1/principals?limit=5&q=Alice+%2F",
+			token:      "admin-token",
+			response:   `{"principals":[{"id":"principal-1","name":"Alice /","kind":"oidc","roles":["listener"],"active":true}]}`,
+		})
+		items, err := RESTListPrincipals(context.Background(), server.URL, "admin-token", "Alice /", 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].Name != "Alice /" || !items[0].Active {
+			t.Fatalf("principals = %#v", items)
+		}
+	})
+}

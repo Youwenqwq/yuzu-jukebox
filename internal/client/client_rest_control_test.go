@@ -95,6 +95,22 @@ func TestRESTRoomState(t *testing.T) {
 	}
 }
 
+func TestRESTRoomCapabilities(t *testing.T) {
+	server := expectREST(t, restExpectation{
+		method:     http.MethodGet,
+		requestURI: "/api/v1/rooms/room%2Fa%20b/capabilities",
+		token:      "actor-token",
+		response:   `{"capabilities":{"controller":true}}`,
+	})
+	capabilities, err := RESTRoomCapabilities(context.Background(), server.URL, "actor-token", "room/a b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.Controller {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+}
+
 func TestRESTRoomQueue(t *testing.T) {
 	t.Run("add one", func(t *testing.T) {
 		server := expectREST(t, restExpectation{

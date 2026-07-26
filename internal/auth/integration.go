@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -26,12 +27,14 @@ type integrationCredential struct {
 type IntegrationRegistry struct {
 	byID        map[string]struct{}
 	credentials []integrationCredential
+	ids         []string
 }
 
 func NewIntegrationRegistry(entries []IntegrationCredential) (*IntegrationRegistry, error) {
 	registry := &IntegrationRegistry{
 		byID:        make(map[string]struct{}, len(entries)),
 		credentials: make([]integrationCredential, 0, len(entries)),
+		ids:         make([]string, 0, len(entries)),
 	}
 	seenTokens := make(map[string]struct{}, len(entries))
 	for i, entry := range entries {
@@ -49,11 +52,13 @@ func NewIntegrationRegistry(entries []IntegrationCredential) (*IntegrationRegist
 		}
 		registry.byID[entry.ID] = struct{}{}
 		seenTokens[entry.Token] = struct{}{}
+		registry.ids = append(registry.ids, entry.ID)
 		registry.credentials = append(registry.credentials, integrationCredential{
 			id:          entry.ID,
 			tokenDigest: sha256.Sum256([]byte(entry.Token)),
 		})
 	}
+	sort.Strings(registry.ids)
 	return registry, nil
 }
 
@@ -82,4 +87,12 @@ func (r *IntegrationRegistry) Contains(id string) bool {
 	}
 	_, ok := r.byID[id]
 	return ok
+}
+
+// IDs returns the configured integration IDs in stable order.
+func (r *IntegrationRegistry) IDs() []string {
+	if r == nil {
+		return []string{}
+	}
+	return append([]string(nil), r.ids...)
 }
