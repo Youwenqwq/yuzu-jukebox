@@ -93,6 +93,18 @@ func cmdPlaylistDelItem(ctx context.Context, id string, ord int) error {
 	return nil
 }
 
+func cmdPlaylistMove(ctx context.Context, id string, ord, toOrd int) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTMovePlaylistItem(ctx, *server, token, id, ord, toOrd); err != nil {
+		return err
+	}
+	fmt.Printf("moved %d -> %d\n", ord, toOrd)
+	return nil
+}
+
 func cmdPlaylistImport(ctx context.Context, what, plName string) error {
 	token, err := restToken(ctx)
 	if err != nil {

@@ -55,13 +55,17 @@ func cmdSearch(ctx context.Context, query string) error {
 	return nil
 }
 
-func cmdAdd(ctx context.Context, roomID, trackRef string) error {
+func cmdAdd(ctx context.Context, roomID string, trackRefs []string) error {
 	cli, err := connect(ctx, roomID)
 	if err != nil {
 		return err
 	}
 	defer cli.Close()
-	if err := cli.QueueAdd(ctx, roomID, trackRef); err != nil {
+	if len(trackRefs) == 1 {
+		if err := cli.QueueAdd(ctx, roomID, trackRefs[0]); err != nil {
+			return err
+		}
+	} else if _, err := cli.QueueAddMany(ctx, roomID, trackRefs); err != nil {
 		return err
 	}
 	fmt.Println("ok")

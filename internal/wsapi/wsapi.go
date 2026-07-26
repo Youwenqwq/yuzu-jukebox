@@ -244,28 +244,59 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 
 	case "queue.add":
 		var d struct {
-			RoomID   string `json:"room_id"`
-			TrackRef string `json:"track_ref"`
+			RoomID    string   `json:"room_id"`
+			TrackRef  string   `json:"track_ref"`
+			TrackRefs []string `json:"track_refs"`
 		}
 		if err := json.Unmarshal(data, &d); err != nil {
 			c.replyErr(ref, "bad_request", "invalid queue.add payload")
 			return
 		}
+		// 双形态：track_ref（单条）或 track_refs（1–100 条原子批量），二选一
+		var refs []string
+		switch {
+		case d.TrackRef != "" && len(d.TrackRefs) > 0:
+			c.replyErr(ref, "bad_request", "track_ref and track_refs are mutually exclusive")
+			return
+		case d.TrackRef != "":
+			refs = []string{d.TrackRef}
+		case len(d.TrackRefs) > 0:
+			refs = d.TrackRefs
+		default:
+			c.replyErr(ref, "bad_request", "track_ref or track_refs required")
+			return
+		}
+		if len(refs) > 100 {
+			c.replyErr(ref, "bad_request", "track_refs limited to 100")
+			return
+		}
 		if !c.requireRole(ref, auth.RoleRequester) || !c.requireRoom(ref, d.RoomID) {
 			return
 		}
-		p, _, err := c.server.reg.ForRef(provider.TrackRef(d.TrackRef))
-		if err != nil {
-			c.replyErr(ref, "bad_request", err.Error())
+		// 整体预取：任一 ref 无效或 provider 失败，一条都不入队
+		entries := make([]room.QueueEntry, 0, len(refs))
+		for _, tr := range refs {
+			p, _, err := c.server.reg.ForRef(provider.TrackRef(tr))
+			if err != nil {
+				c.replyErr(ref, "bad_request", err.Error())
+				return
+			}
+			track, err := p.GetTrack(context.Background(), provider.TrackRef(tr))
+			if err != nil {
+				c.replyErr(ref, "provider_error", err.Error())
+				return
+			}
+			entries = append(entries, room.EntryFromTrack(track, c.identity.ID))
+		}
+		if err := c.room.AddBatchFor(c.Identity(), entries); err != nil {
+			c.replyResult(ref, err)
 			return
 		}
-		track, err := p.GetTrack(context.Background(), provider.TrackRef(d.TrackRef))
-		if err != nil {
-			c.replyErr(ref, "provider_error", err.Error())
-			return
+		ids := make([]string, len(entries))
+		for i, e := range entries {
+			ids[i] = e.EntryID
 		}
-		err = c.room.AddFor(c.Identity(), room.EntryFromTrack(track, c.identity.ID))
-		c.replyResult(ref, err)
+		c.Send(map[string]any{"type": "ack", "ref": ref, "data": map[string]any{"entry_ids": ids}})
 
 	case "queue.remove":
 		var d struct {

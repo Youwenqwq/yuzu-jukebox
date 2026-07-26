@@ -92,17 +92,19 @@ track_ref 用于 add 点歌。
 			},
 		},
 		"add": {
-			usage: "add <room> <track_ref>",
-			desc:  "点歌：把曲目追加到房间队列",
+			usage: "add <room> <track_ref> [<track_ref>...]",
+			desc:  "点歌：把曲目追加到房间队列（多首原子批量入队）",
 			detail: `把 track_ref 指定的曲目追加到房间队列尾部；房间空闲时自动开播。
 track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
+
+给定多个 track_ref 时走原子批量入队：整体校验，任一失败一条不加。
 
 需要 requester 角色（访客默认拥有）。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("add")
 				}
-				return withCtx(func(ctx context.Context) error { return cmdAdd(ctx, args[0], args[1]) })
+				return withCtx(func(ctx context.Context) error { return cmdAdd(ctx, args[0], args[1:]) })
 			},
 		},
 		"skip": {
@@ -307,6 +309,27 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 				}
 				return withCtx(func(ctx context.Context) error {
 					return cmdPlaylistDelItem(ctx, args[0], ord)
+				})
+			},
+		},
+		"playlist move": {
+			usage:  "playlist move <id> <ord> <to_ord>",
+			desc:   "移动歌单条目到指定位置（管理员）",
+			detail: "把序号 ord 的条目移动到 to_ord（超出范围自动 clamp 到 [1, 歌单长度]），其余序号自动重排。\n\n需要 media_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 3 {
+					return errUsage("playlist move")
+				}
+				ord, err := strconv.Atoi(args[1])
+				if err != nil {
+					return fmt.Errorf("invalid ord: %s", args[1])
+				}
+				toOrd, err := strconv.Atoi(args[2])
+				if err != nil {
+					return fmt.Errorf("invalid to_ord: %s", args[2])
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdPlaylistMove(ctx, args[0], ord, toOrd)
 				})
 			},
 		},

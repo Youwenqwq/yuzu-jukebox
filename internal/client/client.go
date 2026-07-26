@@ -242,6 +242,22 @@ func (c *Client) QueueAdd(ctx context.Context, roomID, trackRef string) error {
 	return err
 }
 
+// QueueAddMany 原子批量点歌：整体校验，任一失败一条不加；
+// 全部通过按顺序队尾追加。返回按追加顺序的 entry_id 列表。
+func (c *Client) QueueAddMany(ctx context.Context, roomID string, trackRefs []string) ([]string, error) {
+	m, err := c.call(ctx, "queue.add", map[string]any{"room_id": roomID, "track_refs": trackRefs})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		EntryIDs []string `json:"entry_ids"`
+	}
+	if err := json.Unmarshal(m.Data, &out); err != nil {
+		return nil, err
+	}
+	return out.EntryIDs, nil
+}
+
 func (c *Client) QueueRemove(ctx context.Context, roomID, entryID string) error {
 	_, err := c.call(ctx, "queue.remove", map[string]any{"room_id": roomID, "entry_id": entryID})
 	return err
@@ -279,19 +295,20 @@ func (c *Client) RadioStop(ctx context.Context, roomID string) error {
 // ---------- 房间状态（客户端视图） ----------
 
 type QueueEntry struct {
-	EntryID     string `json:"entry_id"`
-	TrackRef    string `json:"track_ref"`
-	Title       string `json:"title"`
-	Artist      string `json:"artist"`
-	DurationMs  int64  `json:"duration_ms"`
-	Album       string `json:"album,omitempty"`
-	CoverURL    string `json:"cover_url,omitempty"`
-	SourceURL   string `json:"source_url,omitempty"`
-	RequestedBy string `json:"requested_by"`
-	AddedAt     int64  `json:"added_at"`
-	StreamURL   string `json:"stream_url,omitempty"`
-	SizeBytes   int64  `json:"size_bytes,omitempty"`
-	BitrateKbps int    `json:"bitrate_kbps,omitempty"`
+	EntryID       string `json:"entry_id"`
+	TrackRef      string `json:"track_ref"`
+	Title         string `json:"title"`
+	Artist        string `json:"artist"`
+	DurationMs    int64  `json:"duration_ms"`
+	Album         string `json:"album,omitempty"`
+	CoverURL      string `json:"cover_url,omitempty"`
+	SourceURL     string `json:"source_url,omitempty"`
+	RequestedBy   string `json:"requested_by"`
+	RequesterName string `json:"requester_name"`
+	AddedAt       int64  `json:"added_at"`
+	StreamURL     string `json:"stream_url,omitempty"`
+	SizeBytes     int64  `json:"size_bytes,omitempty"`
+	BitrateKbps   int    `json:"bitrate_kbps,omitempty"`
 }
 
 type Playback struct {
@@ -427,10 +444,23 @@ func RESTOIDCAuth(ctx context.Context, server, idToken, accessToken string) (ide
 	return out.Identity, out.SessionToken, err
 }
 
+type RoomNowPlaying struct {
+	Title      string  `json:"title"`
+	Artist     string  `json:"artist"`
+	DurationMs int64   `json:"duration_ms"`
+	CoverURL   string  `json:"cover_url"`
+	PositionMs int64   `json:"position_ms"`
+	UpdatedAt  int64   `json:"updated_at"`
+	Playing    bool    `json:"playing"`
+	Rate       float64 `json:"rate"`
+}
+
 type RoomInfo struct {
-	ID     string          `json:"id"`
-	Name   string          `json:"name"`
-	Policy json.RawMessage `json:"policy"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Policy        json.RawMessage `json:"policy"`
+	ListenerCount int             `json:"listener_count"`
+	NowPlaying    *RoomNowPlaying `json:"now_playing"`
 }
 
 func RESTListRooms(ctx context.Context, server, token string) ([]RoomInfo, error) {
@@ -530,6 +560,12 @@ func RESTAddPlaylistItems(ctx context.Context, server, token, id string, refs []
 func RESTDeletePlaylistItem(ctx context.Context, server, token, id string, ord int) error {
 	return restCall(ctx, server, "DELETE",
 		fmt.Sprintf("/api/v1/playlists/%s/items/%d", id, ord), token, nil, &struct{}{})
+}
+
+func RESTMovePlaylistItem(ctx context.Context, server, token, id string, ord, toOrd int) error {
+	return restCall(ctx, server, "PATCH",
+		fmt.Sprintf("/api/v1/playlists/%s/items/%d", id, ord), token,
+		map[string]any{"to_ord": toOrd}, &struct{}{})
 }
 
 // RESTImportPlaylist 导入外部歌单或曲目源快照。provider+playlistID 或 source 二选一。
