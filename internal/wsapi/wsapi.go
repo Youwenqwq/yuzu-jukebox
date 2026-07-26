@@ -46,6 +46,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		server: s,
 		conn:   conn,
 		id:     newClientID(),
+		remote: r.RemoteAddr,
 		send:   make(chan any, 64),
 	}
 	go c.writeLoop()
@@ -58,6 +59,7 @@ type client struct {
 	server   *Server
 	conn     *websocket.Conn
 	id       string
+	remote   string
 	identity *auth.Identity
 	room     *room.Room
 	player   *playerState // 非 nil = 已注册播放端
@@ -179,18 +181,28 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 				return
 			}
 			c.identity = &id
+			via := "guest-password"
+			if id.Kind == "oidc" {
+				via = "oidc"
+			}
+			auth.LogAdminGrant(id, via, c.remote)
 			c.Send(map[string]any{
 				"type": "auth.ok", "ref": ref,
 				"data": map[string]any{"identity": id, "session_token": d.SessionToken},
 			})
 			return
 		}
-		id, token, err := c.server.authm.GuestAuth(d.Name, d.Password)
+		id, token, err := c.server.authm.GuestAuth(d.Name, d.Password, c.remote)
 		if err != nil {
+			if errors.Is(err, auth.ErrPasswordProbeRateLimited) {
+				c.replyErr(ref, "rate_limited", err.Error())
+				return
+			}
 			c.replyErr(ref, "bad_request", err.Error())
 			return
 		}
 		c.identity = &id
+		auth.LogAdminGrant(id, "guest-password", c.remote)
 		c.Send(map[string]any{
 			"type": "auth.ok", "ref": ref,
 			"data": map[string]any{"identity": id, "session_token": token},

@@ -378,7 +378,7 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `not_found` | 房间 / 条目 / 曲目不存在 |
 | `provider_error` | Provider 调用失败（附 message） |
 | `internal` | 服务端内部错误 |
-| `rate_limited` | 预留 |
+| `rate_limited` | 同一来源 IP 在 10 分钟内已有 10 次非空错误管理员口令探测；窗口内后续带口令的 guest 认证被限制（REST 为 HTTP 429，WS 为 `error`），无口令访客不受限 |
 
 ## 8. 明确不做的
 

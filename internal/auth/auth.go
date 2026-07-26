@@ -41,8 +41,9 @@ func (id Identity) HasRole(role string) bool {
 }
 
 var (
-	ErrSessionNotFound = errors.New("session not found")
-	ErrTicketInvalid   = errors.New("ticket invalid")
+	ErrSessionNotFound          = errors.New("session not found")
+	ErrTicketInvalid            = errors.New("ticket invalid")
+	ErrPasswordProbeRateLimited = errors.New("too many incorrect admin password attempts; try again later")
 )
 
 type session struct {
@@ -59,10 +60,11 @@ type ticket struct {
 // Manager 管理会话与票据。会话可持久化到 store（重启不失效）；
 // st 为 nil 时退化为纯内存（测试用）。
 type Manager struct {
-	adminPassword string
-	sessionTTL    time.Duration
-	ticketTTL     time.Duration
-	st            *store.Store
+	adminPassword  string
+	sessionTTL     time.Duration
+	ticketTTL      time.Duration
+	st             *store.Store
+	passwordProbes *passwordProbeLimiter
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -71,11 +73,12 @@ type Manager struct {
 
 func NewManager(adminPassword string, st *store.Store) *Manager {
 	m := &Manager{
-		adminPassword: adminPassword,
-		sessionTTL:    24 * time.Hour,
-		ticketTTL:     5 * time.Minute,
-		sessions:      map[string]session{},
-		tickets:       map[string]ticket{},
+		adminPassword:  adminPassword,
+		sessionTTL:     24 * time.Hour,
+		ticketTTL:      5 * time.Minute,
+		sessions:       map[string]session{},
+		tickets:        map[string]ticket{},
+		passwordProbes: newPasswordProbeLimiter(),
 	}
 	if st != nil {
 		m.st = st
@@ -94,12 +97,16 @@ func NewManager(adminPassword string, st *store.Store) *Manager {
 }
 
 // GuestAuth 访客认证。adminPassword 命中全局管理员口令时授予管理角色。
-func (m *Manager) GuestAuth(name, adminPassword string) (Identity, string, error) {
+func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, string, error) {
+	adminMatched := m.adminPassword != "" && adminPassword == m.adminPassword
+	if !m.passwordProbes.allow(remoteAddr, adminPassword != "", adminMatched) {
+		return Identity{}, "", ErrPasswordProbeRateLimited
+	}
 	if name == "" {
 		return Identity{}, "", errors.New("name required")
 	}
 	roles := []string{RoleListener, RoleRequester}
-	if m.adminPassword != "" && adminPassword == m.adminPassword {
+	if adminMatched {
 		roles = append(roles, RoleRoomAdmin, RoleMediaAdmin)
 	}
 	// 访客 ID 由名字确定性派生：同名重连仍是同一人。点歌限额、

@@ -49,12 +49,32 @@ server {
   若见莫名断连，调大 `proxy_read_timeout`。
 - **出流路径** `/stream/v1/` 是边下边播的长响应，关闭代理缓冲（Caddy 默认不缓冲）。
 
+## 公域部署
+
+公域实例按以下清单部署：
+
+- 将 `"admin_password"` 设为 `""`。`internal/auth/auth.go` 的 `GuestAuth`
+  只有在配置口令非空且提交值命中时才追加 `room_admin` 与 `media_admin`；
+  留空即关闭 guest 口令升级。
+- 管理员一律经 OIDC 登录，并用 `oidc.role_mapping` 将 IdP 角色映射为
+  `room_admin` / `media_admin`；不要把全局口令当作公网 break-glass 后门。
+- 在反向代理终结 TLS，并在边缘按真实客户端 IP 对
+  `POST /api/v1/auth/guest`、WebSocket 建连等认证入口增加限流。服务端不信任
+  `X-Forwarded-For`，内建限制按 TCP 直连地址计数；反代部署时多个公网客户端
+  会共享代理地址的服务端桶，因此边缘限流仍然必要。
+- 服务端对 REST guest 登录与 WS `auth` 的非空错误口令探测启用内存限流：
+  同一来源在 10 分钟内前 10 次仍按普通访客认证，后续带口令请求在窗口内返回
+  `rate_limited`（REST 为 HTTP 429）；不带口令的访客认证永不受限。重启会清空计数。
+
+仅在受控的私域（LAN）部署中，才可按需要保留强 `admin_password`；即使如此，
+OIDC 仍是多人管理与角色审计的推荐方式。
+
 ## config.json 生产注意
 
 ```jsonc
 {
   "addr": "127.0.0.1:8080",      // 反代模式下只监听回环
-  "admin_password": "…",          // 强口令；持有即全管理员
+  "admin_password": "",             // 公域必须留空；私域按需设置强口令
   "secret_key": "…",              // 首次启动自动生成并回写；凭据加密主密钥
   // ...
 }
@@ -64,8 +84,8 @@ server {
   备份数据目录时必须连同 config.json 一起备份。
 - `config.json` 与 `data/` 目录建议 `chmod 600` / `chmod 700`：secret_key、
   session 持久化数据、凭据都在其中。
-- `admin_password` 与 OIDC 的关系：guest + admin_password 仍是最高权限后门；
-  组织部署建议留着做 break-glass，但口令强度要够。
+- `admin_password` 与 OIDC 的关系：公域必须留空并通过 OIDC `role_mapping`
+  授予管理角色；仅受控私域可按需保留强口令。
 
 ## 进程管理（systemd 示例）
 

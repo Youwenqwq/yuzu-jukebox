@@ -120,11 +120,16 @@ func (s *Server) guestAuth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
 		return
 	}
-	id, token, err := s.authm.GuestAuth(body.Name, body.Password)
+	id, token, err := s.authm.GuestAuth(body.Name, body.Password, r.RemoteAddr)
 	if err != nil {
+		if errors.Is(err, auth.ErrPasswordProbeRateLimited) {
+			writeErr(w, http.StatusTooManyRequests, "rate_limited", err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	auth.LogAdminGrant(id, "guest-password", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
 }
 
@@ -190,6 +195,7 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	id := auth.OIDCIdentity(claims, roles)
 	token := s.authm.IssueSession(id)
+	auth.LogAdminGrant(id, "oidc", r.RemoteAddr)
 	s.st.Audit(r.Context(), id.ID, "auth.oidc", "", `{"name":`+strconv.Quote(id.Name)+`}`)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
 }
