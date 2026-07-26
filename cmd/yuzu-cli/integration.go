@@ -19,8 +19,73 @@ func cmdIntegrations(ctx context.Context) error {
 		return err
 	}
 	for _, integration := range integrations {
-		fmt.Println(integration.ID)
+		status := "disabled"
+		if integration.Active {
+			status = "active"
+		}
+		fmt.Printf("%-24s %-24s %s\n", integration.ID, integration.Name, status)
 	}
+	return nil
+}
+func cmdIntegrationCreate(ctx context.Context, id, name string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	created, err := client.RESTCreateIntegration(ctx, *server, token, id, name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("id: %s\ntoken: %s\n", created.Integration.ID, created.Token)
+	return nil
+}
+
+func cmdIntegrationRename(ctx context.Context, id, name string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := client.RESTUpdateIntegration(ctx, *server, token, id, client.UpdateIntegrationRequest{Name: &name}); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdIntegrationSetActive(ctx context.Context, id string, active bool) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := client.RESTUpdateIntegration(ctx, *server, token, id, client.UpdateIntegrationRequest{Active: &active}); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdIntegrationRotateToken(ctx context.Context, id string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	rotated, err := client.RESTRotateIntegrationToken(ctx, *server, token, id)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("id: %s\ntoken: %s\n", rotated.Integration.ID, rotated.Token)
+	return nil
+}
+
+func cmdIntegrationDelete(ctx context.Context, id string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTDeleteIntegration(ctx, *server, token, id); err != nil {
+		return err
+	}
+	fmt.Println("ok")
 	return nil
 }
 

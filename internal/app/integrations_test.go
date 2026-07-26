@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -41,16 +40,22 @@ func newIntegrationEnv(t *testing.T) *env {
 		CacheDir:      filepath.Join(dir, "cache"),
 		CacheMaxBytes: 1 << 30,
 		AdminPassword: "admin123",
-		Integrations: []config.IntegrationConfig{
-			{ID: testIntegrationID, Token: testIntegrationToken},
-			{ID: "generic-bridge-b", Token: "integration-secret-b"},
-		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	a, err := app.New(ctx, cfg)
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
+	}
+	for id, token := range map[string]string{
+		testIntegrationID:  testIntegrationToken,
+		"generic-bridge-b": "integration-secret-b",
+	} {
+		if _, err := a.Store.CreateIntegration(
+			context.Background(), id, id, auth.HashIntegrationToken(token),
+		); err != nil {
+			t.Fatalf("create integration %s: %v", id, err)
+		}
 	}
 	t.Cleanup(func() { _ = a.Store.Close() })
 	srv := httptest.NewServer(a.Handler)
@@ -117,41 +122,6 @@ func integrationActorBody(adapterID, scopeType, scopeID, subjectID, displayName 
 		"adapter_id": adapterID,
 		"scope":      map[string]any{"type": scopeType, "id": scopeID},
 		"subject":    map[string]any{"id": subjectID, "display_name": displayName},
-	}
-}
-
-func TestAppRejectsInvalidIntegrationCredentials(t *testing.T) {
-	tests := []struct {
-		name         string
-		integrations []config.IntegrationConfig
-	}{
-		{name: "empty id", integrations: []config.IntegrationConfig{{Token: "token"}}},
-		{name: "empty token", integrations: []config.IntegrationConfig{{ID: "bridge"}}},
-		{name: "duplicate id", integrations: []config.IntegrationConfig{
-			{ID: "bridge", Token: "token-a"}, {ID: "bridge", Token: "token-b"},
-		}},
-		{name: "duplicate token", integrations: []config.IntegrationConfig{
-			{ID: "bridge-a", Token: "same-token"}, {ID: "bridge-b", Token: "same-token"},
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cfg := config.Config{
-				DBPath: filepath.Join(dir, "test.db"), MediaDir: filepath.Join(dir, "media"),
-				CacheDir: filepath.Join(dir, "cache"), Integrations: test.integrations,
-			}
-			a, err := app.New(context.Background(), cfg)
-			if a != nil {
-				_ = a.Store.Close()
-			}
-			if err == nil || !strings.Contains(err.Error(), "integrations") {
-				t.Fatalf("app.New error = %v, want integration validation error", err)
-			}
-			if strings.Contains(err.Error(), "same-token") {
-				t.Fatalf("app.New error leaked integration token: %v", err)
-			}
-		})
 	}
 }
 

@@ -173,6 +173,75 @@ func TestRESTRoomControllerGrant(t *testing.T) {
 	}
 }
 
+func TestRESTIntegrationLifecycle(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodPost,
+			requestURI: "/api/v1/integrations",
+			token:      "admin-token",
+			body:       map[string]string{"id": "bridge-a", "name": "Bridge A"},
+			response:   `{"integration":{"id":"bridge-a","name":"Bridge A","active":true,"created_at":100,"updated_at":100},"token":"created-token"}`,
+		})
+		result, err := RESTCreateIntegration(context.Background(), server.URL, "admin-token", "bridge-a", "Bridge A")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Integration.ID != "bridge-a" || result.Token != "created-token" {
+			t.Fatalf("create result = %#v", result)
+		}
+	})
+
+	t.Run("update", func(t *testing.T) {
+		name := "Renamed"
+		active := false
+		server := expectREST(t, restExpectation{
+			method:     http.MethodPatch,
+			requestURI: "/api/v1/integrations/bridge%2Fa",
+			token:      "admin-token",
+			body:       UpdateIntegrationRequest{Name: &name, Active: &active},
+			response:   `{"integration":{"id":"bridge/a","name":"Renamed","active":false,"created_at":100,"updated_at":200}}`,
+		})
+		updated, err := RESTUpdateIntegration(
+			context.Background(), server.URL, "admin-token", "bridge/a",
+			UpdateIntegrationRequest{Name: &name, Active: &active},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Name != name || updated.Active {
+			t.Fatalf("updated Integration = %#v", updated)
+		}
+	})
+
+	t.Run("rotate token", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodPost,
+			requestURI: "/api/v1/integrations/bridge%2Fa/token",
+			token:      "admin-token",
+			response:   `{"integration":{"id":"bridge/a","name":"Bridge","active":true,"created_at":100,"updated_at":300},"token":"rotated-token"}`,
+		})
+		result, err := RESTRotateIntegrationToken(context.Background(), server.URL, "admin-token", "bridge/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Token != "rotated-token" {
+			t.Fatalf("rotate result = %#v", result)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		server := expectREST(t, restExpectation{
+			method:     http.MethodDelete,
+			requestURI: "/api/v1/integrations/bridge%2Fa",
+			token:      "admin-token",
+			response:   `{"ok":true}`,
+		})
+		if err := RESTDeleteIntegration(context.Background(), server.URL, "admin-token", "bridge/a"); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestRESTManagementQueries(t *testing.T) {
 	t.Run("integrations", func(t *testing.T) {
 		server := expectREST(t, restExpectation{

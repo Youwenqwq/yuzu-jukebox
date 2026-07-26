@@ -549,9 +549,25 @@ func RESTRoomRadioStop(ctx context.Context, server, actorToken, roomID string) e
 		"/api/v1/rooms/"+url.PathEscape(roomID)+"/radio", actorToken, nil, &struct{}{})
 }
 
-// IntegrationInfo 是已配置 Integration 的公开标识。
+// IntegrationInfo is the public persistent Integration metadata. It never
+// contains the credential hash or plaintext token.
 type IntegrationInfo struct {
-	ID string `json:"id"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Active     bool   `json:"active"`
+	CreatedAt  int64  `json:"created_at"`
+	UpdatedAt  int64  `json:"updated_at"`
+	LastUsedAt *int64 `json:"last_used_at,omitempty"`
+}
+
+type IntegrationCredentialResult struct {
+	Integration IntegrationInfo `json:"integration"`
+	Token       string          `json:"token"`
+}
+
+type UpdateIntegrationRequest struct {
+	Name   *string `json:"name,omitempty"`
+	Active *bool   `json:"active,omitempty"`
 }
 
 // RESTListIntegrations 列出已配置的 Integration，不包含 token。
@@ -561,6 +577,45 @@ func RESTListIntegrations(ctx context.Context, server, actorToken string) ([]Int
 	}
 	err := restCall(ctx, server, http.MethodGet, "/api/v1/integrations", actorToken, nil, &out)
 	return out.Integrations, err
+}
+
+func RESTCreateIntegration(
+	ctx context.Context,
+	server, actorToken, id, name string,
+) (IntegrationCredentialResult, error) {
+	var out IntegrationCredentialResult
+	err := restCall(ctx, server, http.MethodPost, "/api/v1/integrations", actorToken,
+		map[string]string{"id": id, "name": name}, &out)
+	return out, err
+}
+
+func RESTUpdateIntegration(
+	ctx context.Context,
+	server, actorToken, id string,
+	update UpdateIntegrationRequest,
+) (IntegrationInfo, error) {
+	var out struct {
+		Integration IntegrationInfo `json:"integration"`
+	}
+	err := restCall(ctx, server, http.MethodPatch,
+		"/api/v1/integrations/"+url.PathEscape(id), actorToken, update, &out)
+	return out.Integration, err
+}
+
+func RESTRotateIntegrationToken(
+	ctx context.Context,
+	server, actorToken, id string,
+) (IntegrationCredentialResult, error) {
+	var out IntegrationCredentialResult
+	err := restCall(ctx, server, http.MethodPost,
+		"/api/v1/integrations/"+url.PathEscape(id)+"/token",
+		actorToken, nil, &out)
+	return out, err
+}
+
+func RESTDeleteIntegration(ctx context.Context, server, actorToken, id string) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/integrations/"+url.PathEscape(id), actorToken, nil, &struct{}{})
 }
 
 // IntegrationActorScope 标识 Integration 上报的外部作用域。
@@ -1102,6 +1157,14 @@ func RESTQRLoginPoll(ctx context.Context, server, token, providerID, key string)
 	return out, err
 }
 
+type idempotencyContextKey struct{}
+
+// WithIdempotencyKey attaches a platform event/request ID to subsequent REST
+// writes. Integration actor Room mutations require this value.
+func WithIdempotencyKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, idempotencyContextKey{}, key)
+}
+
 func restCall(ctx context.Context, server, method, path, token string, body, out any) error {
 	var rdr *strings.Reader
 	if body != nil {
@@ -1119,6 +1182,9 @@ func restCall(ctx context.Context, server, method, path, token string, body, out
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if key, _ := ctx.Value(idempotencyContextKey{}).(string); key != "" {
+		req.Header.Set("Idempotency-Key", key)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

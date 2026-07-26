@@ -55,12 +55,6 @@ go build -o bin/yuzu-cli    ./cmd/yuzu-cli
   "cache_dir": "data/cache",
   "cache_max_bytes": 21474836480,
   "admin_password": "admin123",
-  "integrations": [
-    {
-      "id": "astrbot-main",
-      "token": "replace-with-a-random-secret"
-    }
-  ],
   "ncm": {
     "enabled": true,
     "base_url": "http://127.0.0.1:3000",
@@ -79,7 +73,6 @@ go build -o bin/yuzu-cli    ./cmd/yuzu-cli
 | `cache_max_bytes` | 流式缓存容量上限，超出按 LRU 清理 |
 | `ncm` | 网易云 Provider，对接 [NeteaseCloudMusicApi](https://github.com/neteasecloudmusicapienhanced/api-enhanced) 实例；`level` 为音质等级 |
 | `bili` | B 站 Provider，对接 bilibili-api sidecar（封装 WBI 签名 / DASH 音频选轨 / 风控）；无 cookie 可匿名 Resolve（320kbps 上限），Search 需扫码登录 |
-| `integrations` | 外部 Chatbot / Mod 网关凭据；每个 `id` 对应一个独立 bearer token，token 只配置在受信任的网关进程 |
 
 创建一个房间并上传一首本地音乐：
 
@@ -238,8 +231,9 @@ yuzu-cli logout    # 清除本地会话缓存
 
 ### 外部 Chatbot / Integration
 
-外部 Bot 使用 `config.json` 中独立的 Integration token 调用 REST API，不应复用
-管理员的 session token。服务端按以下链路解析每次请求：
+外部 Bot 使用独立的持久 Integration token 调用 actor resolve，不应复用管理员
+session token。Integration 在服务端数据库中管理；创建和轮换时 token 只显示一次，
+数据库只保存 hash。服务端按以下链路解析每次请求：
 
 ```text
 Integration + adapter + scope ──→ 默认 Room
@@ -252,20 +246,31 @@ Principal + Room ──→ controller grant
 Room grant。Integration token 只证明调用方是受信任网关，不会自动授予
 `room_admin`。
 
-管理员可在 WebUI 的“管理 → 外部集成”完成 scope、subject 和 Room controller
-配置，也可使用 CLI：
+管理员可在 WebUI 的“管理 → 外部集成”创建、改名、停用、轮换或删除 Integration，
+并管理 scope、subject 和 Room controller。CLI 等价流程：
 
 ```bash
+# token 只在 create/rotate-token 的本次输出中出现；立即保存到 Bot secret store
+yuzu-cli integration create astrbot-main "AstrBot 主实例"
 yuzu-cli integration list
 yuzu-cli integration scope bind astrbot-main astrbot group group-123 lobby
 yuzu-cli principal list alice
 yuzu-cli integration subject link astrbot-main astrbot group group-123 user-456 o_abc
 yuzu-cli room controller grant lobby o_abc
+
+# 运维
+yuzu-cli integration rename astrbot-main "AstrBot Gateway"
+yuzu-cli integration disable astrbot-main
+yuzu-cli integration enable astrbot-main
+yuzu-cli integration rotate-token astrbot-main
+yuzu-cli integration delete astrbot-main
 ```
 
-解除操作需要传入与创建时相同的完整键；精确参数以
-`yuzu-cli help integration`、`yuzu-cli help room` 为准。Bot/Plugin 的运行时
-调用流程及 JSON 契约见 [docs/spec-v1.md](docs/spec-v1.md)。
+停用、轮换或删除会立即吊销该 Integration 已签发的 actor session。Bot/Plugin 对
+Room 写请求必须携带由外部平台 event/message ID 派生的 `Idempotency-Key`，安全
+处理 webhook 重投；读请求不需要。解除映射操作需要传入与创建时相同的完整键。
+精确参数见 `yuzu-cli help integration` / `yuzu-cli help room`；运行时 JSON 契约见
+[docs/spec-v1.md](docs/spec-v1.md)。
 
 ### 电台模式
 
@@ -350,7 +355,8 @@ go test ./... -race
 - 流式缓存（tee + 后台续传 + LRU）、下载进度可观测、票据化出流
 - MPV 播放代理（防抖渲染）、控制 CLI、WebUI 与端到端冒烟测试
 - Guest/password/OIDC Principal、持久会话、Room-scoped controller grant
-- Integration actor、外部 scope → Room、subject → Principal 绑定及管理 UI/API
+- 持久 Integration 生命周期、actor session 吊销、外部 scope → Room、subject → Principal 绑定及管理 UI/API
+- Integration actor Room 写请求强制幂等 key、24 小时响应去重与定期清理
 - 凭据 AES-GCM 加密存储与定期健康检查
 
 规划中（spec §8 也列了明确不做的）：

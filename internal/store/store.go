@@ -581,26 +581,40 @@ func (s *Store) DeleteRoom(ctx context.Context, id string) error {
 
 // ---------- 会话持久化 ----------
 
-// SaveSession 写入（或覆盖）一条会话。
+// SaveSession writes a standard session without an Integration source.
 func (s *Store) SaveSession(ctx context.Context, token, identityJSON string, expiresAt int64) error {
+	return s.SaveSessionWithSource(ctx, token, identityJSON, "", expiresAt)
+}
+
+// SaveSessionWithSource writes a session and records the Integration that
+// issued an external actor token. Empty integrationID means a normal session.
+func (s *Store) SaveSessionWithSource(
+	ctx context.Context,
+	token, identityJSON, integrationID string,
+	expiresAt int64,
+) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (token, identity_json, expires_at) VALUES (?,?,?)
-		 ON CONFLICT(token) DO UPDATE SET identity_json=excluded.identity_json, expires_at=excluded.expires_at`,
-		token, identityJSON, expiresAt)
+		`INSERT INTO sessions (token, identity_json, expires_at, integration_id) VALUES (?,?,?,?)
+		 ON CONFLICT(token) DO UPDATE SET
+			identity_json=excluded.identity_json,
+			expires_at=excluded.expires_at,
+			integration_id=excluded.integration_id`,
+		token, identityJSON, expiresAt, integrationID)
 	return err
 }
 
-// SessionRow 一条持久化会话。
+// SessionRow is a persisted session.
 type SessionRow struct {
-	Token        string
-	IdentityJSON string
-	ExpiresAt    int64
+	Token         string
+	IdentityJSON  string
+	IntegrationID string
+	ExpiresAt     int64
 }
 
 // LoadSessions 读出全部未过期会话（启动恢复用）。
 func (s *Store) LoadSessions(ctx context.Context, now int64) ([]SessionRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT token, identity_json, expires_at FROM sessions WHERE expires_at > ?`, now)
+		`SELECT token, identity_json, integration_id, expires_at FROM sessions WHERE expires_at > ?`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -608,7 +622,7 @@ func (s *Store) LoadSessions(ctx context.Context, now int64) ([]SessionRow, erro
 	var out []SessionRow
 	for rows.Next() {
 		var r SessionRow
-		if err := rows.Scan(&r.Token, &r.IdentityJSON, &r.ExpiresAt); err != nil {
+		if err := rows.Scan(&r.Token, &r.IdentityJSON, &r.IntegrationID, &r.ExpiresAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -619,6 +633,11 @@ func (s *Store) LoadSessions(ctx context.Context, now int64) ([]SessionRow, erro
 // DeleteSession 吊销一条会话。
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	return err
+}
+
+func (s *Store) DeleteSessionsByIntegration(ctx context.Context, integrationID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE integration_id = ?`, integrationID)
 	return err
 }
 

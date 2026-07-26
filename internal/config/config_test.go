@@ -3,10 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestLoadIntegrations(t *testing.T) {
+func TestLoadRejectsRemovedIntegrationSecrets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{
 		"integrations": [
@@ -15,14 +16,11 @@ func TestLoadIntegrations(t *testing.T) {
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "unknown field \"integrations\"") {
+		t.Fatalf("Load error = %v, want removed integrations field rejection", err)
 	}
-	if len(cfg.Integrations) != 1 || cfg.Integrations[0].ID != "generic-bridge" || cfg.Integrations[0].Token != "integration-secret" {
-		t.Fatalf("integrations = %#v", cfg.Integrations)
-	}
-	if cfg.Addr != Default().Addr {
-		t.Fatalf("default config fields were not retained: addr = %q", cfg.Addr)
+	if strings.Contains(err.Error(), "integration-secret") {
+		t.Fatalf("Load error leaked removed token: %v", err)
 	}
 }

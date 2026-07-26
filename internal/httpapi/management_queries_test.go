@@ -48,13 +48,15 @@ func setupManagementQueries(t *testing.T) managementQueryFixture {
 	})
 
 	authm := auth.NewManager("", st)
-	integrations, err := auth.NewIntegrationRegistry([]auth.IntegrationCredential{
-		{ID: managementIntegrationID, Token: managementIntegrationSecret},
-		{ID: "bridge-a", Token: managementIntegrationSecretA},
-	})
-	if err != nil {
-		t.Fatal(err)
+	for id, token := range map[string]string{
+		managementIntegrationID: managementIntegrationSecret,
+		"bridge-a":              managementIntegrationSecretA,
+	} {
+		if _, err := st.CreateIntegration(ctx, id, id, auth.HashIntegrationToken(token)); err != nil {
+			t.Fatal(err)
+		}
 	}
+	integrations := auth.NewIntegrationRegistry(st)
 	reg := provider.NewRegistry()
 	roomCache := cache.New(filepath.Join(root, "cache"), 1<<20, st, reg)
 	rooms := room.NewManager(ctx, st, authm, roomCache, reg)

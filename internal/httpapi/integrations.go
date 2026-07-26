@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -53,8 +55,25 @@ type roomGrantRequest struct {
 }
 
 type integrationInfoResponse struct {
-	ID string `json:"id"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Active     bool   `json:"active"`
+	CreatedAt  int64  `json:"created_at"`
+	UpdatedAt  int64  `json:"updated_at"`
+	LastUsedAt *int64 `json:"last_used_at,omitempty"`
 }
+
+type createIntegrationRequest struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type updateIntegrationRequest struct {
+	Name   *string `json:"name"`
+	Active *bool   `json:"active"`
+}
+
+var integrationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 type integrationScopeResponse struct {
 	IntegrationID string `json:"integration_id"`
@@ -85,12 +104,150 @@ func (s *Server) listIntegrations(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
 		return
 	}
-	ids := s.integrations.IDs()
-	integrations := make([]integrationInfoResponse, len(ids))
-	for i, id := range ids {
-		integrations[i] = integrationInfoResponse{ID: id}
+	rows, err := s.st.ListIntegrations(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to list integrations")
+		return
+	}
+	integrations := make([]integrationInfoResponse, len(rows))
+	for i, row := range rows {
+		integrations[i] = integrationResponse(row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"integrations": integrations})
+}
+
+func (s *Server) createIntegration(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
+	if !ok {
+		return
+	}
+	var body createIntegrationRequest
+	if err := decodeIntegrationJSON(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	body.ID = strings.TrimSpace(body.ID)
+	body.Name = strings.TrimSpace(body.Name)
+	if !integrationIDPattern.MatchString(body.ID) || body.Name == "" || len(body.Name) > 100 {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid integration id or name")
+		return
+	}
+	token, tokenHash, err := auth.NewIntegrationToken()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to generate integration token")
+		return
+	}
+	integration, err := s.st.CreateIntegration(r.Context(), body.ID, body.Name, tokenHash)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "conflict", "integration already exists")
+		return
+	}
+	s.audit(r.Context(), actor.ID, "integration.create", integration.ID, map[string]any{
+		"name": integration.Name,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"integration": integrationResponse(integration),
+		"token":       token,
+	})
+}
+
+func (s *Server) updateIntegration(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	current, err := s.st.GetIntegration(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "integration not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load integration")
+		return
+	}
+	var body updateIntegrationRequest
+	if err := decodeIntegrationJSON(r, &body); err != nil || (body.Name == nil && body.Active == nil) {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	name, active := current.Name, current.Active
+	if body.Name != nil {
+		name = strings.TrimSpace(*body.Name)
+		if name == "" || len(name) > 100 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid integration name")
+			return
+		}
+	}
+	if body.Active != nil {
+		active = *body.Active
+	}
+	updated, err := s.st.UpdateIntegration(r.Context(), id, name, active)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to update integration")
+		return
+	}
+	if current.Active && !updated.Active {
+		s.authm.RevokeIntegration(id)
+	}
+	s.audit(r.Context(), actor.ID, "integration.update", id, map[string]any{
+		"name": updated.Name, "active": updated.Active,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"integration": integrationResponse(updated)})
+}
+
+func (s *Server) deleteIntegration(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.st.DeleteIntegration(r.Context(), id); errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "integration not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to delete integration")
+		return
+	}
+	s.authm.RevokeIntegration(id)
+	s.audit(r.Context(), actor.ID, "integration.delete", id, map[string]any{})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) rotateIntegrationToken(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	token, tokenHash, err := auth.NewIntegrationToken()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to generate integration token")
+		return
+	}
+	integration, err := s.st.RotateIntegrationToken(r.Context(), id, tokenHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "integration not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to rotate integration token")
+		return
+	}
+	s.authm.RevokeIntegration(id)
+	s.audit(r.Context(), actor.ID, "integration.token.rotate", id, map[string]any{})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"integration": integrationResponse(integration),
+		"token":       token,
+	})
+}
+
+func integrationResponse(integration store.Integration) integrationInfoResponse {
+	return integrationInfoResponse{
+		ID: integration.ID, Name: integration.Name, Active: integration.Active,
+		CreatedAt: integration.CreatedAt, UpdatedAt: integration.UpdatedAt,
+		LastUsedAt: integration.LastUsedAt,
+	}
 }
 
 func (s *Server) listIntegrationScopes(w http.ResponseWriter, r *http.Request) {
@@ -230,9 +387,18 @@ func (s *Server) resolveIntegrationActor(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	actorToken, expiresAt, err := s.authm.IssueSessionWithTTL(identity, integrationActorSessionTTL)
+	actorToken, expiresAt, err := s.authm.IssueIntegrationSession(
+		identity, integrationID, integrationActorSessionTTL,
+	)
 	if err != nil {
 		writeErr(w, http.StatusForbidden, "forbidden", "principal is unavailable")
+		return
+	}
+	credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	current, err := s.integrations.ValidateToken(r.Context(), credential)
+	if err != nil || current.ID != integrationID {
+		s.authm.Revoke(actorToken)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "integration credential changed during actor resolve")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -345,7 +511,7 @@ func (s *Server) manageIntegrationScope(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, http.StatusInternalServerError, "internal", "failed to remove scope binding")
 			return
 		}
-		s.st.Audit(r.Context(), actor.ID, "integration.scope.unbind", integrationID, "{}")
+		s.audit(r.Context(), actor.ID, "integration.scope.unbind", integrationID, body)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
@@ -356,7 +522,7 @@ func (s *Server) manageIntegrationScope(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusConflict, "conflict", "failed to bind scope")
 		return
 	}
-	s.st.Audit(r.Context(), actor.ID, "integration.scope.bind", integrationID, "{}")
+	s.audit(r.Context(), actor.ID, "integration.scope.bind", integrationID, body)
 	writeJSON(w, http.StatusOK, map[string]any{"scope": map[string]any{
 		"integration_id": integrationID, "adapter_id": body.AdapterID,
 		"scope_type": body.ScopeType, "scope_id": body.ScopeID, "room_id": body.RoomID,
@@ -411,7 +577,7 @@ func (s *Server) manageIntegrationSubject(w http.ResponseWriter, r *http.Request
 			writeErr(w, http.StatusInternalServerError, "internal", "failed to remove subject link")
 			return
 		}
-		s.st.Audit(r.Context(), actor.ID, "integration.subject.unlink", integrationID, "{}")
+		s.audit(r.Context(), actor.ID, "integration.subject.unlink", integrationID, body)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
@@ -423,7 +589,7 @@ func (s *Server) manageIntegrationSubject(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusConflict, "conflict", "failed to link subject")
 		return
 	}
-	s.st.Audit(r.Context(), actor.ID, "integration.subject.link", integrationID, "{}")
+	s.audit(r.Context(), actor.ID, "integration.subject.link", integrationID, body)
 	writeJSON(w, http.StatusOK, map[string]any{"subject": map[string]any{
 		"integration_id": integrationID, "adapter_id": body.AdapterID,
 		"scope_type": body.ScopeType, "scope_id": body.ScopeID,
@@ -482,7 +648,7 @@ func (s *Server) manageRoomGrant(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "internal", "failed to revoke grant")
 			return
 		}
-		s.st.Audit(r.Context(), actor.ID, "room.grant.revoke", body.RoomID, "{}")
+		s.audit(r.Context(), actor.ID, "room.grant.revoke", body.RoomID, body)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
@@ -491,8 +657,20 @@ func (s *Server) manageRoomGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "conflict", "failed to grant capability")
 		return
 	}
-	s.st.Audit(r.Context(), actor.ID, "room.grant.set", body.RoomID, "{}")
+	s.audit(r.Context(), actor.ID, "room.grant.set", body.RoomID, body)
 	writeJSON(w, http.StatusOK, map[string]any{"grant": body})
+}
+
+func (s *Server) audit(
+	ctx context.Context,
+	actorID, action, target string,
+	detail any,
+) {
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		return
+	}
+	_ = s.st.Audit(ctx, actorID, action, target, string(encoded))
 }
 
 func (s *Server) authenticateIntegration(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -501,17 +679,20 @@ func (s *Server) authenticateIntegration(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "integration bearer token required")
 		return "", false
 	}
-	integrationID, ok := s.integrations.ResolveToken(token)
-	if !ok {
+	integration, err := s.integrations.ResolveToken(r.Context(), token)
+	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid integration bearer token")
 		return "", false
 	}
-	return integrationID, true
+	return integration.ID, true
 }
 
 func (s *Server) integrationConfigured(w http.ResponseWriter, integrationID string) bool {
-	if !s.integrations.Contains(integrationID) {
-		writeErr(w, http.StatusNotFound, "not_found", "integration not configured")
+	if _, err := s.st.GetIntegration(context.Background(), integrationID); errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "integration not found")
+		return false
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load integration")
 		return false
 	}
 	return true

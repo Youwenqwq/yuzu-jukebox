@@ -59,6 +59,84 @@ func init() {
 				return withCtx(cmdIntegrations)
 			},
 		},
+		"integration create": {
+			usage:  "integration create <id> <name>",
+			desc:   "创建 Integration 并签发 token",
+			detail: "创建持久 Integration；token 只在本次响应中显示，请立即保存。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("integration create")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationCreate(ctx, args[0], args[1])
+				})
+			},
+		},
+		"integration rename": {
+			usage:  "integration rename <id> <name>",
+			desc:   "修改 Integration 名称",
+			detail: "修改 Integration 的显示名称，不影响 ID 或 token。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("integration rename")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationRename(ctx, args[0], args[1])
+				})
+			},
+		},
+		"integration enable": {
+			usage:  "integration enable <id>",
+			desc:   "启用 Integration",
+			detail: "恢复 Integration token 的 actor resolve 权限。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("integration enable")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationSetActive(ctx, args[0], true)
+				})
+			},
+		},
+		"integration disable": {
+			usage:  "integration disable <id>",
+			desc:   "停用 Integration",
+			detail: "立即拒绝 Integration token 并吊销由其签发的 actor sessions。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("integration disable")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationSetActive(ctx, args[0], false)
+				})
+			},
+		},
+		"integration rotate-token": {
+			usage:  "integration rotate-token <id>",
+			desc:   "轮换 Integration token",
+			detail: "旧 token 与已有 actor sessions 立即失效；新 token 只显示一次。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("integration rotate-token")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationRotateToken(ctx, args[0])
+				})
+			},
+		},
+		"integration delete": {
+			usage:  "integration delete <id>",
+			desc:   "删除 Integration",
+			detail: "删除 Integration、actor sessions、scope 与 subject 绑定；不会删除 Principal 或 Room grants。\n\n需要 room_admin 角色。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("integration delete")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdIntegrationDelete(ctx, args[0])
+				})
+			},
+		},
 		"integration scope list": {
 			usage:  "integration scope list <integration_id>",
 			desc:   "列出 Integration 的 external scope 绑定",

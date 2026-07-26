@@ -26,11 +26,12 @@ const (
 )
 
 type Identity struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Kind        string   `json:"kind"` // guest | password | oidc
-	Roles       []string `json:"roles"`
-	OIDCSubject string   `json:"-"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Kind          string   `json:"kind"` // guest | password | oidc
+	Roles         []string `json:"roles"`
+	OIDCSubject   string   `json:"-"`
+	IntegrationID string   `json:"-"`
 }
 
 func (id Identity) HasRole(role string) bool {
@@ -49,8 +50,9 @@ var (
 )
 
 type session struct {
-	identity  Identity
-	expiresAt time.Time
+	identity      Identity
+	expiresAt     time.Time
+	integrationID string
 }
 
 type ticket struct {
@@ -103,7 +105,9 @@ func NewManager(adminPassword string, st *store.Store) *Manager {
 			if json.Unmarshal([]byte(r.IdentityJSON), &id) != nil || id.ID == "" {
 				continue
 			}
-			m.sessions[r.Token] = session{identity: id, expiresAt: time.UnixMilli(r.ExpiresAt)}
+			m.sessions[r.Token] = session{
+				identity: id, integrationID: r.IntegrationID, expiresAt: time.UnixMilli(r.ExpiresAt),
+			}
 			previous, ok := legacyPrincipals[id.ID]
 			if !ok || r.ExpiresAt > previous.expiresAt {
 				legacyPrincipals[id.ID] = legacyPrincipal{identity: id, expiresAt: r.ExpiresAt}
@@ -182,7 +186,7 @@ func (m *Manager) IssueAuthenticatedSession(id Identity) (string, error) {
 	if err := m.persistPrincipal(id); err != nil {
 		return "", err
 	}
-	token, _, err := m.issueSession(id, m.sessionTTL)
+	token, _, err := m.issueSession(id, m.sessionTTL, "")
 	return token, err
 }
 
@@ -200,17 +204,46 @@ func (m *Manager) IssueSession(id Identity) string {
 // IssueSessionWithTTL issues a short-lived session for an existing principal.
 // It never writes authorization state supplied by the caller.
 func (m *Manager) IssueSessionWithTTL(id Identity, ttl time.Duration) (string, int64, error) {
+	id, err := m.currentIdentity(id)
+	if err != nil {
+		return "", 0, err
+	}
+	return m.issueSession(id, ttl, "")
+}
+
+// IssueIntegrationSession issues a short-lived actor session tied to its
+// originating Integration. Disabling, deleting or rotating that Integration
+// can revoke only these sessions without affecting the Principal's own login.
+func (m *Manager) IssueIntegrationSession(
+	id Identity,
+	integrationID string,
+	ttl time.Duration,
+) (string, int64, error) {
+	id, err := m.currentIdentity(id)
+	if err != nil {
+		return "", 0, err
+	}
 	if m.st != nil {
-		principal, err := m.st.GetPrincipal(context.Background(), id.ID)
-		if err != nil {
-			return "", 0, err
-		}
-		if !principal.Active {
+		integration, err := m.st.GetIntegration(context.Background(), integrationID)
+		if err != nil || !integration.Active {
 			return "", 0, ErrSessionNotFound
 		}
-		id = identityFromPrincipal(principal)
 	}
-	return m.issueSession(id, ttl)
+	return m.issueSession(id, ttl, integrationID)
+}
+
+func (m *Manager) currentIdentity(id Identity) (Identity, error) {
+	if m.st == nil {
+		return id, nil
+	}
+	principal, err := m.st.GetPrincipal(context.Background(), id.ID)
+	if err != nil {
+		return Identity{}, err
+	}
+	if !principal.Active {
+		return Identity{}, ErrSessionNotFound
+	}
+	return identityFromPrincipal(principal), nil
 }
 
 func (m *Manager) persistPrincipal(id Identity) error {
@@ -228,7 +261,12 @@ func (m *Manager) persistPrincipal(id Identity) error {
 	return m.st.UpsertPrincipal(context.Background(), principalFromIdentity(id, true))
 }
 
-func (m *Manager) issueSession(id Identity, ttl time.Duration) (string, int64, error) {
+func (m *Manager) issueSession(
+	id Identity,
+	ttl time.Duration,
+	integrationID string,
+) (string, int64, error) {
+	id.IntegrationID = integrationID
 	token := randHex(16)
 	expiresAt := time.Now().Add(ttl).UTC().Truncate(time.Millisecond)
 	expiresAtMS := expiresAt.UnixMilli()
@@ -237,12 +275,16 @@ func (m *Manager) issueSession(id Identity, ttl time.Duration) (string, int64, e
 		if err != nil {
 			return "", 0, err
 		}
-		if err := m.st.SaveSession(context.Background(), token, string(data), expiresAtMS); err != nil {
+		if err := m.st.SaveSessionWithSource(
+			context.Background(), token, string(data), integrationID, expiresAtMS,
+		); err != nil {
 			return "", 0, err
 		}
 	}
 	m.mu.Lock()
-	m.sessions[token] = session{identity: id, expiresAt: expiresAt}
+	m.sessions[token] = session{
+		identity: id, integrationID: integrationID, expiresAt: expiresAt,
+	}
 	m.mu.Unlock()
 	return token, expiresAtMS, nil
 }
@@ -255,6 +297,41 @@ func (m *Manager) Revoke(token string) {
 	if m.st != nil {
 		_ = m.st.DeleteSession(context.Background(), token)
 	}
+}
+
+// RevokeIntegration invalidates every actor session issued through one
+// Integration without touching the same Principals' WebUI or CLI sessions.
+func (m *Manager) RevokeIntegration(integrationID string) {
+	m.mu.Lock()
+	for token, current := range m.sessions {
+		if current.integrationID == integrationID {
+			delete(m.sessions, token)
+		}
+	}
+	m.mu.Unlock()
+	if m.st != nil {
+		_ = m.st.DeleteSessionsByIntegration(context.Background(), integrationID)
+	}
+}
+
+// PruneExpired removes stale sessions from memory and persistent storage.
+func (m *Manager) PruneExpired(ctx context.Context, now time.Time) error {
+	m.mu.Lock()
+	for token, current := range m.sessions {
+		if !now.Before(current.expiresAt) {
+			delete(m.sessions, token)
+		}
+	}
+	for token, current := range m.tickets {
+		if !now.Before(current.expiresAt) {
+			delete(m.tickets, token)
+		}
+	}
+	m.mu.Unlock()
+	if m.st == nil {
+		return nil
+	}
+	return m.st.PruneSessions(ctx, now.UnixMilli())
 }
 
 // Session 按 token 取身份。
@@ -280,7 +357,18 @@ func (m *Manager) Session(token string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	return identityFromPrincipal(principal), nil
+	if s.integrationID != "" {
+		integration, err := m.st.GetIntegration(context.Background(), s.integrationID)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && !integration.Active) {
+			return Identity{}, ErrSessionNotFound
+		}
+		if err != nil {
+			return Identity{}, err
+		}
+	}
+	id := identityFromPrincipal(principal)
+	id.IntegrationID = s.integrationID
+	return id, nil
 }
 
 // IssueTicket 签发某身份拉取某曲目的出流票据。

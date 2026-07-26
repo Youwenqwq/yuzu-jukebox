@@ -33,16 +33,6 @@ type App struct {
 }
 
 func New(ctx context.Context, cfg config.Config) (*App, error) {
-	integrationCredentials := make([]auth.IntegrationCredential, len(cfg.Integrations))
-	for i, credential := range cfg.Integrations {
-		integrationCredentials[i] = auth.IntegrationCredential{
-			ID: credential.ID, Token: credential.Token,
-		}
-	}
-	integrations, err := auth.NewIntegrationRegistry(integrationCredentials)
-	if err != nil {
-		return nil, fmt.Errorf("integrations: %w", err)
-	}
 
 	for _, dir := range []string{cfg.MediaDir, cfg.CacheDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -58,8 +48,10 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	integrations := auth.NewIntegrationRegistry(st)
 
 	authm := auth.NewManager(cfg.AdminPassword, st)
+	go runSessionJanitor(ctx, authm, st)
 	reg := provider.NewRegistry()
 	lp := local.New(cfg.MediaDir, st)
 	reg.Register(lp)
@@ -100,6 +92,24 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		Store:   st,
 		Control: controls,
 	}, nil
+}
+
+func runSessionJanitor(ctx context.Context, manager *auth.Manager, st *store.Store) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if err := manager.PruneExpired(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[auth] session prune failed: %v", err)
+			}
+			if err := st.PruneIdempotency(ctx, now.UnixMilli()); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[http] idempotency prune failed: %v", err)
+			}
+		}
+	}
 }
 
 func runCacheJanitor(ctx context.Context, c *cache.Cache, unusedDays int) {

@@ -11,11 +11,12 @@ import (
 )
 
 type restExpectation struct {
-	method     string
-	requestURI string
-	token      string
-	body       any
-	response   string
+	method         string
+	requestURI     string
+	token          string
+	idempotencyKey string
+	body           any
+	response       string
 }
 
 func expectREST(t *testing.T, want restExpectation) *httptest.Server {
@@ -31,6 +32,9 @@ func expectREST(t *testing.T, want restExpectation) *httptest.Server {
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer "+want.token {
 			t.Errorf("Authorization = %q, want %q", got, "Bearer "+want.token)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != want.idempotencyKey {
+			t.Errorf("Idempotency-Key = %q, want %q", got, want.idempotencyKey)
 		}
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -114,13 +118,15 @@ func TestRESTRoomCapabilities(t *testing.T) {
 func TestRESTRoomQueue(t *testing.T) {
 	t.Run("add one", func(t *testing.T) {
 		server := expectREST(t, restExpectation{
-			method:     http.MethodPost,
-			requestURI: "/api/v1/rooms/room%2Fone/queue",
-			token:      "actor-token",
-			body:       RoomQueueAddRequest{TrackRef: "provider:track/1"},
-			response:   `{"entry_ids":["entry-1"]}`,
+			method:         http.MethodPost,
+			requestURI:     "/api/v1/rooms/room%2Fone/queue",
+			token:          "actor-token",
+			body:           RoomQueueAddRequest{TrackRef: "provider:track/1"},
+			idempotencyKey: "platform-event-42",
+			response:       `{"entry_ids":["entry-1"]}`,
 		})
-		entryID, err := RESTRoomQueueAdd(context.Background(), server.URL, "actor-token", "room/one", "provider:track/1")
+		ctx := WithIdempotencyKey(context.Background(), "platform-event-42")
+		entryID, err := RESTRoomQueueAdd(ctx, server.URL, "actor-token", "room/one", "provider:track/1")
 		if err != nil {
 			t.Fatal(err)
 		}

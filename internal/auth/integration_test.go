@@ -1,55 +1,58 @@
 package auth
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
-func TestIntegrationRegistryValidation(t *testing.T) {
-	tests := []struct {
-		name    string
-		entries []IntegrationCredential
-	}{
-		{name: "empty id", entries: []IntegrationCredential{{Token: "token-a"}}},
-		{name: "blank id", entries: []IntegrationCredential{{ID: "  ", Token: "token-a"}}},
-		{name: "empty token", entries: []IntegrationCredential{{ID: "bridge"}}},
-		{name: "blank token", entries: []IntegrationCredential{{ID: "bridge", Token: "\t"}}},
-		{name: "duplicate id", entries: []IntegrationCredential{
-			{ID: "bridge", Token: "token-a"}, {ID: "bridge", Token: "token-b"},
-		}},
-		{name: "duplicate token", entries: []IntegrationCredential{
-			{ID: "bridge-a", Token: "same-secret"}, {ID: "bridge-b", Token: "same-secret"},
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := NewIntegrationRegistry(test.entries)
-			if !errors.Is(err, ErrInvalidIntegrationCredentials) {
-				t.Fatalf("NewIntegrationRegistry error = %v, want ErrInvalidIntegrationCredentials", err)
-			}
-			if strings.Contains(err.Error(), "same-secret") {
-				t.Fatalf("validation error leaked integration secret: %v", err)
-			}
-		})
-	}
-}
-
-func TestIntegrationRegistryResolvesOnlyConfiguredTokens(t *testing.T) {
-	registry, err := NewIntegrationRegistry([]IntegrationCredential{
-		{ID: "bridge-a", Token: "token-a"},
-		{ID: "bridge-b", Token: "token-b-with-a-different-length"},
-	})
+func TestNewIntegrationTokenIsOpaqueAndHashable(t *testing.T) {
+	first, firstHash, err := NewIntegrationToken()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if integrationID, ok := registry.ResolveToken("token-b-with-a-different-length"); !ok || integrationID != "bridge-b" {
-		t.Fatalf("ResolveToken = %q, %v", integrationID, ok)
+	second, secondHash, err := NewIntegrationToken()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if integrationID, ok := registry.ResolveToken("not-configured"); ok || integrationID != "" {
-		t.Fatalf("unknown ResolveToken = %q, %v", integrationID, ok)
+	if !strings.HasPrefix(first, "yzi_") || first == second {
+		t.Fatalf("tokens are not distinct opaque credentials: %q %q", first, second)
 	}
-	if !registry.Contains("bridge-a") || registry.Contains("missing") {
-		t.Fatal("Contains did not reflect configured integration IDs")
+	if len(firstHash) != 32 || len(secondHash) != 32 {
+		t.Fatalf("hash lengths = %d, %d", len(firstHash), len(secondHash))
+	}
+	if string(firstHash) != string(HashIntegrationToken(first)) {
+		t.Fatal("returned hash does not match token")
+	}
+}
+
+func TestIntegrationRegistryUsesCurrentPersistentCredential(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "auth.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	const token = "integration-secret"
+	if _, err := st.CreateIntegration(ctx, "bridge", "Bridge", HashIntegrationToken(token)); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewIntegrationRegistry(st)
+	resolved, err := registry.ResolveToken(ctx, token)
+	if err != nil || resolved.ID != "bridge" {
+		t.Fatalf("ResolveToken = %#v, %v", resolved, err)
+	}
+	if resolved, err := registry.ResolveToken(ctx, "wrong"); !errors.Is(err, ErrInvalidIntegrationCredentials) || resolved.ID != "" {
+		t.Fatalf("wrong token ResolveToken = %#v, %v", resolved, err)
+	}
+	if _, err := st.UpdateIntegration(ctx, "bridge", "Bridge", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.ResolveToken(ctx, token); !errors.Is(err, ErrInvalidIntegrationCredentials) {
+		t.Fatalf("disabled token error = %v", err)
 	}
 }

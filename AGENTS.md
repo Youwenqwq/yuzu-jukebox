@@ -6,7 +6,7 @@ Music jukebox server: multi-room, multi-provider, queue-based playback with real
 
 Three binaries:
 - `yuzu-server` — the HTTP+WS server
-- `yuzu-cli` — CLI control client (read-only reference)
+- `yuzu-cli` — CLI control and administration client
 - `yuzu-agent` — MPV-based headless playback renderer (player plane)
 
 ## Directory Layout
@@ -21,6 +21,7 @@ internal/
   auth/             — session management, guest/OIDC auth, ticket auth, roles
   cache/            — LRU disk cache for streaming audio
   client/           — Go reference implementation of WS protocol
+  control/           — shared room command/query service and room-scoped authorization
   config/           — Config struct, JSON deserialization, defaults
   credmon/          — hot-reload credential monitor for providers
   httpapi/          — REST handlers: /api/v1/*, /stream/v1/*, /api/v1/cover/*
@@ -40,9 +41,11 @@ data/
 ## Data Flow (Key Paths)
 
 ```
-Web Client ←→ /ws/v1 (auth → room.join → playback/queue/listeners broadcast)
+Web Client ←→ REST + /ws/v1 (auth → room join/control → real-time broadcasts)
                 ↓
-Admin/CLI   ←→ /api/v1/* (REST: rooms, search, upload, players)
+Admin/CLI   ←→ /api/v1/* (rooms, media, integrations, grants)
+                ↓
+IM Gateway  ←→ Integration credential → actor resolve → standard Room REST/WS
                 ↓
 Renderer    ←→ /stream/v1/{ref}?ticket=...  (HTTP audio streaming, Range supported)
                 ↓
@@ -56,6 +59,8 @@ Cover       ←→ /api/v1/cover/{ref}  (proxy to provider cover, unauthenticate
 3. Session token used as `Authorization: Bearer <token>` for REST
 4. Stream: ticket-based auth in query param (for `<audio>` tags, no headers)
 5. Cover: **no auth required** (for `<img>` tags)
+6. Integration: a long-lived hashed machine credential resolves an external scope/subject to a 5-minute actor session
+7. Authorization always reloads the current Principal and Room grant; Integration credentials do not carry Yuzu roles
 
 ### Room → Playback Flow
 
@@ -79,13 +84,20 @@ Cover       ←→ /api/v1/cover/{ref}  (proxy to provider cover, unauthenticate
   ```json
   {"error": {"code": "not_found", "message": "room not found"}}
   ```
-- All REST endpoints except `/api/v1/auth/guest`, `/api/v1/auth/oidc/config`, and `/api/v1/cover/{ref}` require roles via `requireRole(w, r, auth.RoleListener)` or higher.
+- Public/auth-special endpoints are explicit exceptions. Standard REST uses session Bearer auth; actor resolve uses an Integration Bearer credential; management routes require `room_admin`.
 
 ### WebSocket Protocol
 - JSON text frames with envelope: `{"type": "...", "ref": "...", "data": {...}}`
 - ref is client-generated (loop counter or UUID), echoed back by server
 - Broadcast messages (playback/queue/listeners.changed) have no ref
 - See `docs/spec-v1.md` for full protocol spec
+
+### Integration Boundary
+- Integration records and token hashes are persistent database resources managed by `room_admin`; plaintext tokens are returned only on create/rotation.
+- External `(integration, adapter, scope)` maps to a default Room; adding `subject` maps to a persistent Principal.
+- Unlinked subjects resolve to stable synthetic guest Principals. Linked OIDC Principals share the same roles and Room grants as WebUI/CLI sessions.
+- Integration adapters translate platform events into standard Room REST/WS. There is no platform-specific `/im/v1` protocol in the server.
+- External write retries use `Idempotency-Key`; never invent client-side deduplication from song metadata or message text.
 
 ### WS Handler Initialization
 ```go
@@ -128,8 +140,8 @@ All fields optional if not needed. `secret_key` auto-generated on first run.
 
 - **Driver**: `github.com/jmoiron/sqlx` (sqlite3)
 - **Migrations**: goose, in `internal/store/migrations/`
-- **Key tables**: `sessions`, `rooms`, `room_queue`, `playlists`, `playlist_items`, `credentials`
-- **Encryption**: `credentials` table AES-GCM encrypted with `secret_key`. Lost key = all provider cookies unreadable.
+- **Key tables**: `sessions`, `principals/users`, `integrations`, `external_scope_rooms`, `external_identity_links`, `room_principal_grants`, `idempotency_records`, `rooms`, `room_queue`, `playlists`, `playlist_items`, `credentials`
+- **Secrets**: provider credentials use AES-GCM with `secret_key`; Integration tokens are high-entropy bearer credentials stored only as hashes and shown once.
 
 ## Build & Run
 
@@ -151,8 +163,17 @@ go build ./cmd/yuzu-agent            # → bin/yuzu-agent
 |---|---|
 | `listener` | See room state, receive playback |
 | `requester` | Add to queue, remove own entries |
-| `room_admin` | Manage room, control playback, manage players |
+| `room_admin` | Manage rooms, integrations and grants; controller in every Room |
 | `media_admin` | Manage media, upload, provider credentials |
+| Room grant `controller` | Control playback, radio and queue ordering in one Room; not a global role |
+
+## Planned Identity Follow-ups
+
+Keep these separate from Integration credential lifecycle work:
+
+1. **OIDC self-service IM binding (priority)** — authenticated OIDC users generate a short-lived, one-time code and redeem it from the target IM subject through a trusted Integration, proving ownership without an administrator copying Principal IDs.
+2. **Principal lifecycle administration** — add first-party disable/enable, link/grant inspection, and bulk external-access revocation. The persisted `active` flag already enforces disabled Principals, but no complete admin workflow exists yet.
+3. **OIDC role refresh/revocation strategy** — roles currently refresh when OIDC login updates the Principal; IdP-side removal is not pushed immediately. Choose webhook/SCIM/periodic refresh later rather than implying real-time revocation.
 
 ## Agent Caveats
 

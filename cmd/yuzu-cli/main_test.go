@@ -10,6 +10,7 @@ func TestCommandForArgsRoutesNestedCommands(t *testing.T) {
 		wantRest  int
 	}{
 		{name: "three levels", args: []string{"integration", "scope", "bind", "bridge", "adapter", "group", "42", "lobby"}, wantUsage: "integration scope bind <integration_id> <adapter_id> <scope_type> <scope_id> <room_id>", wantRest: 5},
+		{name: "integration lifecycle", args: []string{"integration", "create", "bridge", "Bridge"}, wantUsage: "integration create <id> <name>", wantRest: 2},
 		{name: "room controller", args: []string{"room", "controller", "grant", "lobby", "principal-1"}, wantUsage: "room controller grant <room> <principal_id>", wantRest: 2},
 		{name: "two levels", args: []string{"principal", "list", "alice"}, wantUsage: "principal list [query] [-limit 50]", wantRest: 1},
 		{name: "existing command", args: []string{"queue", "del", "lobby", "entry-1"}, wantUsage: "queue del <room> <entry_id>", wantRest: 2},
@@ -36,6 +37,12 @@ func TestManagementCommandsRejectMissingArgs(t *testing.T) {
 		name string
 		args []string
 	}{
+		{name: "integration create", args: []string{"bridge"}},
+		{name: "integration rename", args: []string{"bridge"}},
+		{name: "integration enable"},
+		{name: "integration disable"},
+		{name: "integration rotate-token"},
+		{name: "integration delete"},
 		{name: "integration scope list"},
 		{name: "integration scope bind", args: []string{"bridge", "adapter", "group", "42"}},
 		{name: "integration scope unbind", args: []string{"bridge", "adapter", "group", "42"}},

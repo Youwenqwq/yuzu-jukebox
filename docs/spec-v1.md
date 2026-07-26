@@ -169,17 +169,11 @@ controller(room, principal)
 
 ### 3.5 Integration credential
 
-可信 Integration 由服务端配置文件根级 `integrations` 静态配置：
+可信 Integration 是数据库中的持久资源，由 `room_admin` 通过 6.4 的管理 API、WebUI 或 CLI 创建。创建与轮换时服务端生成高熵 token；**明文只在该次响应中返回一次**，数据库只保存 SHA-256 hash。
 
-```json
-{
-  "integrations": [
-    { "id": "astrbot-main", "token": "<高熵静态密钥>" }
-  ]
-}
-```
-
-- 配置形状严格为 `{id, token}`；两者均不得为空，`id` 与 `token` 各自不得重复，否则服务端启动失败。
+- Integration ID 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`；名称 trim 后必须为 1–100 个字符。
+- Integration 有 `active` 状态。停用、token 轮换或删除会立即吊销该 Integration 已签发的全部 actor session；旧 token 下一次 resolve 也立即失败。
+- 删除会级联清理该 Integration 的 scope、subject、actor session 与幂等记录，但不删除 Principal 或 Room grant。Principal/grant 可由管理员独立复用或清理。
 - Integration token 只证明“哪个可信 Integration 正在请求 actor resolve”；**它本身没有 Yuzu identity、role 或 Room grant**。
 - Integration token 只用于 `POST /api/v1/integrations/actors/resolve`。把它用于房间 REST、管理 REST 或 WS session 认证会得到 `unauthorized`。
 
@@ -436,7 +430,8 @@ pause│  │resume
 - 端点权限以 6.2 为准。受保护的标准 REST 使用 `Authorization: Bearer <session_token>`，token 可来自 guest/OIDC 登录或 3.6 的 `actor_token`；Integration token 不是标准 session。guest/OIDC/config 与 cover 是公开端点，actor resolve 改用 Integration token，logout 只要求非空 Bearer 值，stream 改用查询参数 ticket。
 - Server 返回领域 JSON，不返回已经排版的聊天文本。Integration Client 自行把结果转换成 AstrBot 消息链、游戏 UI、终端文本等。
 - 客户端 MUST 忽略**响应**中的未知字段。6.3 中带 JSON body 的 Room 控制端点与 6.4 的 Integration 端点采用严格 JSON 解码：未知字段、类型不符、多个 JSON 值均返回 HTTP 400 `bad_request`；Room 控制 JSON 解码器最多读取 1 MiB。
-- 当前 v1 **没有 `Idempotency-Key` 合同或去重存储**。不得虚构该请求头的语义；尤其 `POST .../queue` 在响应丢失后的盲目重试可能重复入队。
+- 6.3 的五个 Room 写端点支持 `Idempotency-Key`：`POST queue`、`DELETE queue/{entry_id}`、`POST playback`、`POST radio`、`DELETE radio`。Integration actor session 调用这些端点时此 header **必填**；普通 guest/OIDC session 可选。key 最长 200 bytes，应使用外部平台 event/message ID 派生的稳定值。
+- 去重作用域是 `(actor_id, integration_id, key, HTTP method, escaped path)`。同一作用域和逐字节相同的 request body 在 24 小时内重放缓存的非 5xx status/body，并返回 `Idempotency-Replayed: true`；同 key 不同 body 返回 409 `idempotency_conflict`；首个请求仍处理中返回 409 `request_in_progress`。5xx 不缓存，可安全重试。
 - REST 错误统一使用以下 envelope，客户端按 `error.code` 分支，不按 `message` 分支：
 
 ```json
@@ -458,7 +453,11 @@ pause│  │resume
 | `POST /api/v1/auth/oidc` | — | OIDC 认证，body `{"id_token","access_token"?}`；返回 `{identity, session_token}`；未启用 404 |
 | `GET /api/v1/auth/oidc/config` | — | 公开 OIDC 配置：issuer / client_id / client_ids（含 extra_client_ids）；未启用 404 |
 | `DELETE /api/v1/auth/session` | 非空 Bearer token | 按所给 token 吊销会话（即使已失效也返回成功）；缺 Authorization 时 401 |
-| `GET /api/v1/integrations` | `room_admin` | 已配置 Integration 的公开 ID 列表；绝不返回 token |
+| `GET /api/v1/integrations` | `room_admin` | 持久 Integration 元数据列表；绝不返回 token/hash |
+| `POST /api/v1/integrations` | `room_admin` | 创建 Integration，HTTP 201；明文 token 只在本次响应返回 |
+| `PATCH /api/v1/integrations/{id}` | `room_admin` | 修改名称和/或 active；停用立即吊销 actor sessions |
+| `POST /api/v1/integrations/{id}/token` | `room_admin` | 轮换 token；旧 token 与 actor sessions 立即失效，新 token 只返回一次 |
+| `DELETE /api/v1/integrations/{id}` | `room_admin` | 删除 Integration 及其 scope/subject/session/idempotency 数据 |
 | `POST /api/v1/integrations/actors/resolve` | Integration token | external scope/subject → 5 分钟标准 actor session（见 3.6、6.4） |
 | `GET /api/v1/integrations/{id}/scopes` | `room_admin` | 该 Integration 的全部 external scope→Room 绑定，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/scopes` | `room_admin` | 绑定/解绑 external scope 的默认 Room |
@@ -576,9 +575,9 @@ pause│  │resume
 
 注意：WS 对队列上限仍使用 `queue_full` / `quota_exceeded`；当前合同 A 将这两类状态冲突统一映射为 HTTP 409 `conflict`。
 
-### 6.4 Integration 映射与 Room grant 管理
+### 6.4 Integration 生命周期、映射与 Room grant 管理
 
-actor resolve 使用 Integration token；本节其余管理端点反而必须使用具有当前 `room_admin` role 的**标准 session**。Integration token 本身调用这些端点会是 401，普通 actor token 默认只有 listener/requester，调用会是 403。
+actor resolve 使用 Integration token；本节其余管理端点必须使用具有当前 `room_admin` role 的**标准 session**。Integration token 本身调用这些端点会是 401，普通 actor token 默认只有 listener/requester，调用会是 403。
 
 **Resolve：**
 
@@ -589,15 +588,28 @@ actor resolve 使用 Integration token；本节其余管理端点反而必须使
 
 | 方法与路径 | HTTP 200 JSON 示例 |
 |---|---|
-| `GET /api/v1/integrations` | `{"integrations":[{"id":"generic-bridge"}]}` |
+| `GET /api/v1/integrations` | `{"integrations":[{"id":"generic-bridge","name":"Generic bridge","active":true,"created_at":1720000000000,"updated_at":1720000000000,"last_used_at":1720000010000}]}` |
 | `GET /api/v1/integrations/{id}/scopes` | `{"scopes":[{"integration_id":"generic-bridge","adapter_id":"onebot","scope_type":"group","scope_id":"42","room_id":"main"}]}` |
 | `GET /api/v1/integrations/{id}/subjects` | `{"subjects":[{"integration_id":"generic-bridge","adapter_id":"onebot","scope_type":"group","scope_id":"42","subject_id":"7","principal_id":"p_123"}]}` |
 | `GET /api/v1/principals?q=&limit=` | `{"principals":[{"id":"p_123","name":"Alice","kind":"oidc","roles":["listener"],"active":true}]}` |
 | `GET /api/v1/rooms/{id}/grants` | `{"grants":[{"room_id":"main","principal_id":"p_123","capability":"controller"}]}` |
 
-所有列表均确定排序且空结果返回 `[]`。Integration 列表绝不含 token；Principal 列表只公开 `id/name/kind/roles/active`，绝不含 `oidc_subject`。`q` 可省略，按 ID 或名称匹配；`limit` 默认 100 且最大 100。Integration scope/subject 的 `{id}` 未配置时、grant 的 Room 不存在时返回 404 `not_found`。
+所有列表均确定排序且空结果返回 `[]`。Integration 列表绝不含 token/hash；`last_used_at` 从未 resolve 时省略。Principal 列表只公开 `id/name/kind/roles/active`，绝不含 `oidc_subject`。`q` 可省略，按 ID 或名称匹配；`limit` 默认 100 且最大 100。Integration scope/subject 的 `{id}` 不存在时、grant 的 Room 不存在时返回 404 `not_found`。
 
 **管理请求：**
+
+**Integration 生命周期：**
+
+| 方法与路径 | 严格 JSON body | 成功语义 |
+|---|---|---|
+| `POST /api/v1/integrations` | `{id,name}` | HTTP 201；`{"integration":{id,name,active,created_at,updated_at},"token":"<one-time plaintext>"}` |
+| `PATCH /api/v1/integrations/{id}` | `{name?,"active"?}`；至少一个字段 | HTTP 200；`{"integration":{...}}`；`active:true→false` 会吊销已有 actor sessions |
+| `POST /api/v1/integrations/{id}/token` | 无 body | HTTP 200；`{"integration":{...},"token":"<one-time plaintext>"}`；旧 token 与 actor sessions 立即失效 |
+| `DELETE /api/v1/integrations/{id}` | 无 body | HTTP 200；`{"ok":true}`；级联语义见 3.5 |
+
+创建 ID 重复返回 409 `conflict`；其它生命周期操作的 ID 不存在返回 404 `not_found`。所有成功变更写入 audit log；token/hash 永不进入 audit detail。
+
+**映射与 grant 写请求：**
 
 | 方法与路径 | 严格 JSON body | 成功语义与 HTTP 200 body |
 |---|---|---|
@@ -608,7 +620,7 @@ actor resolve 使用 Integration token；本节其余管理端点反而必须使
 | `PUT /api/v1/rooms/{id}/grants/{principal_id}` | `{room_id,principal_id,"capability":"controller"}` | upsert grant；`{"grant":{room_id,principal_id,capability}}` |
 | `DELETE /api/v1/rooms/{id}/grants/{principal_id}` | 与 PUT 相同 | 撤销存在的 grant；`{"ok":true}` |
 
-- Integration 路径 `{id}` 必须是服务端配置的 Integration；否则 404 `not_found`。
+- Integration 路径 `{id}` 必须是数据库中存在的 Integration；否则 404 `not_found`。
 - scope 的 `room_id`、subject/grant 的 `principal_id` 以及 grant 的 Room 都必须已存在；不存在为 404。scope DELETE 也要求 body 指定的 Room 仍存在。
 - DELETE scope/subject 的 body 值必须匹配当前记录；grant 的 `room_id/principal_id` 必须与路径一致。任何不匹配返回 409 `conflict`，不存在的绑定/链接/grant 返回 404 `not_found`。
 - grant 当前唯一支持的 capability 是字面量 `"controller"`；其它值返回 400 `bad_request`。
@@ -624,8 +636,11 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `bad_request` | 400 | JSON/参数非法、严格请求出现未知字段、track_ref/source 格式错误 |
 | `queue_full` | — | WS：达到房间 `max_queue` 上限；合同 A REST 当前返回 `conflict` |
 | `quota_exceeded` | — | WS：超出 `policy.queue_limits`；合同 A REST 当前返回 `conflict` |
+| `idempotency_required` | 400 | Integration actor 调 Room 写端点时缺少 `Idempotency-Key` |
 | `not_found` | 404 | Room、条目、媒体、Principal、Integration 或映射不存在 |
 | `conflict` | 409 | REST 当前状态冲突、重复资源、请求与已有绑定不匹配 |
+| `idempotency_conflict` | 409 | 同一幂等 key 与操作被用于不同请求 body |
+| `request_in_progress` | 409 | 同一幂等请求尚未完成；Client 可稍后重试 |
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |
 | `internal` | 500 | 服务端内部错误 |
@@ -644,7 +659,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 
 - 交互式 WebUI/CLI 通常用 REST 做目录/管理，用 WS 加房订阅实时状态并发命令。
 - 收听 Agent 用 WS 快照驱动播放器；只有要接受管理员远程音量/换房时才实现 player plane。
-- Integration Client 的最小流程是：解析外部事件 → 用稳定的 adapter/scope/subject 调 3.6 resolve → 取 `default_room_id` 或 Client 自己选择 Room → 用 `actor_token` 调 6.3 标准 REST → 把领域 JSON 渲染成聊天/游戏内容。需要实时订阅时，再用同一 `actor_token` 做 WS session 认证。
+- Integration Client 的最小流程是：解析外部事件 → 用稳定的 adapter/scope/subject 调 3.6 resolve → 取 `default_room_id` 或 Client 自己选择 Room → 用 `actor_token` 调 6.3 标准 REST（写请求携带由平台事件 ID 派生的 `Idempotency-Key`）→ 把领域 JSON 渲染成聊天/游戏内容。需要实时订阅时，再用同一 `actor_token` 做 WS session 认证。
 - Client 不得向不存在的 `/im/v1` 发请求，也不得期待 Server 理解诸如“点歌 xxx”的原始文本。
 
 ### 9.1 WS 连接时序
@@ -699,16 +714,20 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 
 仓库 `internal/client/` 是本协议 WS、无状态 Room REST 与 Integration actor/管理 API 的 Go 参考实现；`cmd/yuzu-agent/`（MPV 渲染代理）与 `cmd/yuzu-cli/`（控制端）是两类 Client 的最小完整示例。
 
-只读查询对应的 Go REST helper 可直接供第一方 CLI/WebUI 复用：
+Go Client 提供完整生命周期、管理查询和幂等写 helper，可直接供第一方 CLI 或外部 Integration Client 复用：
 
 ```go
-caps, err := client.RESTRoomCapabilities(ctx, server, sessionToken, roomID)
-
+caps, err := client.RESTRoomCapabilities(ctx, server, actorToken, roomID)
+created, err := client.RESTCreateIntegration(ctx, server, roomAdminToken, id, name)
+rotated, err := client.RESTRotateIntegrationToken(ctx, server, roomAdminToken, id)
 integrations, err := client.RESTListIntegrations(ctx, server, roomAdminToken)
 scopes, err := client.RESTListIntegrationScopes(ctx, server, roomAdminToken, integrationID)
 subjects, err := client.RESTListIntegrationSubjects(ctx, server, roomAdminToken, integrationID)
 principals, err := client.RESTListPrincipals(ctx, server, roomAdminToken, query, limit)
 grants, err := client.RESTListRoomGrants(ctx, server, roomAdminToken, roomID)
+
+writeCtx := client.WithIdempotencyKey(ctx, platformEventID)
+_, err = client.RESTRoomQueueAdd(writeCtx, server, actorToken, roomID, trackRef)
 ```
 
-`caps.Controller` 是服务端 Authorizer 的最终判断；管理查询返回的 DTO 可用于选择目标后调用既有 `RESTBindIntegrationScope`、`RESTUnbindIntegrationScope`、`RESTLinkIntegrationSubject`、`RESTUnlinkIntegrationSubject`、`RESTGrantRoomController` 与 `RESTRevokeRoomController`，无需读取配置文件或服务端 secret。
+`created.Token` / `rotated.Token` 只应写入 secret store，不得记录日志。`caps.Controller` 是服务端 Authorizer 的最终判断；管理查询 DTO 可用于选择目标后调用 scope/subject/grant helpers，无需读取服务端配置或 secret。
