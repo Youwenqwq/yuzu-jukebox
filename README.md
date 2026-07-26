@@ -132,7 +132,7 @@ yuzu-cli provider qrlogin ncm
 | `search <关键词> [-provider p]` | `requester` | 搜索曲目，输出 `track_ref` 供点歌 |
 | `queue <room>` | 任意身份 | 查看当前播放（含实时进度）与队列（含电台行） |
 | `status <room>` | 任意身份 | 房间总览：播放状态、电台绑定、队列规模、听众 |
-| `add <room> <track_ref>` | `requester` | 点歌，队尾追加，空闲自动开播 |
+| `add <room> <track_ref>...` | `requester` | 点歌，队尾追加，空闲自动开播；多首时原子批量入队 |
 | `skip <room>` | `room_admin` | 切歌，自动播放下一首 |
 | `pause / resume <room>` | `room_admin` | 暂停 / 恢复 |
 | `seek <room> <秒>` | `room_admin` | 跳转进度 |
@@ -144,6 +144,7 @@ yuzu-cli provider qrlogin ncm
 | `playlist create / delete` | `media_admin` | 歌单创建 / 删除 |
 | `playlist add <id> <ref>...` | `media_admin` | 追加条目（≤100/次） |
 | `playlist delitem <id> <ord>` | `media_admin` | 删除条目 |
+| `playlist move <id> <ord> <to_ord>` | `media_admin` | 移动歌单条目 |
 | `playlist import <ncm:id|URL|ncm:daily>` | `media_admin` | 导入外部歌单或曲目源快照 |
 | `radio play <room> <source>` | `room_admin` | 电台模式（`-shuffle` / `-once`） |
 | `radio stop <room>` | `room_admin` | 退出电台 |
@@ -201,9 +202,12 @@ session_token → 之后与 guest 完全同构（REST Bearer / WS `auth{session_
 服务端只验证 ID token（JWKS 本地验签，缓存 + kid 轮换刷新），显示名取
 `preferred_username`，身份 ID 由 `sub` 确定性派生（改名不影响权限归属）。
 
-Zitadel console 一次性配置：Native 类型应用（勾 Device Code grant）；Project 勾
-"Assert Roles on Authentication"；Application Token Settings 勾
-"User Roles Inside ID Token"。
+Zitadel console 一次性配置：Native 类型应用（勾 Device Code grant）。角色进
+ID token 需 Application 级设置（Token Settings 勾选包含 User Roles 的选项；旧版
+UI 叫 "User Roles Inside ID Token"，新版与 Project 级同名为 "Assert Roles on
+Authentication"）。Project 级 "Assert Roles on Authentication" 只作用于 userinfo，
+可选作兜底。也可由客户端请求 scope `urn:zitadel:iam:org:projects:roles` 替代上述
+console 设置。
 
 CLI 登录（推荐路径）：
 

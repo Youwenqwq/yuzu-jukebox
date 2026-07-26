@@ -119,11 +119,11 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
 ```
 
 - 服务端只验证 **ID token**（恒为 JWT，RS256）；access token（Zitadel 默认 opaque）不使用。
-- 验签材料：`{issuer}/.well-known/openid-configuration` → `jwks_uri` → JWKS 缓存；未知 kid 自动刷新一次（密钥轮换）。校验 iss / aud（= config `oidc.client_id`）/ exp（60s 宽限）。
+- 验签材料：`{issuer}/.well-known/openid-configuration` → `jwks_uri` → JWKS 缓存；未知 kid 自动刷新一次（密钥轮换）。校验 iss / aud（命中 config `oidc.client_id` 或 `oidc.extra_client_ids` 任一）/ exp（60s 宽限）。
 - 显示名取 `preferred_username`（ID token 恒有；`name` 在颁发 access token 时会被 Zitadel 从 ID token 剥掉，不可用）。
 - 身份 ID：`o_` + sha256(sub) 前 12 hex——`sub` 在 IdP 里永不变，改名不影响归属。
 - 角色映射：扫描 payload 中所有 `urn:zitadel:iam:org:project*:roles` claim，对象 key 即角色名；config `oidc.role_mapping` 把 Zitadel 角色名映射为 yuzu roles。未命中者保持 `listener + requester`。
-- IdP 侧前提（Zitadel console）：Native 类型应用；Project 勾 "Assert Roles on Authentication"；Application Token Settings 勾 "User Roles Inside ID Token"。
+- IdP 侧前提（Zitadel console）：Native 类型应用。角色进 ID token 需 **Application 级**设置（Token Settings 中勾选包含 User Roles 的选项，旧版 UI 叫 "User Roles Inside ID Token"，新版与 Project 级同名为 "Assert Roles on Authentication"，API 字段 `id_token_role_assertion`）——这是角色映射的主路径。Project 级 "Assert Roles on Authentication" 只让 roles 出现在 userinfo，为可选兜底（客户端传 access_token 时服务端会合并 userinfo 角色）。替代方案：客户端在授权请求中携带 scope `urn:zitadel:iam:org:projects:roles`，可不依赖上述 console 设置让 roles 进 token。
 - 客户端获取 id_token 的方式服务端不感知：CLI/agent 推荐 Device Authorization Grant；WebUI 推荐 Authorization Code + PKCE。
 
 ## 4. 房间会话
@@ -151,7 +151,7 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
     "source_url": "https://music.163.com/song?id=347230",
     "contributors": [{"role": "artist", "name": "Beyond"}],
     "size_bytes": 8172890, "bitrate_kbps": 320,
-    "requested_by": "g_8f3k2", "added_at": 1720000000000,
+    "requested_by": "g_8f3k2", "requester_name": "小柚", "added_at": 1720000000000,
     "stream_url": "/stream/v1/ncm:347230?ticket=tk_abc"
   },
   "position_ms": 30210,
@@ -168,7 +168,7 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
 
 **曲目元数据层次**（客户端只需面对这一个形状，字段可空即降级）：
 
-- 曲目层（入队快照，队列与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
+- 曲目层（入队快照，队列与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors/requester_name`。`requester_name` 是入队时操作者 identity 的显示名快照，请求人后来改名不影响历史条目；旧数据为空串时客户端可降级显示 `requested_by`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
 - 物理层（仅 `playback.current`，Resolve/缓存后可得）：`size_bytes/bitrate_kbps`。
 - provider 能力缺席合法：bili 无歌词、local 无 source_url，字段缺省即降级。
 
@@ -182,7 +182,7 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
 |---|---|---|---|
 | `room.join` | `{room_id, password}` | 任何已认证身份 | 密码错误返回 `error` |
 | `room.leave` | `{room_id}` | — | |
-| `queue.add` | `{room_id, track_ref}` | `requester` | 队尾追加 |
+| `queue.add` | `{room_id, track_ref}` 或 `{room_id, track_refs[1..100]}` | `requester` | 队尾追加；批量为原子：整体预校验，任一失败一条不加；ack 回 entry_ids |
 | `queue.remove` | `{room_id, entry_id}` | `requester`(仅自己的) / `room_admin` | |
 | `queue.move` | `{room_id, entry_id, to_index}` | `room_admin` | |
 | `playback.pause` / `playback.resume` | `{room_id}` | `room_admin` | |
@@ -195,7 +195,7 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>" }
 
 | type | 时机 | data 要点 |
 |---|---|---|
-| `ack` | 请求处理成功 | 空对象；**回带 `ref`** |
+| `ack` | 请求处理成功 | 空对象；**回带 `ref`**；`queue.add` 时回 `{"entry_ids": [...]}` |
 | `error` | 请求失败 | `{code, message}`；**回带 `ref`** |
 | `room.joined` | `room.join` 成功 | `{"room_id"}`；回带 `ref` |
 | `room.left` | `room.leave` 成功 | 空对象；回带 `ref` |
@@ -332,7 +332,8 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 |---|---|---|
 | `POST /api/v1/auth/guest` | — | 访客认证，body `{"name", "password"}`（password 为全局管理员口令，可选）；返回 `{identity, session_token}` |
 | `POST /api/v1/auth/oidc` | — | OIDC 认证，body `{"id_token"}`（IdP 签发的 ID token）；服务端验签 + 角色映射后返回 `{identity, session_token}`；未启用 404 |
-| `GET /api/v1/rooms` | 已认证 | 房间列表（大厅目录） |
+| `GET /api/v1/auth/oidc/config` | — | 公开 OIDC 配置：issuer / client_id / client_ids（含 extra_client_ids），未启用 404 |
+| `GET /api/v1/rooms` | 已认证 | 房间列表（大厅目录）；每项在 `id/name/policy` 外含实时 `listener_count`，以及空闲为 `null`、播放或暂停时为 `{title, artist, duration_ms, cover_url, position_ms, updated_at, playing, rate}` 的 `now_playing`。目录摘要不按身份签发，绝不包含 `stream_url` |
 | `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 后台建/改房间（名称、访客密码、policy） |
 | `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
 | `DELETE /api/v1/auth/session` | 已认证 | 吊销当前会话（logout） |
@@ -353,11 +354,17 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `DELETE /api/v1/playlists/{id}` | `media_admin` | 删除歌单 |
 | `POST /api/v1/playlists/{id}/items` | `media_admin` | 追加条目 `{track_refs: [...]}`（单次≤100，元数据实时快照） |
 | `DELETE /api/v1/playlists/{id}/items/{ord}` | `media_admin` | 按序号删条目，后续重排 |
+| `PATCH /api/v1/playlists/{id}/items/{ord}` | `media_admin` | 移动条目到 to_ord（clamp [1,len]），后续重排 |
 | `POST /api/v1/playlists/import` | `media_admin` | 导入：`{provider, playlist_id}`（外部歌单，ncm 支持 id 或 URL，分页拉全量）或 `{source}`（曲目源物化，如 `ncm:daily`）；可选 `{name}` |
+| `GET /api/v1/media` | `media_admin` | 本地媒体列表（`track_ref,title,artist,duration_ms,size_bytes,uploaded_by,created_at`），按 `created_at` 倒序；空列表返回 `{"media":[]}` |
+| `DELETE /api/v1/media/{ref}` | `media_admin` | 仅接受 `local:` ref；删除媒体行与文件并清理对应缓存，不级联队列/歌单/历史引用；删除后的引用在 Resolve 时失败并按 `provider_error` 处理 |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |
-| `GET /api/v1/media/cache` | `media_admin` | 缓存全貌：`entries`（已缓存）、`downloads`（进行中，含进度）、`history`（最近 20 条成功/失败记录，内存态） |
+| `GET /api/v1/media/cache` | `media_admin` | 缓存全貌：`entries`（已缓存）、`downloads`（进行中，含进度）、`history`（最近 20 条成功/失败记录，内存态）、`total_bytes`（全部条目字节数合计）、`max_bytes`（当前容量上限） |
 | `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 手动清理单条缓存 |
+| `POST /api/v1/media/cache/prune` | `media_admin` | 按龄批量清理，body `{"unused_days": N}`（非负整数）；驱逐最后访问早于 N 天前的全部条目，`N=0` 等价于清空；正在下载的条目跳过；返回 `{evicted, freed_bytes}` |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |
+
+配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；设置为正整数时，服务端每 6 小时按相同规则清理超过该天数未访问的缓存，正在下载的条目仍会跳过。
 
 ## 7. 错误码
 
@@ -373,13 +380,12 @@ REST 请求统一经 `Authorization: Bearer <session_token>` 鉴权（token 来�
 | `internal` | 服务端内部错误 |
 | `rate_limited` | 预留 |
 
-## 8. 明确不做的（当前版本）
+## 8. 明确不做的
 
 - 投票切歌、DJ 模式（policy_json 可扩展，不实现逻辑）
 - 播放进度持久化（重启后当前曲目丢失；队列保留在 DB，房间启动时自动续播队首）
 - 队列事件的增量 diff 下发
-- OIDC / 账号密码登录
-- 凭据加密存储（当前明文存 credentials 表；加密需引入密钥管理，随凭据种类增多再做）
+- 账号密码登录（guest + 全局管理员口令 + OIDC 已覆盖当前认证需求）
 
 ## 9. 客户端实现清单
 
