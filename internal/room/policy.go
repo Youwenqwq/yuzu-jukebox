@@ -23,8 +23,9 @@ var (
 // 否则取命中最大值；无命中 = 不限。guest 身份 ID 由名字确定性派生，
 // 同名重连仍受同一限额约束。
 type Policy struct {
-	MaxQueue    int            `json:"max_queue,omitempty"`    // 待播队列总上限，0 = 不限
-	QueueLimits map[string]int `json:"queue_limits,omitempty"` // kind/role → 待播上限
+	MaxQueue           int            `json:"max_queue,omitempty"`            // 待播队列总上限，0 = 不限
+	QueueLimits        map[string]int `json:"queue_limits,omitempty"`         // kind/role → 待播上限
+	MemberPlayerVolume bool           `json:"member_player_volume,omitempty"` // scoped Integration actor 可调绑定播放器音量
 }
 
 // ParsePolicy 解析并校验策略 JSON。空串等价于 {}。

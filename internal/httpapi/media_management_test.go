@@ -56,7 +56,7 @@ func setupMediaEndpoints(t *testing.T) mediaEndpointFixture {
 	controls := control.NewService(nil, reg, control.NewAuthorizer(st))
 	s := &Server{
 		st: st, authm: authm, reg: reg, local: lp, cache: c, controls: controls,
-		ws: wsapi.NewServer(authm, controls),
+		ws: wsapi.NewServer(authm, controls, st),
 	}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)

@@ -18,18 +18,31 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
+	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
+type PlayerBindingStore interface {
+	GetRoomPlayerBindingByPlayer(ctx context.Context, playerID string) (store.RoomPlayerBinding, error)
+}
+
 type Server struct {
-	authm   *auth.Manager
-	control *control.Service
+	authm          *auth.Manager
+	control        *control.Service
+	playerBindings PlayerBindingStore
 
 	playersMu sync.Mutex
 	players   map[string]*client // 已注册的播放端（player.hello）
 }
 
-func NewServer(authm *auth.Manager, controlService *control.Service) *Server {
-	return &Server{authm: authm, control: controlService, players: map[string]*client{}}
+func NewServer(
+	authm *auth.Manager,
+	controlService *control.Service,
+	playerBindings PlayerBindingStore,
+) *Server {
+	return &Server{
+		authm: authm, control: controlService, playerBindings: playerBindings,
+		players: map[string]*client{},
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -95,8 +95,8 @@ curl -X POST localhost:8080/api/v1/media/upload -H "Authorization: Bearer $TOKEN
 然后一边收听、一边控制：
 
 ```bash
-# 收听：MPV 播放代理（每个听众一个，纯收听）
-./bin/yuzu-agent -room lobby -room-password room123 -name my-mpv
+# 收听：MPV 播放代理；player-id 是物理设备的稳定标识
+./bin/yuzu-agent -room lobby -room-password room123 -player-id living-room-speaker -name my-mpv
 
 # 控制：CLI
 export YUZU_SERVER=http://127.0.0.1:8080
@@ -159,7 +159,7 @@ yuzu-cli provider qrlogin ncm
 | `player list` | `room_admin` | 在线播放端清单 |
 | `player volume <id> <0-100>` | `room_admin` | 远程调音量 |
 | `player mute <id> on\|off` | `room_admin` | 远程静音 |
-| `player join <id> <room>` | `room_admin` | 迁移播放端到指定房间 |
+| `player bind <id> <room>` / `player unbind <room>` | `room_admin` | 持久绑定/解绑 Room primary player |
 | `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
@@ -172,19 +172,24 @@ yuzu-cli provider qrlogin ncm
 
 ### 房间治理策略
 
-每房间可配置点歌限制（`policy set`，热生效）：
+每房间可配置点歌限制，以及是否允许同 Room 的 Integration actor 调节共享播放设备音量（`policy set`，热生效）：
 
 ```bash
-yuzu-cli policy set lobby '{"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}'
+yuzu-cli policy set lobby '{"max_queue":100,"queue_limits":{"guest":5,"room_admin":0},"member_player_volume":true}'
 ```
 
 `max_queue` 为队列总上限；`queue_limits` 按身份 kind/role 限待播数
 （命中 0 = 显式不限）。guest 身份 ID 由名字确定性派生，限额跨会话成立。
+`member_player_volume` 缺省关闭；开启后也只允许由可信 Integration 签发、
+且 external scope 当前映射到该 Room 的 actor token 调整已绑定 primary player 的音量。
+普通 listener 和其他 Room 的 actor 仍无权控制。
 
 ### 代理重连
 
 yuzu-agent 内置断线重连：指数退避 1s→30s，重连后自动重走
-校时→认证→进房并恢复渲染。服务端重启后，各房间自动续播队首
+校时→认证→进房并恢复渲染。`-player-id`（或 `YUZU_PLAYER_ID`）应在同一物理
+设备上保持稳定；省略时使用 hostname。Room primary player 绑定持久化，
+agent 重连后按该 ID 自动回到绑定 Room。服务端重启后，各房间自动续播队首
 （当前曲目不持久化，队列保留）。
 
 ### OIDC 登录（Zitadel 等 IdP）

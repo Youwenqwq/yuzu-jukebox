@@ -30,6 +30,7 @@ func main() {
 	var (
 		server       = flag.String("server", envOr("YUZU_SERVER", "http://127.0.0.1:8080"), "server base URL")
 		roomID       = flag.String("room", envOr("YUZU_ROOM", ""), "room id to join (required)")
+		playerID     = flag.String("player-id", envOr("YUZU_PLAYER_ID", ""), "stable player id (defaults to hostname)")
 		name         = flag.String("name", envOr("YUZU_NAME", "mpv-agent"), "display name")
 		password     = flag.String("password", envOr("YUZU_PASSWORD", ""), "global admin password (optional)")
 		roomPassword = flag.String("room-password", envOr("YUZU_ROOM_PASSWORD", ""), "room guest password")
@@ -41,16 +42,24 @@ func main() {
 	if *roomID == "" {
 		log.Fatal("-room required")
 	}
+	stablePlayerID := *playerID
+	if stablePlayerID == "" {
+		if hostname, err := os.Hostname(); err == nil && hostname != "" {
+			stablePlayerID = hostname
+		} else {
+			stablePlayerID = *name
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *server, *roomID, *name, *password, *roomPassword, *mpvPath, *socket, *ao); err != nil {
+	if err := run(ctx, *server, *roomID, stablePlayerID, *name, *password, *roomPassword, *mpvPath, *socket, *ao); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvPath, socket, ao string) error {
+func run(ctx context.Context, server, roomID, playerID, name, password, roomPassword, mpvPath, socket, ao string) error {
 	// MPV 只启动一次，跨重连存活。重连成功后服务器会推送播放快照，
 	// 代理把快照重新渲染进去（loadedRef 每会话重置，强制刷新）。
 	os.Remove(socket)
@@ -67,7 +76,7 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 	const maxBackoff = 30 * time.Second
 	for {
 		start := time.Now()
-		err := session(ctx, server, roomID, name, password, roomPassword, mpv)
+		err := session(ctx, server, roomID, playerID, name, password, roomPassword, mpv)
 		if ctx.Err() != nil {
 			return nil // 主动退出
 		}
@@ -89,7 +98,7 @@ func run(ctx context.Context, server, roomID, name, password, roomPassword, mpvP
 
 // session 一次连接的完整生命周期：连接 → 校时 → 认证 → 进房 → 渲染。
 // 任何环节失败都返回错误，由 run 决定重连。
-func session(ctx context.Context, server, roomID, name, password, roomPassword string, mpv *mpvClient) error {
+func session(ctx context.Context, server, roomID, playerID, name, password, roomPassword string, mpv *mpvClient) error {
 	// 1. 协议连接：校时 → 认证 → 进房
 	cli, err := client.Dial(ctx, server)
 	if err != nil {
@@ -113,7 +122,7 @@ func session(ctx context.Context, server, roomID, name, password, roomPassword s
 	if h, err := os.Hostname(); err == nil && h != "" {
 		device = h
 	}
-	playerID, err := cli.PlayerHello(ctx, device, agentVersion, []string{"volume", "mute", "join_room"})
+	playerID, err = cli.PlayerHello(ctx, playerID, device, agentVersion, []string{"volume", "mute", "join_room"})
 	if err != nil {
 		log.Printf("player.hello: %v (管理面不可用，继续播放)", err)
 	} else {
@@ -239,7 +248,7 @@ type driftSyncer struct {
 func (s *driftSyncer) reset() { s.hasBaseline, s.awaitSample = false, false }
 
 const (
-	seekThreshold  = 150 // 超过即 seek（校准后同样适用）
+	seekThreshold = 150 // 超过即 seek（校准后同样适用）
 	// speedThreshold = 30  // REMOVED: 变速影响听感，不再使用。纯 seek 方案
 )
 

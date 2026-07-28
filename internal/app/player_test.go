@@ -59,7 +59,7 @@ func TestPlayerPlane(t *testing.T) {
 	readRawUntil("auth.ok")
 	send("room.join", "a2", map[string]any{"room_id": "pa"})
 	readRawUntil("room.joined")
-	send("player.hello", "a3", map[string]any{"device": "speaker-01", "caps": []string{"volume", "mute", "join_room"}})
+	send("player.hello", "a3", map[string]any{"player_id": "speaker-01", "device": "speaker-01", "caps": []string{"volume", "mute", "join_room"}})
 	hello := readRawUntil("player.hello.ok")
 	playerID := hello["data"].(map[string]any)["player_id"].(string)
 	if playerID == "" {

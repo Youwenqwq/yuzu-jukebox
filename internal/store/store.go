@@ -583,23 +583,50 @@ func (s *Store) DeleteRoom(ctx context.Context, id string) error {
 
 // SaveSession writes a standard session without an Integration source.
 func (s *Store) SaveSession(ctx context.Context, token, identityJSON string, expiresAt int64) error {
-	return s.SaveSessionWithSource(ctx, token, identityJSON, "", expiresAt)
+	return s.SaveSessionWithActorSource(ctx, token, identityJSON, SessionSource{}, expiresAt)
 }
 
-// SaveSessionWithSource writes a session and records the Integration that
-// issued an external actor token. Empty integrationID means a normal session.
+// SessionSource records the trusted Integration scope that issued an actor
+// session. Empty fields identify a normal WebUI/CLI session.
+type SessionSource struct {
+	IntegrationID string
+	AdapterID     string
+	ScopeType     string
+	ScopeID       string
+}
+
+// SaveSessionWithSource preserves the Integration-only persistence API used by
+// older in-process callers.
 func (s *Store) SaveSessionWithSource(
 	ctx context.Context,
 	token, identityJSON, integrationID string,
 	expiresAt int64,
 ) error {
+	return s.SaveSessionWithActorSource(ctx, token, identityJSON, SessionSource{
+		IntegrationID: integrationID,
+	}, expiresAt)
+}
+
+func (s *Store) SaveSessionWithActorSource(
+	ctx context.Context,
+	token, identityJSON string,
+	source SessionSource,
+	expiresAt int64,
+) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (token, identity_json, expires_at, integration_id) VALUES (?,?,?,?)
+		`INSERT INTO sessions
+			(token, identity_json, expires_at, integration_id,
+			 integration_adapter_id, integration_scope_type, integration_scope_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(token) DO UPDATE SET
-			identity_json=excluded.identity_json,
-			expires_at=excluded.expires_at,
-			integration_id=excluded.integration_id`,
-		token, identityJSON, expiresAt, integrationID)
+			identity_json = excluded.identity_json,
+			expires_at = excluded.expires_at,
+			integration_id = excluded.integration_id,
+			integration_adapter_id = excluded.integration_adapter_id,
+			integration_scope_type = excluded.integration_scope_type,
+			integration_scope_id = excluded.integration_scope_id`,
+		token, identityJSON, expiresAt, source.IntegrationID,
+		source.AdapterID, source.ScopeType, source.ScopeID)
 	return err
 }
 
@@ -608,13 +635,19 @@ type SessionRow struct {
 	Token         string
 	IdentityJSON  string
 	IntegrationID string
+	AdapterID     string
+	ScopeType     string
+	ScopeID       string
 	ExpiresAt     int64
 }
 
 // LoadSessions 读出全部未过期会话（启动恢复用）。
 func (s *Store) LoadSessions(ctx context.Context, now int64) ([]SessionRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT token, identity_json, integration_id, expires_at FROM sessions WHERE expires_at > ?`, now)
+		`SELECT token, identity_json, integration_id,
+		        integration_adapter_id, integration_scope_type, integration_scope_id,
+		        expires_at
+		 FROM sessions WHERE expires_at > ?`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +655,10 @@ func (s *Store) LoadSessions(ctx context.Context, now int64) ([]SessionRow, erro
 	var out []SessionRow
 	for rows.Next() {
 		var r SessionRow
-		if err := rows.Scan(&r.Token, &r.IdentityJSON, &r.IntegrationID, &r.ExpiresAt); err != nil {
+		if err := rows.Scan(
+			&r.Token, &r.IdentityJSON, &r.IntegrationID,
+			&r.AdapterID, &r.ScopeType, &r.ScopeID, &r.ExpiresAt,
+		); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

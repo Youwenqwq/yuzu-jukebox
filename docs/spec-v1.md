@@ -217,6 +217,7 @@ Content-Type: application/json
   `(integration_id, adapter_id, scope.type, scope.id)`；external subject key 再追加 `subject.id`。`display_name` 不参与 key：未链接的 synthetic guest 在下次 resolve 时更新名称；已链接时忽略它并以当前 Principal 名称为准。
 - 若 external subject key 已链接到一个 Principal，返回该 Principal 的**当前** identity/roles；若未链接，则生成稳定 guest：ID 为 `ig_` + `sha256(JSON([integration_id, adapter_id, scope.type, scope.id, subject.id]))` 的完整十六进制，`kind=guest`，roles 为 `listener+requester`。Client MUST 把返回的 `identity.id` 当作不透明值。
 - scope 绑定、subject 链接和 controller grant 的管理合同见 6.4。
+- actor session 持久记录签发它的 `integration_id/adapter_id/scope.type/scope.id`。服务端据此执行 scope-specific 授权；这些来源字段不能由 Client 在 Room 请求中覆盖。当前唯一额外授权是 4.8 的 Room primary player 音量控制，且必须同时命中 actor resolve 的 `default_room_id` 与 Room policy。
 
 ### 3.7 OIDC 自助绑定 external subject
 
@@ -385,30 +386,37 @@ Content-Type: application/json
 每房间一份策略，存 `rooms.policy_json`，经 `POST/PATCH /api/v1/rooms` 的 `policy` 字段热更新（校验 → 落库 → actor 内生效，无需重启）：
 
 ```json
-{ "max_queue": 100, "queue_limits": { "guest": 5, "room_admin": 0 } }
+{
+  "max_queue": 100,
+  "queue_limits": { "guest": 5, "room_admin": 0 },
+  "member_player_volume": true
+}
 ```
 
 - `max_queue`：待播队列总上限，0/缺省 = 不限。超限拒绝 `queue.add`，错误码 `queue_full`。
 - `queue_limits`：按身份的待播数上限。key 匹配身份的 **kind**（`guest`/`password`/`oidc`）或其任一 **role**；任一命中值为 0 → 显式不限（覆盖其他命中），否则取命中最大值，无命中 = 不限。超限拒绝，错误码 `quota_exceeded`。
+- `member_player_volume`：缺省 `false`。为 `true` 时，只允许由可信 Integration 签发、且来源 scope 当前默认 Room 正是该 Room 的 actor session 读取 primary player 并设置其音量；不授权普通 listener，不授权其他 Room，不授权 mute、换房或绑定管理。
 - 普通 guest 身份 ID 由名字确定性派生（`g_` + `sha256("guest:"+name)` 前 12 hex），同名重连仍是同一人；Integration synthetic guest 使用 3.6 的完整 external subject key——两者的限额与“移除自己点的歌”均可跨会话成立。
 - 电台补充不经过限额检查（补充只在队列 <3 时触发，天然有界）。
 - 播放历史与统计见 6 节 REST；`play_history` 只记**播放**（结束原因 `finished`/`skipped`），不记点歌意图。
 
 ### 4.8 播放端管理平面（player plane）
 
-无头渲染端（嵌入式播放器）可注册为**可管理播放端**，管理员远程调节，无需 SSH：
+无头渲染端（嵌入式播放器）可用稳定 `player_id` 注册为**可管理播放端**，管理员把 Room 持久绑定到物理设备，Integration actor 再通过 Room 级 API 调节该设备音量：
 
 ```
-agent: → {"type": "player.hello", "data": {"device": "speaker-01", "caps": ["volume","mute","join_room"]}}
-       ← {"type": "player.hello.ok", "data": {"player_id": "c_…"}}
+agent: → {"type": "player.hello", "data": {"player_id": "living-room-speaker", "device": "speaker-01", "caps": ["volume","mute","join_room"]}}
+       ← {"type": "player.hello.ok", "data": {"player_id": "living-room-speaker"}}
 agent: → {"type": "player.state", "data": {"volume": 42, "muted": false}}   // 变更时上报
 server:← {"type": "player.command", "data": {"op": "set_volume", "value": 42}}  // 服务端下发
 ```
 
-- 注册要求已认证身份；连接断开自动注销。
-- **换房间不收房间密码**：`join_room` 由服务端直接迁移连接（房间 actor 自动推送快照，agent 原样重渲染）。
-- 管理入口是 REST：`GET /api/v1/players`、`POST /api/v1/players/{id}/command {op, value}`（op: `set_volume` 0-100 / `set_mute` bool / `join_room` 房间 id），均需 `room_admin`。
-- 面向用户的交互式客户端 SHOULD NOT 实现该平面（本地 UI 自己管音量）。
+- 注册要求已认证身份；`player_id` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，在线时全局唯一。连接断开只注销在线状态，不删除 Room 绑定；同一物理 agent 用相同 ID 重连时自动回到已绑定 Room。
+- 一个 Room 最多绑定一个 primary player，一个 player 最多属于一个 Room。`room_admin` 用 `PUT /api/v1/rooms/{id}/player {"player_id":"..."}` 绑定并立即迁移在线连接，用 DELETE 解绑。绑定对象必须在线且声明 `volume` capability。
+- **换房间不收房间密码**：绑定或 `join_room` 由服务端直接迁移连接（房间 actor 自动推送快照，agent 原样重渲染）。旧的全局 `POST /api/v1/players/{id}/command` 仍只供 `room_admin` 管理；其中 `join_room` 同时更新持久绑定。
+- Room controller 可读取绑定状态并调音量。普通 Integration actor 仅在 `policy.member_player_volume=true` 且 actor session 的签发 scope 当前映射到该 Room 时，可调用 `GET /api/v1/rooms/{id}/player` 与 `POST /api/v1/rooms/{id}/player/volume {"volume":0..100}`。写请求必须带平台事件的 `Idempotency-Key`。
+- Room 级音量 API 只解析 Room→primary player，不接受 `player_id`，因此外部用户不能选择或枚举任意物理设备，也不能调用 mute、join 或绑定管理。
+- 面向用户的交互式客户端 SHOULD 通过 Room 级 API 表达共享设备音量；本地个人音量仍由客户端本地管理。
 
 ## 5. 房间状态机
 
@@ -524,6 +532,10 @@ pause│  │resume
 | `POST /api/v1/rooms/{id}/playback/{op}` | controller | `pause/resume/skip/seek` |
 | `POST /api/v1/rooms/{id}/radio` / `DELETE /api/v1/rooms/{id}/radio` | controller | 开启/停止电台 |
 | `GET /api/v1/players` | `room_admin` | 在线播放端清单 |
+| `GET /api/v1/rooms/{id}/player` | controller，或同 Room 且 policy 允许的 Integration actor | primary player 绑定与在线状态；未绑定 404 |
+| `PUT /api/v1/rooms/{id}/player` | `room_admin` | 绑定在线 `player_id` 为 Room primary player 并迁移连接 |
+| `DELETE /api/v1/rooms/{id}/player` | `room_admin` | 解除 primary player 绑定 |
+| `POST /api/v1/rooms/{id}/player/volume` | controller，或同 Room 且 policy 允许的 Integration actor | body `{"volume":0..100}`；Integration actor 必须有 `Idempotency-Key` |
 | `POST /api/v1/players/{id}/command` | `room_admin` | 播放端指令：set_volume / set_mute / join_room |
 
 **Provider、歌单、媒体与出流：**

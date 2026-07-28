@@ -684,17 +684,27 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdPlayerMute(ctx, args[0], args[1]) })
 			},
 		},
-		"player join": {
-			usage: "player join <player_id> <room>",
-			desc:  "把播放端迁移到指定房间（管理员）",
-			detail: `服务端直接把播放端的连接迁入目标房间并推送快照，
-agent 自动重新渲染——无需房间密码，无需重启 agent。
-嵌入式音箱远程换房间的入口。`,
+		"player bind": {
+			usage: "player bind <player_id> <room>",
+			desc:  "绑定 Room primary player（管理员）",
+			detail: `持久绑定指定在线播放端为 Room 的 primary player，并立即把连接迁入该 Room。
+agent 重连后会按稳定 player_id 自动回到绑定 Room。一个 Room 和一个 player 都只能有一个有效绑定。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
-					return errUsage("player join")
+					return errUsage("player bind")
 				}
-				return withCtx(func(ctx context.Context) error { return cmdPlayerJoin(ctx, args[0], args[1]) })
+				return withCtx(func(ctx context.Context) error { return cmdPlayerBind(ctx, args[0], args[1]) })
+			},
+		},
+		"player unbind": {
+			usage:  "player unbind <room>",
+			desc:   "解除 Room primary player 绑定（管理员）",
+			detail: "解除持久绑定；不会断开或迁移当前播放端连接。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("player unbind")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerUnbind(ctx, args[0]) })
 			},
 		},
 		"queue del": {
@@ -764,9 +774,11 @@ agent 自动重新渲染——无需房间密码，无需重启 agent。
 			usage: "policy set <room> <JSON>",
 			desc:  "设置房间治理策略（管理员）",
 			detail: `热更新房间策略，JSON 结构：
-  {"max_queue": 100, "queue_limits": {"guest": 5, "room_admin": 0}}
+  {"max_queue":100,"queue_limits":{"guest":5},"member_player_volume":true}
 max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 kind
 （guest/password/oidc）或 role，多命中取最宽松，0/缺省=不限。
+member_player_volume 允许同 Room 的 Integration actor 调节 primary player 音量，
+缺省为 false。
 
 需要 room_admin 角色。`,
 			run: func(args []string) error {

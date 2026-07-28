@@ -26,12 +26,16 @@ const (
 )
 
 type Identity struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Kind          string   `json:"kind"` // guest | password | oidc
-	Roles         []string `json:"roles"`
-	OIDCSubject   string   `json:"-"`
-	IntegrationID string   `json:"-"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Kind                 string   `json:"kind"` // guest | password | oidc
+	Roles                []string `json:"roles"`
+	OIDCSubject          string   `json:"-"`
+	IntegrationID        string   `json:"-"`
+	IntegrationAdapterID string   `json:"-"`
+	IntegrationScopeType string   `json:"-"`
+	IntegrationScopeID   string   `json:"-"`
+	IntegrationRoomID    string   `json:"-"`
 }
 
 func (id Identity) HasRole(role string) bool {
@@ -43,6 +47,13 @@ func (id Identity) HasRole(role string) bool {
 	return false
 }
 
+type IntegrationSessionSource struct {
+	IntegrationID string
+	AdapterID     string
+	ScopeType     string
+	ScopeID       string
+}
+
 var (
 	ErrSessionNotFound          = errors.New("session not found")
 	ErrTicketInvalid            = errors.New("ticket invalid")
@@ -50,9 +61,9 @@ var (
 )
 
 type session struct {
-	identity      Identity
-	expiresAt     time.Time
-	integrationID string
+	identity  Identity
+	expiresAt time.Time
+	source    IntegrationSessionSource
 }
 
 type ticket struct {
@@ -105,8 +116,14 @@ func NewManager(adminPassword string, st *store.Store) *Manager {
 			if json.Unmarshal([]byte(r.IdentityJSON), &id) != nil || id.ID == "" {
 				continue
 			}
+			source := IntegrationSessionSource{
+				IntegrationID: r.IntegrationID,
+				AdapterID:     r.AdapterID,
+				ScopeType:     r.ScopeType,
+				ScopeID:       r.ScopeID,
+			}
 			m.sessions[r.Token] = session{
-				identity: id, integrationID: r.IntegrationID, expiresAt: time.UnixMilli(r.ExpiresAt),
+				identity: id, source: source, expiresAt: time.UnixMilli(r.ExpiresAt),
 			}
 			previous, ok := legacyPrincipals[id.ID]
 			if !ok || r.ExpiresAt > previous.expiresAt {
@@ -186,7 +203,7 @@ func (m *Manager) IssueAuthenticatedSession(id Identity) (string, error) {
 	if err := m.persistPrincipal(id); err != nil {
 		return "", err
 	}
-	token, _, err := m.issueSession(id, m.sessionTTL, "")
+	token, _, err := m.issueSession(id, m.sessionTTL, IntegrationSessionSource{})
 	return token, err
 }
 
@@ -208,15 +225,16 @@ func (m *Manager) IssueSessionWithTTL(id Identity, ttl time.Duration) (string, i
 	if err != nil {
 		return "", 0, err
 	}
-	return m.issueSession(id, ttl, "")
+	return m.issueSession(id, ttl, IntegrationSessionSource{})
 }
 
 // IssueIntegrationSession issues a short-lived actor session tied to its
-// originating Integration. Disabling, deleting or rotating that Integration
-// can revoke only these sessions without affecting the Principal's own login.
+// originating trusted Integration scope. Disabling, deleting or rotating that
+// Integration can revoke only these sessions without affecting the Principal's
+// own login.
 func (m *Manager) IssueIntegrationSession(
 	id Identity,
-	integrationID string,
+	source IntegrationSessionSource,
 	ttl time.Duration,
 ) (string, int64, error) {
 	id, err := m.currentIdentity(id)
@@ -224,12 +242,12 @@ func (m *Manager) IssueIntegrationSession(
 		return "", 0, err
 	}
 	if m.st != nil {
-		integration, err := m.st.GetIntegration(context.Background(), integrationID)
+		integration, err := m.st.GetIntegration(context.Background(), source.IntegrationID)
 		if err != nil || !integration.Active {
 			return "", 0, ErrSessionNotFound
 		}
 	}
-	return m.issueSession(id, ttl, integrationID)
+	return m.issueSession(id, ttl, source)
 }
 
 func (m *Manager) currentIdentity(id Identity) (Identity, error) {
@@ -264,9 +282,12 @@ func (m *Manager) persistPrincipal(id Identity) error {
 func (m *Manager) issueSession(
 	id Identity,
 	ttl time.Duration,
-	integrationID string,
+	source IntegrationSessionSource,
 ) (string, int64, error) {
-	id.IntegrationID = integrationID
+	id.IntegrationID = source.IntegrationID
+	id.IntegrationAdapterID = source.AdapterID
+	id.IntegrationScopeType = source.ScopeType
+	id.IntegrationScopeID = source.ScopeID
 	token := randHex(16)
 	expiresAt := time.Now().Add(ttl).UTC().Truncate(time.Millisecond)
 	expiresAtMS := expiresAt.UnixMilli()
@@ -275,16 +296,23 @@ func (m *Manager) issueSession(
 		if err != nil {
 			return "", 0, err
 		}
-		if err := m.st.SaveSessionWithSource(
-			context.Background(), token, string(data), integrationID, expiresAtMS,
+		if err := m.st.SaveSessionWithActorSource(
+			context.Background(),
+			token,
+			string(data),
+			store.SessionSource{
+				IntegrationID: source.IntegrationID,
+				AdapterID:     source.AdapterID,
+				ScopeType:     source.ScopeType,
+				ScopeID:       source.ScopeID,
+			},
+			expiresAtMS,
 		); err != nil {
 			return "", 0, err
 		}
 	}
 	m.mu.Lock()
-	m.sessions[token] = session{
-		identity: id, integrationID: integrationID, expiresAt: expiresAt,
-	}
+	m.sessions[token] = session{identity: id, source: source, expiresAt: expiresAt}
 	m.mu.Unlock()
 	return token, expiresAtMS, nil
 }
@@ -304,7 +332,7 @@ func (m *Manager) Revoke(token string) {
 func (m *Manager) RevokeIntegration(integrationID string) {
 	m.mu.Lock()
 	for token, current := range m.sessions {
-		if current.integrationID == integrationID {
+		if current.source.IntegrationID == integrationID {
 			delete(m.sessions, token)
 		}
 	}
@@ -357,8 +385,8 @@ func (m *Manager) Session(token string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	if s.integrationID != "" {
-		integration, err := m.st.GetIntegration(context.Background(), s.integrationID)
+	if s.source.IntegrationID != "" {
+		integration, err := m.st.GetIntegration(context.Background(), s.source.IntegrationID)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && !integration.Active) {
 			return Identity{}, ErrSessionNotFound
 		}
@@ -367,7 +395,25 @@ func (m *Manager) Session(token string) (Identity, error) {
 		}
 	}
 	id := identityFromPrincipal(principal)
-	id.IntegrationID = s.integrationID
+	id.IntegrationID = s.source.IntegrationID
+	id.IntegrationAdapterID = s.source.AdapterID
+	id.IntegrationScopeType = s.source.ScopeType
+	id.IntegrationScopeID = s.source.ScopeID
+	if s.source.IntegrationID != "" && s.source.AdapterID != "" &&
+		s.source.ScopeType != "" && s.source.ScopeID != "" {
+		roomID, err := m.st.ResolveExternalScopeRoom(
+			context.Background(),
+			s.source.IntegrationID,
+			s.source.AdapterID,
+			s.source.ScopeType,
+			s.source.ScopeID,
+		)
+		if err == nil {
+			id.IntegrationRoomID = roomID
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return Identity{}, err
+		}
+	}
 	return id, nil
 }
 

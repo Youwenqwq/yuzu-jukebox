@@ -94,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/rooms/{id}/stats", s.roomStats)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/capabilities", s.roomCapabilities)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/state", s.roomState)
+	mux.HandleFunc("GET /api/v1/rooms/{id}/player", s.getRoomPlayer)
+	mux.HandleFunc("PUT /api/v1/rooms/{id}/player", s.bindRoomPlayer)
+	mux.HandleFunc("DELETE /api/v1/rooms/{id}/player", s.unbindRoomPlayer)
+	mux.HandleFunc("POST /api/v1/rooms/{id}/player/volume", s.idempotent(s.setRoomPlayerVolume))
 	mux.HandleFunc("POST /api/v1/rooms/{id}/queue", s.idempotent(s.queueAdd))
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/queue/{entry_id}", s.idempotent(s.queueRemove))
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}/queue/{entry_id}", s.idempotent(s.queueMove))
@@ -531,7 +535,11 @@ func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_request", "join_room needs room id string")
 			return
 		}
-		err = s.ws.JoinPlayerRoom(playerID, v)
+		if _, err = s.ws.Player(playerID); err == nil {
+			if _, err = s.st.BindRoomPlayer(r.Context(), v, playerID); err == nil {
+				err = s.ws.JoinPlayerRoom(playerID, v)
+			}
+		}
 	default:
 		writeErr(w, http.StatusBadRequest, "bad_request", "unknown op "+body.Op)
 		return

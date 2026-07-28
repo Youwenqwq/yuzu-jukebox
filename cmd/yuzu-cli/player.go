@@ -75,12 +75,24 @@ func cmdPlayerMute(ctx context.Context, playerID, onoff string) error {
 	return nil
 }
 
-func cmdPlayerJoin(ctx context.Context, playerID, roomID string) error {
+func cmdPlayerBind(ctx context.Context, playerID, roomID string) error {
 	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
-	if err := client.RESTPlayerCommand(ctx, *server, token, playerID, "join_room", roomID); err != nil {
+	if _, err := client.RESTBindRoomPlayer(ctx, *server, token, roomID, playerID); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdPlayerUnbind(ctx context.Context, roomID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTUnbindRoomPlayer(ctx, *server, token, roomID); err != nil {
 		return err
 	}
 	fmt.Println("ok")

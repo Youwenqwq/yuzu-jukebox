@@ -81,7 +81,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		log.Printf("oidc: issuer %s (client_id %s, extras %v)", cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.ExtraClientIDs)
 	}
 
-	ws := wsapi.NewServer(authm, controls)
+	ws := wsapi.NewServer(authm, controls, st)
 	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping)
 
 	if cfg.CacheAutoPruneDays > 0 {

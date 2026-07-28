@@ -388,7 +388,14 @@ func (s *Server) resolveIntegrationActor(w http.ResponseWriter, r *http.Request)
 	}
 
 	actorToken, expiresAt, err := s.authm.IssueIntegrationSession(
-		identity, integrationID, integrationActorSessionTTL,
+		identity,
+		auth.IntegrationSessionSource{
+			IntegrationID: integrationID,
+			AdapterID:     body.AdapterID,
+			ScopeType:     body.Scope.Type,
+			ScopeID:       body.Scope.ID,
+		},
+		integrationActorSessionTTL,
 	)
 	if err != nil {
 		writeErr(w, http.StatusForbidden, "forbidden", "principal is unavailable")
