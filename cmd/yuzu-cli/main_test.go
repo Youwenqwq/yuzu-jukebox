@@ -13,6 +13,7 @@ func TestCommandForArgsRoutesNestedCommands(t *testing.T) {
 		{name: "integration lifecycle", args: []string{"integration", "create", "bridge", "Bridge"}, wantUsage: "integration create <id> <name>", wantRest: 2},
 		{name: "room controller", args: []string{"room", "controller", "grant", "lobby", "principal-1"}, wantUsage: "room controller grant <room> <principal_id>", wantRest: 2},
 		{name: "two levels", args: []string{"principal", "list", "alice"}, wantUsage: "principal list [query] [-limit 50]", wantRest: 1},
+		{name: "identity bind code", args: []string{"identity", "bind-code"}, wantUsage: "identity bind-code", wantRest: 0},
 		{name: "existing command", args: []string{"queue", "del", "lobby", "entry-1"}, wantUsage: "queue del <room> <entry_id>", wantRest: 2},
 	}
 
@@ -65,5 +66,22 @@ func TestManagementCommandsRejectMissingArgs(t *testing.T) {
 				t.Fatalf("error = %q, want %q", err, want)
 			}
 		})
+	}
+}
+
+func TestIdentityBindCodeUsageIsRegistered(t *testing.T) {
+	cmd, ok := commands["identity bind-code"]
+	if !ok {
+		t.Fatal("identity bind-code command is not registered")
+	}
+	if cmd.usage != "identity bind-code" {
+		t.Fatalf("usage = %q", cmd.usage)
+	}
+	if _, ok := groupMeta["identity"]; !ok {
+		t.Fatal("identity command group is not registered")
+	}
+	children := groupChildren("identity")
+	if len(children) != 1 || children[0] != "bind-code" {
+		t.Fatalf("identity group children = %#v", children)
 	}
 }

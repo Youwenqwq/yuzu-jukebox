@@ -645,6 +645,62 @@ type IntegrationActorResolveResponse struct {
 	ExpiresAt     int64    `json:"expires_at"`
 }
 
+// ExternalBindingCodeResponse 是普通 OIDC session 签发的一次性绑定码。
+type ExternalBindingCodeResponse struct {
+	Code      string `json:"code"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+// ExternalBindingSubject 标识要绑定的 external subject。
+type ExternalBindingSubject struct {
+	ID string `json:"id"`
+}
+
+// ExternalBindingTarget 是 Integration 从平台事件中取得的完整 external target。
+type ExternalBindingTarget struct {
+	AdapterID string                 `json:"adapter_id"`
+	Scope     IntegrationActorScope  `json:"scope"`
+	Subject   ExternalBindingSubject `json:"subject"`
+}
+
+// ExternalBindingRedeemRequest 是可信 Integration 的绑定码兑换请求。
+type ExternalBindingRedeemRequest struct {
+	Code string `json:"code"`
+	ExternalBindingTarget
+}
+
+// ExternalBinding 是成功兑换后写入的完整 external key。
+type ExternalBinding struct {
+	IntegrationID string `json:"integration_id"`
+	AdapterID     string `json:"adapter_id"`
+	ScopeType     string `json:"scope_type"`
+	ScopeID       string `json:"scope_id"`
+	SubjectID     string `json:"subject_id"`
+	PrincipalID   string `json:"principal_id"`
+}
+
+// ExternalBindingRedeemResponse 是绑定码兑换结果；兑换不会签发 actor session。
+type ExternalBindingRedeemResponse struct {
+	Binding  ExternalBinding `json:"binding"`
+	Identity Identity        `json:"identity"`
+}
+
+// RESTIssueExternalBindingCode 用普通 OIDC session 签发一次性绑定码。
+func RESTIssueExternalBindingCode(ctx context.Context, server, oidcSessionToken string) (ExternalBindingCodeResponse, error) {
+	var out ExternalBindingCodeResponse
+	err := restCall(ctx, server, http.MethodPost, "/api/v1/auth/external-binding-codes",
+		oidcSessionToken, nil, &out)
+	return out, err
+}
+
+// RESTRedeemExternalBindingCode 用 Integration token 消费绑定码并建立 subject 链接。
+func RESTRedeemExternalBindingCode(ctx context.Context, server, integrationToken string, request ExternalBindingRedeemRequest) (ExternalBindingRedeemResponse, error) {
+	var out ExternalBindingRedeemResponse
+	err := restCall(ctx, server, http.MethodPost, "/api/v1/integrations/bindings/redeem",
+		integrationToken, request, &out)
+	return out, err
+}
+
 // RESTResolveIntegrationActor 用 Integration token 解析外部身份。
 func RESTResolveIntegrationActor(ctx context.Context, server, integrationToken string, request IntegrationActorResolveRequest) (IntegrationActorResolveResponse, error) {
 	var out IntegrationActorResolveResponse

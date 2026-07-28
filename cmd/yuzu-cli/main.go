@@ -647,6 +647,14 @@ source 取值：
 				return withCtx(func(ctx context.Context) error { return cmdWhoami(ctx) })
 			},
 		},
+		"identity bind-code": {
+			usage:  "identity bind-code",
+			desc:   "为当前 OIDC 身份签发 external subject 绑定码",
+			detail: "签发一个 10 分钟有效的一次性绑定码，供用户复制到目标 IM。\n\n只使用当前 server 对应的缓存 OIDC session；未登录时请先运行 yuzu-cli login。",
+			run: func(args []string) error {
+				return withCtx(cmdIdentityBindCode)
+			},
+		},
 		"player list": {
 			usage:  "player list",
 			desc:   "列出在线播放端（管理员）",
@@ -805,6 +813,7 @@ var groupMeta = map[string]struct {
 	def  string
 }{
 	"integration": {"Integration scope 与 subject 管理", "list"},
+	"identity":    {"OIDC 身份与 external subject 绑定", ""},
 	"principal":   {"Principal 查询", "list"},
 	"playlist":    {"通用歌单管理", "list"},
 	"queue":       {"队列操作（queue <room> 为查看）", ""},
@@ -959,7 +968,7 @@ func printHelp(args []string) {
   -password        全局管理员口令 (YUZU_PASSWORD)
   -room-password   房间访客密码 (YUZU_ROOM_PASSWORD)
 
-高频收听操作为顶级命令；管理类操作按域分组（room/integration/principal/provider/media/playlist/radio/policy）。
+高频收听操作为顶级命令；管理与身份类操作按域分组（room/integration/identity/principal/provider/media/playlist/radio/policy）。
 查看详细帮助: yuzu-cli help <命令>，如 yuzu-cli help playlist add`)
 }
 
