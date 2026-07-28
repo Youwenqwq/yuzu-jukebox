@@ -218,6 +218,49 @@ Content-Type: application/json
 - 若 external subject key 已链接到一个 Principal，返回该 Principal 的**当前** identity/roles；若未链接，则生成稳定 guest：ID 为 `ig_` + `sha256(JSON([integration_id, adapter_id, scope.type, scope.id, subject.id]))` 的完整十六进制，`kind=guest`，roles 为 `listener+requester`。Client MUST 把返回的 `identity.id` 当作不透明值。
 - scope 绑定、subject 链接和 controller grant 的管理合同见 6.4。
 
+### 3.7 OIDC 自助绑定 external subject
+
+已通过普通 OIDC session 登录的用户可在任意 Client 中生成一次性绑定码，再从目标 IM subject 通过可信 Integration 消费该码。Server 只接收标准化的 external key，不解析平台消息文本。
+
+```http
+POST /api/v1/auth/external-binding-codes
+Authorization: Bearer <oidc_session_token>
+```
+
+请求无 body；成功为 HTTP 201：
+
+```json
+{ "code": "7K3M-9P2D-X4RT", "expires_at": 1720000600000 }
+```
+
+- 必须是 Principal 含非空 `oidc_subject` 的普通登录 session；guest/password session 以及任何 `integration_id` 非空的 actor session 均为 403 `forbidden`。
+- 绑定码为 12 位 Crockford Base32（展示时按 4 位分组），固定有效期 10 分钟。服务端只保存 SHA-256 hash；同一 Principal 新签发会使旧码失效，code/hash 不写入 audit。
+- 绑定码不预绑定 Integration；持有有效 Integration token 的 Client 可从用户实际发送绑定命令的平台事件中消费。Integration Client MUST 使用事件自身的 adapter/scope/subject，MUST NOT 接受消息发送者指定这些标识。
+
+兑换：
+
+```http
+POST /api/v1/integrations/bindings/redeem
+Authorization: Bearer <integration_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "code": "7K3M-9P2D-X4RT",
+  "adapter_id": "astrbot",
+  "scope": { "type": "group", "id": "123456" },
+  "subject": { "id": "9988" }
+}
+```
+
+成功为 HTTP 200，返回写入的完整 external key、`principal_id` 及当前 OIDC identity。兑换只建立 `external_identity_links`，不签发 actor session；后续操作继续使用 3.6 的 actor resolve。
+
+- 首次兑换原子消费绑定码并建立 subject→Principal 链接；相同 Integration、相同完整 external key 的网络重试返回相同成功结果，并携带 `Idempotency-Replayed: true`。
+- 已消费的码不能用于其他 external key；错误、过期或已被其他 key 消费的码返回 400 `invalid_binding_code`。
+- external key 已链接到同一 Principal 时视为成功；已链接到其他 Principal 时返回 409 `conflict`，自助流程绝不覆盖。`room_admin` 可继续使用 6.4 的管理接口处理迁移或恢复。
+- 绑定沿用 3.6 的 scope-specific key；同一平台账号出现在不同 scope 时需要分别绑定。绑定只影响后续 actor resolve，不改写 synthetic guest 的既有队列、历史或 audit 归属。
+
 ## 4. 房间会话
 
 ### 4.1 房间快照
@@ -453,12 +496,14 @@ pause│  │resume
 | `POST /api/v1/auth/oidc` | — | OIDC 认证，body `{"id_token","access_token"?}`；返回 `{identity, session_token}`；未启用 404 |
 | `GET /api/v1/auth/oidc/config` | — | 公开 OIDC 配置：issuer / client_id / client_ids（含 extra_client_ids）；未启用 404 |
 | `DELETE /api/v1/auth/session` | 非空 Bearer token | 按所给 token 吊销会话（即使已失效也返回成功）；缺 Authorization 时 401 |
+| `POST /api/v1/auth/external-binding-codes` | 普通 OIDC session | 签发 10 分钟一次性 external subject 绑定码；HTTP 201；不接受 actor session |
 | `GET /api/v1/integrations` | `room_admin` | 持久 Integration 元数据列表；绝不返回 token/hash |
 | `POST /api/v1/integrations` | `room_admin` | 创建 Integration，HTTP 201；明文 token 只在本次响应返回 |
 | `PATCH /api/v1/integrations/{id}` | `room_admin` | 修改名称和/或 active；停用立即吊销 actor sessions |
 | `POST /api/v1/integrations/{id}/token` | `room_admin` | 轮换 token；旧 token 与 actor sessions 立即失效，新 token 只返回一次 |
 | `DELETE /api/v1/integrations/{id}` | `room_admin` | 删除 Integration 及其 scope/subject/session/idempotency 数据 |
 | `POST /api/v1/integrations/actors/resolve` | Integration token | external scope/subject → 5 分钟标准 actor session（见 3.6、6.4） |
+| `POST /api/v1/integrations/bindings/redeem` | Integration token | 从真实 external scope/subject 消费绑定码并建立 Principal 链接（见 3.7、6.4） |
 | `GET /api/v1/integrations/{id}/scopes` | `room_admin` | 该 Integration 的全部 external scope→Room 绑定，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/scopes` | `room_admin` | 绑定/解绑 external scope 的默认 Room |
 | `GET /api/v1/integrations/{id}/subjects` | `room_admin` | 该 Integration 的全部 external subject→Principal 链接，稳定排序 |
@@ -577,7 +622,14 @@ pause│  │resume
 
 ### 6.4 Integration 生命周期、映射与 Room grant 管理
 
-actor resolve 使用 Integration token；本节其余管理端点必须使用具有当前 `room_admin` role 的**标准 session**。Integration token 本身调用这些端点会是 401，普通 actor token 默认只有 listener/requester，调用会是 403。
+actor resolve 与绑定码兑换使用 Integration token；绑定码签发使用普通 OIDC session；本节其余管理端点必须使用具有当前 `room_admin` role 的**标准 session**。Integration token 本身调用管理端点会是 401，普通 actor token 默认只有 listener/requester，调用会是 403。
+
+**OIDC 自助绑定：**
+
+- `POST /api/v1/auth/external-binding-codes` 与 `POST /api/v1/integrations/bindings/redeem` 的严格合同见 3.7。
+- 签发成功为 HTTP 201；无普通 OIDC session 为 401/403。兑换请求未知字段、缺失或空白字段为 400 `bad_request`。
+- 兑换会在同一事务中重新确认 Integration active、token hash 未轮换、绑定码状态、OIDC Principal active 状态及当前 subject 链接；token 在请求期间失效为 401。
+- 成功签发与首次成功绑定均写 audit，但 code/hash 永不进入 detail；精确重试不重复写绑定 audit。
 
 **Resolve：**
 
@@ -637,6 +689,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `queue_full` | — | WS：达到房间 `max_queue` 上限；合同 A REST 当前返回 `conflict` |
 | `quota_exceeded` | — | WS：超出 `policy.queue_limits`；合同 A REST 当前返回 `conflict` |
 | `idempotency_required` | 400 | Integration actor 调 Room 写端点时缺少 `Idempotency-Key` |
+| `invalid_binding_code` | 400 | external subject 绑定码错误、过期，或已被其他 external key 消费 |
 | `not_found` | 404 | Room、条目、媒体、Principal、Integration 或映射不存在 |
 | `conflict` | 409 | REST 当前状态冲突、重复资源、请求与已有绑定不匹配 |
 | `idempotency_conflict` | 409 | 同一幂等 key 与操作被用于不同请求 body |
