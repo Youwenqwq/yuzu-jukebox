@@ -17,11 +17,15 @@ type mpvClient struct {
 	cmd  *exec.Cmd
 	conn net.Conn
 	enc  *json.Encoder
-
-	wmu     sync.Mutex
-	pmu     sync.Mutex
+	wmu  sync.Mutex
+	pmu  sync.Mutex
 	pending map[int]chan mpvResponse
 	reqSeq  int
+
+	// loadfileIndex: mpv ≥0.38 的 loadfile 在 flags 与 options 之间需要 index
+	// 参数（常用 -1）；更旧版本会把 index 当成 invalid parameter。
+	// 0=未探测, 1=需要 index, -1=不要 index。
+	loadfileIndex int
 }
 
 type mpvResponse struct {
@@ -117,21 +121,65 @@ func (m *mpvClient) command(args ...any) (mpvResponse, error) {
 
 // LoadFile 加载 URL；startSec > 0 时用 loadfile options 开播即定位
 // （mpv ≥0.34），避免从 0 播一秒再大跳。
+//
+// loadfile 参数布局在 mpv 版本间不兼容：
+//   - 旧版（如 Debian/RPi 0.35）：loadfile <url> <flags> <options>
+//   - 新版（如 0.38+）：loadfile <url> <flags> <index> <options>
+// 首次失败时自动切换布局并缓存偏好。
 func (m *mpvClient) LoadFile(url string, startSec float64) error {
-	var resp mpvResponse
-	var err error
-	if startSec > 0 {
-		resp, err = m.command("loadfile", url, "replace", -1,
-			map[string]any{"start": fmt.Sprintf("%.3f", startSec)})
-	} else {
-		resp, err = m.command("loadfile", url)
+	if startSec <= 0 {
+		resp, err := m.command("loadfile", url)
+		if err != nil {
+			return err
+		}
+		if resp.Error != "success" {
+			return fmt.Errorf("loadfile: %s", resp.Error)
+		}
+		return nil
 	}
+
+	opts := map[string]any{"start": fmt.Sprintf("%.3f", startSec)}
+	try := func(withIndex bool) (mpvResponse, error) {
+		if withIndex {
+			return m.command("loadfile", url, "replace", -1, opts)
+		}
+		return m.command("loadfile", url, "replace", opts)
+	}
+
+	// 已探测：直接用偏好布局
+	if m.loadfileIndex != 0 {
+		resp, err := try(m.loadfileIndex > 0)
+		if err != nil {
+			return err
+		}
+		if resp.Error != "success" {
+			return fmt.Errorf("loadfile: %s", resp.Error)
+		}
+		return nil
+	}
+
+	// 先试旧布局（树莓派 Debian mpv 0.35 常见），失败再试带 index 的新布局。
+	// 新布局在旧版上是 invalid parameter；旧布局在新版上同样是 invalid parameter。
+	resp, err := try(false)
+	if err != nil {
+		return err
+	}
+	if resp.Error == "success" {
+		m.loadfileIndex = -1
+		return nil
+	}
+	if resp.Error != "invalid parameter" {
+		return fmt.Errorf("loadfile: %s", resp.Error)
+	}
+
+	resp, err = try(true)
 	if err != nil {
 		return err
 	}
 	if resp.Error != "success" {
 		return fmt.Errorf("loadfile: %s", resp.Error)
 	}
+	m.loadfileIndex = 1
 	return nil
 }
 
