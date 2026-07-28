@@ -49,6 +49,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, err
 	}
 	integrations := auth.NewIntegrationRegistry(st)
+	bindings := auth.NewBindingService(st)
 
 	authm := auth.NewManager(cfg.AdminPassword, st)
 	go runSessionJanitor(ctx, authm, st)
@@ -81,7 +82,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 
 	ws := wsapi.NewServer(authm, controls)
-	api := httpapi.NewServer(st, authm, integrations, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping)
+	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping)
 
 	if cfg.CacheAutoPruneDays > 0 {
 		go runCacheJanitor(ctx, c, cfg.CacheAutoPruneDays)
@@ -107,6 +108,9 @@ func runSessionJanitor(ctx context.Context, manager *auth.Manager, st *store.Sto
 			}
 			if err := st.PruneIdempotency(ctx, now.UnixMilli()); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("[http] idempotency prune failed: %v", err)
+			}
+			if err := st.PruneExternalBindingCodes(ctx, now.UnixMilli()); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[auth] binding code prune failed: %v", err)
 			}
 		}
 	}

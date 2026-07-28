@@ -29,6 +29,7 @@ type Server struct {
 	st           *store.Store
 	authm        *auth.Manager
 	integrations *auth.IntegrationRegistry
+	bindings     *auth.BindingService
 	rooms        *room.Manager
 	reg          *provider.Registry
 	local        *local.Provider
@@ -44,6 +45,7 @@ func NewServer(
 	st *store.Store,
 	authm *auth.Manager,
 	integrations *auth.IntegrationRegistry,
+	bindings *auth.BindingService,
 	rooms *room.Manager,
 	reg *provider.Registry,
 	lp *local.Provider,
@@ -54,7 +56,7 @@ func NewServer(
 	oidcRoleMap map[string][]string,
 ) *Server {
 	return &Server{
-		st: st, authm: authm, integrations: integrations,
+		st: st, authm: authm, integrations: integrations, bindings: bindings,
 		rooms: rooms, reg: reg, local: lp, cache: c, controls: controls, ws: ws,
 		oidc: oidc, oidcRoleMap: oidcRoleMap,
 	}
@@ -65,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/guest", s.guestAuth)
 	mux.HandleFunc("POST /api/v1/auth/oidc", s.oidcAuth)
 	mux.HandleFunc("GET /api/v1/auth/oidc/config", s.oidcConfig)
+	mux.HandleFunc("POST /api/v1/auth/external-binding-codes", s.issueExternalBindingCode)
 	mux.HandleFunc("DELETE /api/v1/auth/session", s.logout)
 	mux.HandleFunc("GET /api/v1/integrations", s.listIntegrations)
 	mux.HandleFunc("POST /api/v1/integrations", s.createIntegration)
@@ -72,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/integrations/{id}", s.deleteIntegration)
 	mux.HandleFunc("POST /api/v1/integrations/{id}/token", s.rotateIntegrationToken)
 	mux.HandleFunc("POST /api/v1/integrations/actors/resolve", s.resolveIntegrationActor)
+	mux.HandleFunc("POST /api/v1/integrations/bindings/redeem", s.redeemExternalBindingCode)
 	mux.HandleFunc("GET /api/v1/integrations/{id}/scopes", s.listIntegrationScopes)
 	mux.HandleFunc("PUT /api/v1/integrations/{id}/scopes", s.manageIntegrationScope)
 	mux.HandleFunc("DELETE /api/v1/integrations/{id}/scopes", s.manageIntegrationScope)
