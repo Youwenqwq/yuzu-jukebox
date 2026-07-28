@@ -201,7 +201,7 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
-				Al       ncmAl  `json:"al"`
+				Album    ncmAl  `json:"album"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -216,7 +216,7 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 				out = append(out, provider.Track{
 					Ref: ref, Title: song.Name,
 					Artist: joinArtists(namesOf(song.Artists)), DurationMs: song.Duration,
-					Album: song.Al.Name, CoverURL: song.Al.PicURL,
+					Album: song.Album.Name, CoverURL: song.Album.PicURL,
 					SourceURL: sourceURL(song.ID), Contributors: artistContributors(song.Artists),
 				})
 			}
@@ -301,7 +301,7 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
-				Al       ncmAl  `json:"al"`
+				Album    ncmAl  `json:"album"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -316,7 +316,7 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				out = append(out, provider.Track{
 					Ref: ref, Title: song.Name,
 					Artist: joinArtists(namesOf(song.Artists)), DurationMs: song.Duration,
-					Album: song.Al.Name, CoverURL: song.Al.PicURL,
+					Album: song.Album.Name, CoverURL: song.Album.PicURL,
 					SourceURL: sourceURL(song.ID), Contributors: artistContributors(song.Artists),
 				})
 			}
@@ -329,7 +329,7 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				ID       int64  `json:"id"`
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
-				Al       ncmAl  `json:"al"`
+				Album    ncmAl  `json:"album"`
 				Artists  []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
@@ -367,8 +367,8 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 					Title:        item.Name,
 					Artist:       joinArtists(namesOf(item.Artists)),
 					DurationMs:   item.Duration,
-					Album:        item.Al.Name,
-					CoverURL:     item.Al.PicURL,
+					Album:        item.Album.Name,
+					CoverURL:     item.Album.PicURL,
 					SourceURL:    sourceURL(item.ID),
 					Contributors: artistContributors(item.Artists),
 				}
