@@ -28,38 +28,26 @@ const agentVersion = "1.0.0"
 
 func main() {
 	var (
-		server       = flag.String("server", envOr("YUZU_SERVER", "http://127.0.0.1:8080"), "server base URL")
-		roomID       = flag.String("room", envOr("YUZU_ROOM", ""), "room id to join (required)")
-		playerID     = flag.String("player-id", envOr("YUZU_PLAYER_ID", ""), "stable player id (defaults to hostname)")
-		name         = flag.String("name", envOr("YUZU_NAME", "mpv-agent"), "display name")
-		password     = flag.String("password", envOr("YUZU_PASSWORD", ""), "global admin password (optional)")
-		roomPassword = flag.String("room-password", envOr("YUZU_ROOM_PASSWORD", ""), "room guest password")
-		mpvPath      = flag.String("mpv", "mpv", "mpv binary path")
-		socket       = flag.String("socket", filepath.Join(os.TempDir(), "yuzu-agent.sock"), "mpv IPC socket path")
-		ao           = flag.String("ao", "", "mpv audio output (e.g. null for headless testing)")
+		server  = flag.String("server", envOr("YUZU_SERVER", "http://127.0.0.1:8080"), "server base URL")
+		key     = flag.String("key", envOr("YUZU_PLAYER_KEY", ""), "persistent Player key (required)")
+		mpvPath = flag.String("mpv", "mpv", "mpv binary path")
+		socket  = flag.String("socket", filepath.Join(os.TempDir(), "yuzu-agent.sock"), "mpv IPC socket path")
+		ao      = flag.String("ao", "", "mpv audio output (e.g. null for headless testing)")
 	)
 	flag.Parse()
-	if *roomID == "" {
-		log.Fatal("-room required")
-	}
-	stablePlayerID := *playerID
-	if stablePlayerID == "" {
-		if hostname, err := os.Hostname(); err == nil && hostname != "" {
-			stablePlayerID = hostname
-		} else {
-			stablePlayerID = *name
-		}
+	if *key == "" {
+		log.Fatal("-key required")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *server, *roomID, stablePlayerID, *name, *password, *roomPassword, *mpvPath, *socket, *ao); err != nil {
+	if err := run(ctx, *server, *key, *mpvPath, *socket, *ao); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, server, roomID, playerID, name, password, roomPassword, mpvPath, socket, ao string) error {
+func run(ctx context.Context, server, playerKey, mpvPath, socket, ao string) error {
 	// MPV 只启动一次，跨重连存活。重连成功后服务器会推送播放快照，
 	// 代理把快照重新渲染进去（loadedRef 每会话重置，强制刷新）。
 	os.Remove(socket)
@@ -76,7 +64,8 @@ func run(ctx context.Context, server, roomID, playerID, name, password, roomPass
 	const maxBackoff = 30 * time.Second
 	for {
 		start := time.Now()
-		err := session(ctx, server, roomID, playerID, name, password, roomPassword, mpv)
+		err := session(ctx, server, playerKey, mpv)
+		mpv.Stop()
 		if ctx.Err() != nil {
 			return nil // 主动退出
 		}
@@ -96,10 +85,10 @@ func run(ctx context.Context, server, roomID, playerID, name, password, roomPass
 	}
 }
 
-// session 一次连接的完整生命周期：连接 → 校时 → 认证 → 进房 → 渲染。
+// session 一次连接的完整生命周期：连接 → 校时 → Player 认证 → 服务端分配 → 渲染。
 // 任何环节失败都返回错误，由 run 决定重连。
-func session(ctx context.Context, server, roomID, playerID, name, password, roomPassword string, mpv *mpvClient) error {
-	// 1. 协议连接：校时 → 认证 → 进房
+func session(ctx context.Context, server, playerKey string, mpv *mpvClient) error {
+	// 1. 协议连接：校时 → Player Key 认证 → 上报设备能力
 	cli, err := client.Dial(ctx, server)
 	if err != nil {
 		return err
@@ -108,26 +97,19 @@ func session(ctx context.Context, server, roomID, playerID, name, password, room
 	if err := cli.ClockSync(ctx, 5); err != nil {
 		return err
 	}
-	id, err := cli.Auth(ctx, name, password)
+	identity, err := cli.AuthPlayer(ctx, playerKey)
 	if err != nil {
 		return err
 	}
-	if err := cli.Join(ctx, roomID, roomPassword); err != nil {
+	device := "yuzu-agent"
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		device = hostname
+	}
+	playerID, err := cli.PlayerHello(ctx, device, agentVersion, []string{"volume", "mute"})
+	if err != nil {
 		return err
 	}
-	log.Printf("joined room %q as %s (%s)", roomID, id.Name, id.ID)
-
-	// 注册为可管理播放端（音量/静音远程可调；换房由服务端迁移连接）
-	device := name
-	if h, err := os.Hostname(); err == nil && h != "" {
-		device = h
-	}
-	playerID, err = cli.PlayerHello(ctx, playerID, device, agentVersion, []string{"volume", "mute", "join_room"})
-	if err != nil {
-		log.Printf("player.hello: %v (管理面不可用，继续播放)", err)
-	} else {
-		log.Printf("registered as player %s", playerID)
-	}
+	log.Printf("registered as player %s (%s); waiting for server Room assignment", playerID, identity.Name)
 	reportState := func() {
 		vol, verr := mpv.Volume()
 		muted, merr := mpv.Muted()
@@ -202,6 +184,15 @@ func session(ctx context.Context, server, roomID, playerID, name, password, room
 				if err == nil {
 					scheduleApply(pb)
 				}
+			case "room.left":
+				if debounce != nil {
+					debounce.Stop()
+				}
+				cur = client.Playback{}
+				loadedRef = ""
+				syncer.reset()
+				mpv.Stop()
+				log.Printf("Room assignment removed")
 			case "player.command":
 				op, value, err := client.ParsePlayerCommand(m)
 				if err != nil {

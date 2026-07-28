@@ -99,16 +99,19 @@ curl -X POST localhost:8080/api/v1/media/upload -H "Authorization: Bearer $TOKEN
   -F file=@song.wav -F title="My Song"
 ```
 
-然后一边收听、一边控制：
+然后配置 Player、启动收听 Agent，再用 CLI 控制：
 
 ```bash
-# 收听：MPV 播放代理；player-id 是物理设备的稳定标识
-./bin/yuzu-agent -room lobby -room-password room123 -player-id living-room-speaker -name my-mpv
-
-# 控制：CLI
 export YUZU_SERVER=http://127.0.0.1:8080
 export YUZU_PASSWORD=admin123          # 需要管理员权限的操作
 export YUZU_ROOM_PASSWORD=room123
+
+# 创建持久 Player；复制命令输出的一次性 key
+yuzu-cli player create living-room-speaker "Living Room Speaker"
+yuzu-cli player bind living-room-speaker lobby
+
+# Agent 只持有 Player key；Player ID 与 Room 均由服务端解析
+YUZU_PLAYER_KEY=yzp_xxx ./bin/yuzu-agent
 
 yuzu-cli room list
 yuzu-cli search "海阔天空" -provider ncm   # 或 -provider local
@@ -116,7 +119,6 @@ yuzu-cli add lobby ncm:347230              # 点歌（空闲时自动开播）
 yuzu-cli queue lobby                       # 查看当前播放与队列
 yuzu-cli skip lobby                        # 切歌（Room controller）
 yuzu-cli pause|resume|seek lobby [秒]       # 播放控制（Room controller）
-
 # 配置 NCM 账号凭据解锁高音质（可选，先校验再生效，热更新）
 yuzu-cli provider credential ncm "MUSIC_U=xxxx"
 
@@ -167,11 +169,14 @@ yuzu-cli provider qrlogin ncm
 | `room top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
 | `policy set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
 | `policy show <room>` | 已认证 | 查看房间策略 |
-| `player list` | `room_admin` | 全部在线 headless player 清单 |
-| `player volume <id> <0-100>` | `room_admin` | 单设备维护音量 |
-| `player mute <id> on\|off` | `room_admin` | 单设备静音 |
-| `player bind <id> <room>` / `player unbind <id> <room>` | `room_admin` | 持久分配/解除一个 Room headless player |
-| `room players <room>` | `room_admin` | 查看 Room 的绑定和在线 headless players |
+| `player list` / `player show <id>` | `room_admin` | 持久 Player 资源、Room 分配与在线状态 |
+| `player create <id> <name>` | `room_admin` | 创建 Player；明文 key 仅显示一次 |
+| `player rename/enable/disable <id> ...` | `room_admin` | 管理名称和启停状态；停用立即断开 Agent |
+| `player key rotate <id>` | `room_admin` | 轮换一次性显示的 key，旧 key 立即失效 |
+| `player delete <id>` | `room_admin` | 删除 Player、Room 分配并断开 Agent |
+| `player volume <id> <0-100>` / `player mute <id> on\|off` | `room_admin` | 在线单设备维护指令 |
+| `player bind <id> <room>` / `player unbind <id> <room>` | `room_admin` | 持久分配/解除；支持先分配离线 Player |
+| `room players <room>` | `room_admin` | 查看 Room 的持久分配和在线状态 |
 | `room volume <room> <0-100>` | Room controller | 持久化 Room desired volume 并向在线 Agent fan-out |
 | `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
@@ -199,13 +204,17 @@ desired volume。普通 listener 和其他 Room 的 actor 仍无权控制。
 
 ### 代理重连
 
-yuzu-agent 内置断线重连：指数退避 1s→30s，重连后自动重走
-校时→认证→进房并恢复渲染。`-player-id`（或 `YUZU_PLAYER_ID`）应在同一物理
-设备上保持稳定；省略时使用 hostname。一个 Room 可持久分配多个 Agent，
-每个 Agent 重连后按稳定 ID 自动回到分配 Room。Room desired volume 初始未设置，
-不会覆盖设备本地音量；首次设置后持久化，在线 Agent 立即收到，离线 Agent
-重连时自动收敛。普通 WebUI 不注册 player plane，因此本地音量不受影响。
+yuzu-agent 内置断线重连：指数退避 1s→30s，连续稳定运行后重置。
+每次连接自动重走校时→Player key 认证→`player.hello`；Room ID 只从服务端持久
+分配解析，Agent 不携带 Room 密码，也不能自行换房。一个 Room 可持久分配多个
+Player；可先离线创建和分配，Agent 首次上线即进入目标 Room。Room desired
+volume 初始未设置，不会覆盖设备本地音量；首次设置后持久化，在线 Agent
+立即收到，离线 Agent 重连时自动收敛。普通 WebUI 不注册 player plane，
+因此本地音量不受影响。停用 Player、轮换 key 或删除 Player 会立即断开 Agent。
 服务端重启后，各房间自动续播队首（当前曲目不持久化，队列保留）。
+
+从旧版自声明 `player_id` 升级时，已有 Room 分配会保留为 disabled Player。
+管理员先执行 `player key rotate <id>` 保存新 key，再执行 `player enable <id>`。
 
 ### OIDC 登录（Zitadel 等 IdP）
 
@@ -314,7 +323,7 @@ yuzu-cli radio stop lobby                            # 退出电台
 | 二进制 | 形态 | 职责 |
 |---|---|---|
 | `yuzu-server` | 常驻服务 | 房间状态机、Provider 管理、流式缓存、WS/REST API |
-| `yuzu-agent` | 常驻客户端 | 纯收听：加入房间，把权威播放状态渲染到本地 MPV，自动校偏 |
+| `yuzu-agent` | 常驻客户端 | 持 Player key 认证；由服务端分配 Room，把权威播放状态渲染到本地 MPV，自动校偏 |
 | `yuzu-cli` | 短命命令 | 搜索、点歌、队列/播放控制、凭据与 Integration 管理 |
 
 官方客户端共享公共 REST/WS 协议；WebUI、Chatbot Plugin、Game Mod 只需按
@@ -329,7 +338,7 @@ cmd/
   yuzu-cli/           # 控制端
 internal/
   app/                # 依赖组装（main 与集成测试共用）
-  auth/               # Identity/Roles、会话、出流票据
+  auth/               # Identity/Roles、会话、Player key、出流票据
   cache/              # 流式缓存：tee 首拉、singleflight、LRU
   client/             # Go 协议客户端库（agent 与 CLI 共用）
   config/             # JSON 配置
@@ -347,7 +356,7 @@ docs/
 ## 部署
 
 生产部署（TLS 反代、systemd、备份、secret_key 注意）见 [docs/deploy.md](docs/deploy.md)。
-凭据（ncm/bili cookie）使用 config 的 `secret_key` AES-GCM 加密落盘，历史明文记录自动兼容。
+Provider 凭据（ncm/bili cookie）使用 config 的 `secret_key` AES-GCM 加密落盘；Player key 和 Integration token 仅保存 SHA-256 hash，明文只在创建/轮换时返回一次。
 
 ## 测试
 

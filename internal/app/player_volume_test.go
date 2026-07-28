@@ -48,23 +48,27 @@ func TestIntegrationActorControlsAllHeadlessPlayersInItsRoom(t *testing.T) {
 	if err := web.Join(ctx, "lobby", ""); err != nil {
 		t.Fatal(err)
 	}
-	first := connectTestPlayer(t, ctx, e, "speaker-1", "lobby")
+	firstCredential, err := client.RESTCreatePlayer(ctx, e.srv.URL, adminToken, "speaker-1", "Speaker 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCredential, err := client.RESTCreatePlayer(ctx, e.srv.URL, adminToken, "speaker-2", "Speaker 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, playerID := range []string{"speaker-1", "speaker-2"} {
+		if _, err := client.RESTBindRoomPlayer(ctx, e.srv.URL, adminToken, "lobby", playerID); err != nil {
+			t.Fatalf("bind Player %s: %v", playerID, err)
+		}
+	}
+	first := connectTestPlayer(t, ctx, e, firstCredential.Key)
 	defer first.Close()
-	second := connectTestPlayer(t, ctx, e, "speaker-2", "lobby")
+	second := connectTestPlayer(t, ctx, e, secondCredential.Key)
 	defer func() {
 		if second != nil {
 			second.Close()
 		}
 	}()
-	for _, playerID := range []string{"speaker-1", "speaker-2"} {
-		resp := integrationJSONRequest(t, e, http.MethodPut, adminToken,
-			"/api/v1/rooms/lobby/players/"+playerID, nil)
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			t.Fatalf("bind player %s status %d", playerID, resp.StatusCode)
-		}
-		resp.Body.Close()
-	}
 
 	initialOutput, err := client.RESTRoomOutput(ctx, e.srv.URL, adminToken, "lobby")
 	if err != nil {
@@ -156,25 +160,21 @@ func TestIntegrationActorControlsAllHeadlessPlayersInItsRoom(t *testing.T) {
 	}
 	waitForPlayerVolume(t, ctx, first, 44)
 
-	second = connectTestPlayer(t, ctx, e, "speaker-2", "other")
+	second = connectTestPlayer(t, ctx, e, secondCredential.Key)
 	waitForPlayerVolume(t, ctx, second, 44)
 }
 
-func connectTestPlayer(t *testing.T, ctx context.Context, e *env, playerID, roomID string) *client.Client {
+func connectTestPlayer(t *testing.T, ctx context.Context, e *env, playerKey string) *client.Client {
 	t.Helper()
 	player, err := client.Dial(ctx, e.srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := player.Auth(ctx, playerID, ""); err != nil {
+	if _, err := player.AuthPlayer(ctx, playerKey); err != nil {
 		player.Close()
 		t.Fatal(err)
 	}
-	if err := player.Join(ctx, roomID, ""); err != nil {
-		player.Close()
-		t.Fatal(err)
-	}
-	if _, err := player.PlayerHello(ctx, playerID, playerID, "test", []string{"volume"}); err != nil {
+	if _, err := player.PlayerHello(ctx, "test-output", "test", []string{"volume"}); err != nil {
 		player.Close()
 		t.Fatal(err)
 	}
@@ -216,10 +216,15 @@ func waitForPlayerOffline(t *testing.T, ctx context.Context, e *env, adminToken,
 		}
 		found := false
 		for _, player := range players {
-			found = found || player.ID == playerID
+			if player.ID == playerID {
+				found = true
+				if !player.Online {
+					return
+				}
+			}
 		}
 		if !found {
-			return
+			t.Fatalf("Player %s disappeared", playerID)
 		}
 		select {
 		case <-time.After(10 * time.Millisecond):

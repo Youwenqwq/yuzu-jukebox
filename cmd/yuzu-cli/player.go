@@ -19,23 +19,116 @@ func cmdPlayers(ctx context.Context) error {
 		return err
 	}
 	if len(players) == 0 {
-		fmt.Println("（无在线播放端）")
+		fmt.Println("（无 Player）")
 		return nil
 	}
-	for _, p := range players {
-		room := p.RoomID
-		if room == "" {
-			room = "-"
-		}
-		mute := ""
-		if p.Muted {
-			mute = " [静音]"
-		}
-		fmt.Printf("%s  %-16s %-12s 房间:%-12s 音量:%3d%%%s  (%s)\n",
-			p.ID, p.Device, p.Identity, room, p.Volume, mute,
-			strings.Join(p.Caps, ","))
+	for _, player := range players {
+		printPlayer(player)
 	}
 	return nil
+}
+
+func cmdPlayerShow(ctx context.Context, playerID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	player, err := client.RESTGetPlayer(ctx, *server, token, playerID)
+	if err != nil {
+		return err
+	}
+	printPlayer(player)
+	return nil
+}
+
+func cmdPlayerCreate(ctx context.Context, playerID, name string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	credential, err := client.RESTCreatePlayer(ctx, *server, token, playerID, name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("player: %s (%s)\nkey: %s\n", credential.Player.ID, credential.Player.Name, credential.Key)
+	fmt.Println("请立即保存 key；服务端不会再次显示。")
+	return nil
+}
+
+func cmdPlayerRename(ctx context.Context, playerID, name string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	player, err := client.RESTUpdatePlayer(ctx, *server, token, playerID, client.PlayerUpdate{Name: &name})
+	if err != nil {
+		return err
+	}
+	printPlayer(player)
+	return nil
+}
+
+func cmdPlayerSetActive(ctx context.Context, playerID string, active bool) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	player, err := client.RESTUpdatePlayer(ctx, *server, token, playerID, client.PlayerUpdate{Active: &active})
+	if err != nil {
+		return err
+	}
+	printPlayer(player)
+	return nil
+}
+
+func cmdPlayerRotateKey(ctx context.Context, playerID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	credential, err := client.RESTRotatePlayerKey(ctx, *server, token, playerID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("key: %s\n", credential.Key)
+	fmt.Println("请立即保存 key；旧 key 已失效，服务端不会再次显示。")
+	return nil
+}
+
+func cmdPlayerDelete(ctx context.Context, playerID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.RESTDeletePlayer(ctx, *server, token, playerID); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func printPlayer(player client.PlayerInfo) {
+	status := "offline"
+	if player.Online {
+		status = "online"
+	}
+	active := "disabled"
+	if player.Active {
+		active = "active"
+	}
+	roomID := player.RoomID
+	if roomID == "" {
+		roomID = "-"
+	}
+	fmt.Printf("%s  %-20s %-8s %-8s room:%-12s", player.ID, player.Name, active, status, roomID)
+	if player.Online {
+		muted := ""
+		if player.Muted {
+			muted = " muted"
+		}
+		fmt.Printf(" volume:%3d%%%s device:%s caps:%s", player.Volume, muted, player.Device, strings.Join(player.Caps, ","))
+	}
+	fmt.Println()
 }
 
 func cmdPlayerVolume(ctx context.Context, playerID string, volStr string) error {
@@ -117,11 +210,12 @@ func cmdRoomPlayers(ctx context.Context, roomID string) error {
 		if player.Online {
 			status = fmt.Sprintf("online volume:%d%%", player.Volume)
 		}
-		binding := "临时"
-		if player.Bound {
-			binding = "已绑定"
+		active := "disabled"
+		if player.Active {
+			active = "active"
 		}
-		fmt.Printf("%s  %-8s %-20s %s\n", player.ID, binding, status, player.Device)
+		fmt.Printf("%s  %-20s %-8s %-20s %s\n",
+			player.ID, player.Name, active, status, player.Device)
 	}
 	return nil
 }

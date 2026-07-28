@@ -109,7 +109,8 @@ func setupManagementQueries(t *testing.T) managementQueryFixture {
 	controls := control.NewService(rooms, reg, control.NewAuthorizer(st))
 	s := &Server{
 		st: st, authm: authm, integrations: integrations, rooms: rooms,
-		reg: reg, cache: roomCache, controls: controls, ws: wsapi.NewServer(authm, controls, st),
+		reg: reg, cache: roomCache, controls: controls,
+		ws: wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
 	}
 	return managementQueryFixture{
 		handler: s.Handler(), adminToken: adminToken,

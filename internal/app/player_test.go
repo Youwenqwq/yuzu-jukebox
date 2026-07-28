@@ -8,19 +8,33 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 )
 
-// TestPlayerPlane 播放端管理平面全链路：
-// hello 注册 → REST 列表可见 → REST 指令经 WS 下发 → 服务端迁移房间。
+// TestPlayerPlane covers authenticated registration, runtime state, maintenance
+// commands, server-controlled Room assignment, and management authorization.
 func TestPlayerPlane(t *testing.T) {
 	e := newEnv(t)
 	_, adminToken := e.guestAuth("admin", "admin123")
 
-	// 两个房间：player 起始在 a，稍后迁移到 b
-	e.post(adminToken, "/api/v1/rooms", map[string]any{"id": "pa", "name": "房A"})
-	e.post(adminToken, "/api/v1/rooms", map[string]any{"id": "pb", "name": "房B"})
+	for _, roomID := range []string{"pa", "pb"} {
+		resp := e.post(adminToken, "/api/v1/rooms", map[string]any{"id": roomID, "name": roomID})
+		resp.Body.Close()
+	}
+	credential, err := client.RESTCreatePlayer(
+		context.Background(), e.srv.URL, adminToken, "speaker-01", "Speaker 01",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RESTBindRoomPlayer(
+		context.Background(), e.srv.URL, adminToken, "pa", "speaker-01",
+	); err != nil {
+		t.Fatal(err)
+	}
 
-	// 播放端连接：auth → join pa → player.hello
+	// Player key authentication and hello; Room is resolved by the server.
 	wsURL := "ws" + strings.TrimPrefix(e.srv.URL, "http") + "/ws/v1"
 	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
 	if err != nil {
@@ -55,16 +69,17 @@ func TestPlayerPlane(t *testing.T) {
 		return nil
 	}
 
-	send("auth", "a1", map[string]any{"name": "speaker-01"})
+	send("auth", "a1", map[string]any{"player_key": credential.Key})
 	readRawUntil("auth.ok")
-	send("room.join", "a2", map[string]any{"room_id": "pa"})
-	readRawUntil("room.joined")
-	send("player.hello", "a3", map[string]any{"player_id": "speaker-01", "device": "speaker-01", "caps": []string{"volume", "mute", "join_room"}})
+	send("player.hello", "a2", map[string]any{
+		"device": "speaker-01", "version": "test", "caps": []string{"volume", "mute"},
+	})
 	hello := readRawUntil("player.hello.ok")
 	playerID := hello["data"].(map[string]any)["player_id"].(string)
-	if playerID == "" {
-		t.Fatal("no player_id in hello.ok")
+	if playerID != "speaker-01" {
+		t.Fatalf("hello Player ID = %q", playerID)
 	}
+	readRawUntil("room.joined")
 
 	// REST 列表应包含该播放端
 	resp := e.get(adminToken, "/api/v1/players")
@@ -113,17 +128,24 @@ func TestPlayerPlane(t *testing.T) {
 		t.Fatalf("state not reflected: %+v", listed2.Players)
 	}
 
-	// join_room：服务端迁移连接 → 收到新房间的 joined + 快照
-	resp = e.post(adminToken, "/api/v1/players/"+playerID+"/command",
-		map[string]any{"op": "join_room", "value": "pb"})
-	if resp.StatusCode != 200 {
-		t.Fatalf("join_room status %d", resp.StatusCode)
+	// Rebinding is the only Room migration path and persists before moving online.
+	if _, err := client.RESTBindRoomPlayer(
+		context.Background(), e.srv.URL, adminToken, "pb", playerID,
+	); err != nil {
+		t.Fatal(err)
 	}
 	joined := readRawUntil("room.joined")
 	if joined["data"].(map[string]any)["room_id"] != "pb" {
 		t.Fatalf("not migrated to pb: %v", joined)
 	}
-	readRawUntil("playback.changed") // 快照随之而来
+	readRawUntil("playback.changed")
+
+	resp = e.post(adminToken, "/api/v1/players/"+playerID+"/command",
+		map[string]any{"op": "join_room", "value": "pa"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("join_room command status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
 
 	// 权限：普通访客不能管理播放端
 	_, guestToken := e.guestAuth("rando", "")

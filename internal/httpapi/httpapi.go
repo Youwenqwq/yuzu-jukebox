@@ -127,6 +127,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/cover/{ref}", s.cover)
 	mux.HandleFunc("GET /api/v1/lyrics", s.lyrics)
 	mux.HandleFunc("GET /api/v1/players", s.listPlayers)
+	mux.HandleFunc("POST /api/v1/players", s.createPlayer)
+	mux.HandleFunc("GET /api/v1/players/{id}", s.getPlayer)
+	mux.HandleFunc("PATCH /api/v1/players/{id}", s.updatePlayer)
+	mux.HandleFunc("DELETE /api/v1/players/{id}", s.deletePlayer)
+	mux.HandleFunc("POST /api/v1/players/{id}/key", s.rotatePlayerKey)
 	mux.HandleFunc("POST /api/v1/players/{id}/command", s.playerCommand)
 	mux.Handle("/ws/v1", s.ws)
 	return mux
@@ -462,6 +467,14 @@ func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "room not found")
 		return
 	}
+	bindings, err := s.st.ListRoomPlayerBindings(r.Context(), roomID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load Room players")
+		return
+	}
+	for _, binding := range bindings {
+		_ = s.ws.LeavePlayerRoom(binding.PlayerID)
+	}
 	s.rooms.Delete(roomID)
 	if err := s.st.DeleteRoom(r.Context(), roomID); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
@@ -512,16 +525,7 @@ func (s *Server) roomStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
 }
 
-// listPlayers 在线播放端清单（room_admin）。
-func (s *Server) listPlayers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"players": s.ws.Players()})
-}
-
-// playerCommand 向播放端下发指令（room_admin）。
-// op: set_volume(0-100) | set_mute(bool) | join_room(room_id)。
+// playerCommand 向在线播放端下发音量或静音指令（room_admin）。
 func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
 	if !ok {
@@ -552,17 +556,6 @@ func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		err = s.ws.CommandPlayer(playerID, body.Op, v)
-	case "join_room":
-		var v string
-		if json.Unmarshal(body.Value, &v) != nil || v == "" {
-			writeErr(w, http.StatusBadRequest, "bad_request", "join_room needs room id string")
-			return
-		}
-		if _, err = s.ws.Player(playerID); err == nil {
-			if _, err = s.st.BindRoomPlayer(r.Context(), v, playerID); err == nil {
-				err = s.ws.JoinPlayerRoom(playerID, v)
-			}
-		}
 	default:
 		writeErr(w, http.StatusBadRequest, "bad_request", "unknown op "+body.Op)
 		return

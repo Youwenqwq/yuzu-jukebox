@@ -11,15 +11,14 @@ import (
 
 // ---------- 播放端管理平面 ----------
 
-// PlayerHello 用稳定 player_id 注册为可管理播放端。
-// caps 建议：["volume","mute","join_room"]。
+// PlayerHello registers runtime device metadata after Player-key authentication.
 func (c *Client) PlayerHello(
 	ctx context.Context,
-	playerID, device, version string,
+	device, version string,
 	caps []string,
 ) (string, error) {
 	m, err := c.call(ctx, "player.hello", map[string]any{
-		"player_id": playerID, "device": device, "version": version, "caps": caps,
+		"device": device, "version": version, "caps": caps,
 	})
 	if err != nil {
 		return "", err
@@ -57,21 +56,26 @@ func ParsePlayerCommand(m Message) (op string, value json.RawMessage, err error)
 	return d.Op, d.Value, err
 }
 
-// PlayerInfo 播放端快照（REST）。
+// PlayerInfo is the persistent Player resource merged with online runtime state.
 type PlayerInfo struct {
-	ID          string   `json:"id"`
-	Device      string   `json:"device"`
-	Version     string   `json:"version,omitempty"`
-	Caps        []string `json:"caps"`
-	IdentityID  string   `json:"identity_id"`
-	Identity    string   `json:"identity_name"`
-	RoomID      string   `json:"room_id,omitempty"`
-	Volume      int      `json:"volume"`
-	Muted       bool     `json:"muted"`
-	ConnectedAt int64    `json:"connected_at"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Active        bool     `json:"active"`
+	KeyConfigured bool     `json:"key_configured"`
+	Online        bool     `json:"online"`
+	RoomID        string   `json:"room_id,omitempty"`
+	Device        string   `json:"device,omitempty"`
+	Version       string   `json:"version,omitempty"`
+	Caps          []string `json:"caps"`
+	Volume        int      `json:"volume,omitempty"`
+	Muted         bool     `json:"muted,omitempty"`
+	CreatedAt     int64    `json:"created_at"`
+	UpdatedAt     int64    `json:"updated_at"`
+	LastSeenAt    *int64   `json:"last_seen_at,omitempty"`
+	ConnectedAt   int64    `json:"connected_at,omitempty"`
 }
 
-// RESTPlayers 在线播放端清单（room_admin）。
+// RESTPlayers lists persistent Players and their current online state.
 func RESTPlayers(ctx context.Context, server, token string) ([]PlayerInfo, error) {
 	var out struct {
 		Players []PlayerInfo `json:"players"`
@@ -80,8 +84,59 @@ func RESTPlayers(ctx context.Context, server, token string) ([]PlayerInfo, error
 	return out.Players, err
 }
 
-// RESTPlayerCommand 向播放端下发指令（room_admin）。
-// op: set_volume(int) | set_mute(bool) | join_room(room_id string)。
+type PlayerCredential struct {
+	Player PlayerInfo `json:"player"`
+	Key    string     `json:"key"`
+}
+
+func RESTCreatePlayer(ctx context.Context, server, token, id, name string) (PlayerCredential, error) {
+	var out PlayerCredential
+	err := restCall(ctx, server, http.MethodPost, "/api/v1/players", token,
+		map[string]any{"id": id, "name": name}, &out)
+	return out, err
+}
+
+func RESTGetPlayer(ctx context.Context, server, token, playerID string) (PlayerInfo, error) {
+	var out struct {
+		Player PlayerInfo `json:"player"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/players/"+url.PathEscape(playerID), token, nil, &out)
+	return out.Player, err
+}
+
+type PlayerUpdate struct {
+	Name   *string `json:"name,omitempty"`
+	Active *bool   `json:"active,omitempty"`
+}
+
+func RESTUpdatePlayer(
+	ctx context.Context,
+	server, token, playerID string,
+	update PlayerUpdate,
+) (PlayerInfo, error) {
+	var out struct {
+		Player PlayerInfo `json:"player"`
+	}
+	err := restCall(ctx, server, http.MethodPatch,
+		"/api/v1/players/"+url.PathEscape(playerID), token, update, &out)
+	return out.Player, err
+}
+
+func RESTRotatePlayerKey(ctx context.Context, server, token, playerID string) (PlayerCredential, error) {
+	var out PlayerCredential
+	err := restCall(ctx, server, http.MethodPost,
+		"/api/v1/players/"+url.PathEscape(playerID)+"/key", token, nil, &out)
+	return out, err
+}
+
+func RESTDeletePlayer(ctx context.Context, server, token, playerID string) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/players/"+url.PathEscape(playerID), token, nil, &struct{}{})
+}
+
+// RESTPlayerCommand sends an online device command (room_admin).
+// op: set_volume(int) | set_mute(bool).
 func RESTPlayerCommand(ctx context.Context, server, token, playerID, op string, value any) error {
 	return restCall(ctx, server, http.MethodPost, "/api/v1/players/"+url.PathEscape(playerID)+"/command", token,
 		map[string]any{"op": op, "value": value}, &struct{}{})
@@ -89,14 +144,15 @@ func RESTPlayerCommand(ctx context.Context, server, token, playerID, op string, 
 
 // RoomPlayerInfo 是 Room 中 headless player 的绑定和在线状态。
 type RoomPlayerInfo struct {
-	ID       string `json:"id"`
-	Bound    bool   `json:"bound"`
-	Online   bool   `json:"online"`
-	Device   string `json:"device,omitempty"`
-	RoomID   string `json:"room_id,omitempty"`
-	Volume   int    `json:"volume"`
-	Muted    bool   `json:"muted"`
-	Identity string `json:"identity_name,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Active bool   `json:"active"`
+	Bound  bool   `json:"bound"`
+	Online bool   `json:"online"`
+	Device string `json:"device,omitempty"`
+	RoomID string `json:"room_id,omitempty"`
+	Volume int    `json:"volume"`
+	Muted  bool   `json:"muted"`
 }
 
 // RoomOutput 是 Room 的权威 headless output desired state。
@@ -148,7 +204,7 @@ func RESTRoomPlayers(ctx context.Context, server, token, roomID string) ([]RoomP
 	return out.Players, err
 }
 
-// RESTBindRoomPlayer 由 room_admin 持久分配在线 player，并将其迁移到目标 Room。
+// RESTBindRoomPlayer persistently assigns an online or offline Player to a Room.
 func RESTBindRoomPlayer(
 	ctx context.Context,
 	server, token, roomID, playerID string,

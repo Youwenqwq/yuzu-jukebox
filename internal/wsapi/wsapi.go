@@ -28,6 +28,7 @@ type PlayerBindingStore interface {
 
 type Server struct {
 	authm          *auth.Manager
+	playerAuth     *auth.PlayerRegistry
 	control        *control.Service
 	playerBindings PlayerBindingStore
 	accessProbes   *accessProbeLimiter
@@ -38,11 +39,12 @@ type Server struct {
 
 func NewServer(
 	authm *auth.Manager,
+	playerAuth *auth.PlayerRegistry,
 	controlService *control.Service,
 	playerBindings PlayerBindingStore,
 ) *Server {
 	return &Server{
-		authm: authm, control: controlService, playerBindings: playerBindings,
+		authm: authm, playerAuth: playerAuth, control: controlService, playerBindings: playerBindings,
 		accessProbes: newAccessProbeLimiter(),
 		players:      map[string]*client{},
 	}
@@ -57,11 +59,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := &client{
-		server: s,
-		conn:   conn,
-		id:     newClientID(),
-		remote: r.RemoteAddr,
-		send:   make(chan any, 64),
+		server:    s,
+		conn:      conn,
+		id:        newClientID(),
+		remote:    r.RemoteAddr,
+		send:      make(chan any, 64),
+		closeOnce: make(chan struct{}),
 	}
 	go c.writeLoop()
 	c.readLoop()
@@ -70,14 +73,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ---------- 客户端 ----------
 
 type client struct {
-	server   *Server
-	conn     *websocket.Conn
-	id       string
-	remote   string
-	identity *auth.Identity
-	room     *room.Room
-	player   *playerState // 非 nil = 已注册播放端
-	send     chan any
+	server    *Server
+	conn      *websocket.Conn
+	id        string
+	remote    string
+	identity  *auth.Identity
+	playerKey string
+	room      *room.Room
+	player    *playerState // 非 nil = 已注册播放端
+	send      chan any
 
 	closeOnce chan struct{}
 }
@@ -102,6 +106,8 @@ func (c *client) Identity() auth.Identity {
 // Send 实现 room.ClientConn：非阻塞；缓冲满则断开慢客户端。
 func (c *client) Send(msg any) {
 	select {
+	case <-c.closeOnce:
+		return
 	case c.send <- msg:
 	default:
 		c.close()
@@ -109,17 +115,27 @@ func (c *client) Send(msg any) {
 }
 
 func (c *client) close() {
+	c.disconnect("slow consumer")
+}
+
+func (c *client) disconnect(reason string) {
 	select {
 	case <-c.closeOnce:
 	default:
 		close(c.closeOnce)
-		c.conn.Close(websocket.StatusGoingAway, "slow consumer")
+		c.conn.Close(websocket.StatusGoingAway, reason)
 	}
 }
 
 func (c *client) writeLoop() {
 	ctx := context.Background()
-	for msg := range c.send {
+	for {
+		var msg any
+		select {
+		case <-c.closeOnce:
+			return
+		case msg = <-c.send:
+		}
 		data, err := json.Marshal(msg)
 		if err != nil {
 			continue
@@ -136,14 +152,13 @@ func (c *client) writeLoop() {
 func (c *client) readLoop() {
 	ctx := context.Background()
 	defer func() {
+		c.disconnect("connection closed")
 		if c.room != nil {
 			c.room.Leave(c)
 		}
 		if c.player != nil {
 			c.server.unregisterPlayer(c)
 		}
-		c.conn.Close(websocket.StatusNormalClosure, "")
-		close(c.send)
 	}()
 	for {
 		_, data, err := c.conn.Read(ctx)
@@ -166,6 +181,14 @@ func (c *client) readLoop() {
 // ---------- 协议处理 ----------
 
 func (c *client) dispatch(typ, ref string, data json.RawMessage) {
+	if c.identity != nil && c.identity.PlayerID != "" {
+		switch typ {
+		case "ping", "player.hello", "player.state":
+		default:
+			c.replyErr(ref, "forbidden", "Player connections only accept player-plane messages")
+			return
+		}
+	}
 	switch typ {
 	case "ping":
 		var d struct {
@@ -182,9 +205,29 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			Name         string `json:"name"`
 			Password     string `json:"password"`      // 全局管理员口令（可选）
 			SessionToken string `json:"session_token"` // 已有会话（REST 登录所得，可选）
+			PlayerKey    string `json:"player_key"`    // Headless Player 凭据
 		}
 		if err := json.Unmarshal(data, &d); err != nil {
 			c.replyErr(ref, "bad_request", "invalid auth payload")
+			return
+		}
+		if d.PlayerKey != "" {
+			if d.SessionToken != "" || d.Name != "" || d.Password != "" {
+				c.replyErr(ref, "bad_request", "player_key cannot be combined with user authentication")
+				return
+			}
+			player, err := c.server.playerAuth.ResolveKey(context.Background(), d.PlayerKey)
+			if err != nil {
+				c.replyErr(ref, "unauthorized", "invalid player_key")
+				return
+			}
+			id := auth.PlayerIdentity(player)
+			c.identity = &id
+			c.playerKey = d.PlayerKey
+			c.Send(map[string]any{
+				"type": "auth.ok", "ref": ref,
+				"data": map[string]any{"identity": id},
+			})
 			return
 		}
 		// 两条路径：session_token（REST 登录过，如 OIDC）或 guest 现场认证

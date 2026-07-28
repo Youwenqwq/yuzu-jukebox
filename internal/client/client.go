@@ -224,6 +224,21 @@ func (c *Client) AuthToken(ctx context.Context, sessionToken string) (Identity, 
 	return out.Identity, nil
 }
 
+// AuthPlayer authenticates a headless renderer with its persistent Player key.
+func (c *Client) AuthPlayer(ctx context.Context, playerKey string) (Identity, error) {
+	m, err := c.call(ctx, "auth", map[string]any{"player_key": playerKey})
+	if err != nil {
+		return Identity{}, err
+	}
+	var out struct {
+		Identity Identity `json:"identity"`
+	}
+	if err := json.Unmarshal(m.Data, &out); err != nil {
+		return Identity{}, err
+	}
+	return out.Identity, nil
+}
+
 // Join 加入房间。成功后快照经 Events() 推送。
 func (c *Client) Join(ctx context.Context, roomID, password string) error {
 	_, err := c.call(ctx, "room.join", map[string]any{"room_id": roomID, "password": password})

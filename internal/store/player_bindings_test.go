@@ -20,6 +20,13 @@ func TestRoomPlayerBindingsAllowMultiplePlayersAndMoveOneAtomically(t *testing.T
 			t.Fatal(err)
 		}
 	}
+	for _, playerID := range []string{"speaker-1", "speaker-2"} {
+		hash := make([]byte, 32)
+		copy(hash, playerID)
+		if _, err := st.CreatePlayer(ctx, playerID, playerID, hash); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := st.BindRoomPlayer(ctx, "a", "speaker-1"); err != nil {
 		t.Fatal(err)
 	}

@@ -28,7 +28,7 @@ const (
 type Identity struct {
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
-	Kind                 string   `json:"kind"` // guest | password | oidc
+	Kind                 string   `json:"kind"` // guest | password | oidc | player
 	Roles                []string `json:"roles"`
 	OIDCSubject          string   `json:"-"`
 	IntegrationID        string   `json:"-"`
@@ -36,6 +36,7 @@ type Identity struct {
 	IntegrationScopeType string   `json:"-"`
 	IntegrationScopeID   string   `json:"-"`
 	IntegrationRoomID    string   `json:"-"`
+	PlayerID             string   `json:"-"`
 }
 
 func (id Identity) HasRole(role string) bool {

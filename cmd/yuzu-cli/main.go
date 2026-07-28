@@ -691,10 +691,84 @@ source 取值：
 		},
 		"player list": {
 			usage:  "player list",
-			desc:   "列出在线播放端（管理员）",
-			detail: "显示所有已注册的可管理播放端：设备名、身份、所在房间、音量、能力。\n\n需要 room_admin 角色。",
+			desc:   "列出持久 Player 资源及在线状态（管理员）",
+			detail: "显示全部 Player：ID、名称、启停状态、Room 分配，以及在线设备状态。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				return withCtx(func(ctx context.Context) error { return cmdPlayers(ctx) })
+			},
+		},
+		"player show": {
+			usage: "player show <player_id>",
+			desc:  "查看 Player 资源（管理员）",
+			run: func(args []string) error {
+				if len(args) != 1 {
+					return errUsage("player show")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerShow(ctx, args[0]) })
+			},
+		},
+		"player create": {
+			usage:  "player create <player_id> <name>",
+			desc:   "创建 Player 并签发一次性 key（管理员）",
+			detail: "key 仅在创建响应中显示一次；保存后配置给 yuzu-agent -key。",
+			run: func(args []string) error {
+				if len(args) != 2 {
+					return errUsage("player create")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerCreate(ctx, args[0], args[1]) })
+			},
+		},
+		"player rename": {
+			usage: "player rename <player_id> <name>",
+			desc:  "重命名 Player（管理员）",
+			run: func(args []string) error {
+				if len(args) != 2 {
+					return errUsage("player rename")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerRename(ctx, args[0], args[1]) })
+			},
+		},
+		"player enable": {
+			usage: "player enable <player_id>",
+			desc:  "启用 Player（管理员）",
+			run: func(args []string) error {
+				if len(args) != 1 {
+					return errUsage("player enable")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerSetActive(ctx, args[0], true) })
+			},
+		},
+		"player disable": {
+			usage:  "player disable <player_id>",
+			desc:   "停用 Player 并立即断开在线 Agent（管理员）",
+			detail: "Room 分配保留；重新启用后，Agent 可使用现有 key 重连。",
+			run: func(args []string) error {
+				if len(args) != 1 {
+					return errUsage("player disable")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerSetActive(ctx, args[0], false) })
+			},
+		},
+		"player key rotate": {
+			usage:  "player key rotate <player_id>",
+			desc:   "轮换 Player key 并断开旧连接（管理员）",
+			detail: "新 key 仅显示一次；旧 key 立即失效。",
+			run: func(args []string) error {
+				if len(args) != 1 {
+					return errUsage("player key rotate")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerRotateKey(ctx, args[0]) })
+			},
+		},
+		"player delete": {
+			usage:  "player delete <player_id>",
+			desc:   "删除 Player、Room 分配并断开 Agent（管理员）",
+			detail: "删除不可撤销；Player key 同时失效。",
+			run: func(args []string) error {
+				if len(args) != 1 {
+					return errUsage("player delete")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdPlayerDelete(ctx, args[0]) })
 			},
 		},
 		"player volume": {
@@ -721,8 +795,8 @@ source 取值：
 		"player bind": {
 			usage: "player bind <player_id> <room>",
 			desc:  "将 headless player 分配到 Room（管理员）",
-			detail: `持久分配指定在线播放端并立即把连接迁入该 Room。
-agent 重连后会按稳定 player_id 自动回到绑定 Room；一个 Room 可包含多个 player。`,
+			detail: `持久分配指定 Player；在线时立即迁入目标 Room，离线时等待重连。
+Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Player。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("player bind")
@@ -733,7 +807,7 @@ agent 重连后会按稳定 player_id 自动回到绑定 Room；一个 Room 可�
 		"player unbind": {
 			usage:  "player unbind <player_id> <room>",
 			desc:   "解除 headless player 的 Room 分配（管理员）",
-			detail: "解除持久分配；不会断开或迁移当前播放端连接。",
+			detail: "解除持久分配；在线 Agent 立即离开 Room，但保持连接等待重新分配。",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("player unbind")

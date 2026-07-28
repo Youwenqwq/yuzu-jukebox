@@ -7,9 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"sort"
 	"time"
+
+	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 )
 
 // ---------- 播放端管理平面（player plane） ----------
@@ -44,11 +45,9 @@ type playerState struct {
 }
 
 var (
-	ErrPlayerNotFound      = errors.New("player not found")
-	ErrPlayerAlreadyOnline = errors.New("player is already online")
-	ErrPlayerCapability    = errors.New("player capability unavailable")
-	ErrNotAPlayer          = errors.New("connection is not a registered player")
-	playerIDPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	ErrPlayerNotFound   = errors.New("player not found")
+	ErrPlayerCapability = errors.New("player capability unavailable")
+	ErrNotAPlayer       = errors.New("connection is not a registered player")
 )
 
 // Players 全部在线播放端快照。
@@ -176,6 +175,36 @@ func (s *Server) JoinPlayerRoom(id, roomID string) error {
 	return nil
 }
 
+// LeavePlayerRoom removes an online Player from its assigned Room and tells the
+// Agent to stop rendering the previous Room.
+func (s *Server) LeavePlayerRoom(id string) error {
+	c, err := s.playerConn(id)
+	if err != nil {
+		return err
+	}
+	if c.room != nil {
+		c.room.Leave(c)
+		c.room = nil
+	}
+	c.Send(map[string]any{"type": "room.left", "data": map[string]any{}})
+	return nil
+}
+
+// DisconnectPlayer immediately revokes an online Player connection. The map
+// entry is removed before closing so a reconnect with a newly rotated key wins.
+func (s *Server) DisconnectPlayer(id, reason string) bool {
+	s.playersMu.Lock()
+	c, ok := s.players[id]
+	if ok {
+		delete(s.players, id)
+	}
+	s.playersMu.Unlock()
+	if ok {
+		c.disconnect(reason)
+	}
+	return ok
+}
+
 func (s *Server) applyRoomOutput(c *client) {
 	if s.playerBindings == nil || c.player == nil || c.room == nil ||
 		!playerHasCapability(c.player, "volume") {
@@ -205,14 +234,14 @@ func (s *Server) playerConn(id string) (*client, error) {
 	return c, nil
 }
 
-func (s *Server) registerPlayer(c *client, ps *playerState) error {
+func (s *Server) registerPlayer(c *client, ps *playerState) {
 	s.playersMu.Lock()
-	defer s.playersMu.Unlock()
-	if _, exists := s.players[ps.id]; exists {
-		return ErrPlayerAlreadyOnline
-	}
+	previous := s.players[ps.id]
 	s.players[ps.id] = c
-	return nil
+	s.playersMu.Unlock()
+	if previous != nil && previous != c {
+		previous.disconnect("player reconnected")
+	}
 }
 
 func (s *Server) unregisterPlayer(c *client) {
@@ -226,15 +255,17 @@ func (s *Server) unregisterPlayer(c *client) {
 // ---------- WS 消息处理 ----------
 
 func (c *client) handlePlayerHello(ref string, data json.RawMessage) {
-	var d struct {
-		PlayerID string   `json:"player_id"`
-		Device   string   `json:"device"`
-		Version  string   `json:"version"`
-		Caps     []string `json:"caps"`
+	if c.identity == nil || c.identity.PlayerID == "" || c.playerKey == "" {
+		c.replyErr(ref, "forbidden", "player_key authentication required")
+		return
 	}
-	if err := json.Unmarshal(data, &d); err != nil ||
-		!playerIDPattern.MatchString(d.PlayerID) || d.Device == "" {
-		c.replyErr(ref, "bad_request", "player.hello requires valid player_id and device")
+	var d struct {
+		Device  string   `json:"device"`
+		Version string   `json:"version"`
+		Caps    []string `json:"caps"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.Device == "" {
+		c.replyErr(ref, "bad_request", "player.hello requires device")
 		return
 	}
 	if c.player != nil {
@@ -242,10 +273,11 @@ func (c *client) handlePlayerHello(ref string, data json.RawMessage) {
 		return
 	}
 
+	playerID := c.identity.PlayerID
 	boundRoomID := ""
 	if c.server.playerBindings != nil {
 		binding, err := c.server.playerBindings.GetRoomPlayerBindingByPlayer(
-			context.Background(), d.PlayerID,
+			context.Background(), playerID,
 		)
 		if err == nil {
 			boundRoomID = binding.RoomID
@@ -256,21 +288,28 @@ func (c *client) handlePlayerHello(ref string, data json.RawMessage) {
 	}
 
 	player := &playerState{
-		id: d.PlayerID, device: d.Device, version: d.Version,
+		id: playerID, device: d.Device, version: d.Version,
 		caps:   append([]string(nil), d.Caps...),
 		volume: 100, connectedAt: time.Now().UnixMilli(),
 	}
 	c.player = player
-	if err := c.server.registerPlayer(c, player); err != nil {
+	c.server.registerPlayer(c, player)
+
+	current, err := c.server.playerAuth.ValidateKey(context.Background(), c.playerKey)
+	if err != nil || current.ID != playerID {
+		c.server.unregisterPlayer(c)
 		c.player = nil
-		c.replyErr(ref, "conflict", err.Error())
+		c.replyErr(ref, "unauthorized", "player key changed during registration")
+		c.disconnect("player credential revoked")
 		return
 	}
+	identity := auth.PlayerIdentity(current)
+	c.identity = &identity
 	c.Send(map[string]any{
 		"type": "player.hello.ok", "ref": ref,
 		"data": map[string]any{"player_id": player.id},
 	})
-	if boundRoomID != "" && (c.room == nil || c.room.ID != boundRoomID) {
+	if boundRoomID != "" {
 		if c.server.JoinPlayerRoom(player.id, boundRoomID) == nil {
 			return
 		}

@@ -12,14 +12,15 @@ import (
 )
 
 type roomPlayerView struct {
-	ID       string `json:"id"`
-	Bound    bool   `json:"bound"`
-	Online   bool   `json:"online"`
-	Device   string `json:"device,omitempty"`
-	RoomID   string `json:"room_id,omitempty"`
-	Volume   int    `json:"volume"`
-	Muted    bool   `json:"muted"`
-	Identity string `json:"identity_name,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Active bool   `json:"active"`
+	Bound  bool   `json:"bound"`
+	Online bool   `json:"online"`
+	Device string `json:"device,omitempty"`
+	RoomID string `json:"room_id,omitempty"`
+	Volume int    `json:"volume"`
+	Muted  bool   `json:"muted"`
 }
 
 type roomOutputView struct {
@@ -99,12 +100,21 @@ func (s *Server) listRoomPlayers(w http.ResponseWriter, r *http.Request) {
 	}
 	playersByID := make(map[string]roomPlayerView, len(bindings))
 	for _, binding := range bindings {
-		playersByID[binding.PlayerID] = roomPlayerView{ID: binding.PlayerID, Bound: true}
+		player, err := s.st.GetPlayer(r.Context(), binding.PlayerID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", "failed to load bound player")
+			return
+		}
+		playersByID[binding.PlayerID] = roomPlayerView{
+			ID: binding.PlayerID, Name: player.Name, Active: player.Active, Bound: true,
+		}
 	}
 	for _, info := range s.ws.RoomPlayers(roomID) {
 		view := roomPlayerViewFromInfo(info)
-		if bound, exists := playersByID[info.ID]; exists {
-			view.Bound = bound.Bound
+		if persisted, exists := playersByID[info.ID]; exists {
+			view.Name = persisted.Name
+			view.Active = persisted.Active
+			view.Bound = persisted.Bound
 		}
 		playersByID[info.ID] = view
 	}
@@ -136,17 +146,13 @@ func (s *Server) bindRoomPlayer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load room")
 		return
 	}
-	info, err := s.ws.Player(playerID)
-	if errors.Is(err, wsapi.ErrPlayerNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found", "player is not online")
+	player, err := s.st.GetPlayer(r.Context(), playerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "player not found")
 		return
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load player")
-		return
-	}
-	if !hasPlayerCapability(info.Caps, "volume") {
-		writeErr(w, http.StatusConflict, "conflict", "player does not support volume control")
 		return
 	}
 	binding, err := s.st.BindRoomPlayer(r.Context(), roomID, playerID)
@@ -154,13 +160,22 @@ func (s *Server) bindRoomPlayer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to bind room player")
 		return
 	}
-	if err := s.ws.JoinPlayerRoom(playerID, roomID); err != nil {
-		writeErr(w, http.StatusConflict, "conflict", "player disconnected while binding")
+	view := roomPlayerView{
+		ID: player.ID, Name: player.Name, Active: player.Active, Bound: true, RoomID: roomID,
+	}
+	if _, onlineErr := s.ws.Player(playerID); onlineErr == nil {
+		if s.ws.JoinPlayerRoom(playerID, roomID) == nil {
+			if current, currentErr := s.ws.Player(playerID); currentErr == nil {
+				view = roomPlayerViewFromInfo(current)
+				view.Name = player.Name
+				view.Active = player.Active
+				view.Bound = true
+			}
+		}
+	} else if !errors.Is(onlineErr, wsapi.ErrPlayerNotFound) {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load online player")
 		return
 	}
-	info, _ = s.ws.Player(playerID)
-	view := roomPlayerViewFromInfo(info)
-	view.Bound = true
 	s.audit(r.Context(), actor.ID, "room.player.bind", roomID, map[string]any{"player_id": playerID})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"binding": map[string]any{"room_id": binding.RoomID, "player_id": binding.PlayerID},
@@ -187,6 +202,9 @@ func (s *Server) unbindRoomPlayer(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to unbind room player")
 		return
+	}
+	if info, err := s.ws.Player(playerID); err == nil && info.RoomID == roomID {
+		_ = s.ws.LeavePlayerRoom(playerID)
 	}
 	s.audit(r.Context(), actor.ID, "room.player.unbind", roomID, map[string]any{"player_id": playerID})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -242,15 +260,6 @@ func (s *Server) requireRoomOutputVolume(
 func roomPlayerViewFromInfo(info wsapi.PlayerInfo) roomPlayerView {
 	return roomPlayerView{
 		ID: info.ID, Online: true, Device: info.Device, RoomID: info.RoomID,
-		Volume: info.Volume, Muted: info.Muted, Identity: info.Identity,
+		Volume: info.Volume, Muted: info.Muted,
 	}
-}
-
-func hasPlayerCapability(capabilities []string, target string) bool {
-	for _, capability := range capabilities {
-		if capability == target {
-			return true
-		}
-	}
-	return false
 }

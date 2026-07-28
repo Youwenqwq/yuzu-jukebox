@@ -262,6 +262,30 @@ Content-Type: application/json
 - external key 已链接到同一 Principal 时视为成功；已链接到其他 Principal 时返回 409 `conflict`，自助流程绝不覆盖。`room_admin` 可继续使用 6.4 的管理接口处理迁移或恢复。
 - 绑定沿用 3.6 的 scope-specific key；同一平台账号出现在不同 scope 时需要分别绑定。绑定只影响后续 actor resolve，不改写 synthetic guest 的既有队列、历史或 audit 归属。
 
+### 3.8 持久 Player 与 Player key
+
+Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room_admin` 先创建持久 `Player` 资源；服务端只在创建或轮换时返回一次明文 Player key，数据库仅保存 SHA-256 hash。
+
+```json
+→ { "type": "auth", "ref": "1", "data": { "player_key": "yzp_…" } }
+← { "type": "auth.ok", "ref": "1", "data": {
+      "identity": { "id": "pl_…", "name": "Living Room", "kind": "player" }
+  } }
+
+→ { "type": "player.hello", "ref": "2", "data": {
+      "device": "living-room-host", "version": "1.0.0",
+      "caps": ["volume", "mute"]
+  } }
+← { "type": "player.hello.ok", "ref": "2", "data": { "player_id": "living-room" } }
+```
+
+- `player_key` 不能与 `name/password/session_token` 混用。认证后连接只允许 `ping`、`player.hello`、`player.state`；Player 没有 Yuzu role，不能作为 Principal 点歌或控制 Room。
+- `player.hello` 不接受客户端声明的 Player ID；服务端只信任 key 解析出的持久 Player。每个 Player ID 同时只保留一条在线连接，新连接会关闭旧连接。
+- Room 分配由 `room_admin` 持久管理。若 Player 已分配 Room，`player.hello.ok` 之后服务端自动推送 `room.joined` 和五类快照；未分配时 Agent 保持在线等待。Player 不能自行 `room.join`/`room.leave`。
+- 停用 Player、轮换 key 或删除 Player 都会立即关闭在线连接。停用保留 key 与 Room 分配；重新启用后可用原 key 重连。轮换后旧 key 立即失效；删除级联清理 Room 分配。
+- `last_seen_at` 在成功 Player-key 认证时更新。Agent SHOULD 对断线使用有上限的指数退避；连续稳定运行后重置退避。
+- 从旧版自声明 `player_id` 升级时，已有 Room 分配迁移为 `active=false`、尚无 key 的 Player；管理员必须先轮换 key，再显式启用。没有凭据的 Player 不能启用。
+
 ## 4. 房间会话
 
 ### 4.1 房间快照
@@ -402,23 +426,25 @@ Content-Type: application/json
 
 ### 4.8 播放端管理平面（player plane）
 
-无头渲染端（嵌入式播放器）可用稳定 `player_id` 注册为**可管理播放端**。一个 Room 可包含多个 headless player；Room output 保存一个权威 desired volume，并向所有在线 Agent fan-out：
+无头渲染端（嵌入式播放器）使用 3.8 的 Player key 注册。一个 Room 可包含多个持久 Player；Room output 保存一个权威 desired volume，并向当前 Room 的在线 Agent fan-out：
 
-```
-agent: → {"type": "player.hello", "data": {"player_id": "living-room-left", "device": "speaker-01", "caps": ["volume","mute","join_room"]}}
-       ← {"type": "player.hello.ok", "data": {"player_id": "living-room-left"}}
-agent: → {"type": "player.state", "data": {"volume": 42, "muted": false}}   // 设备实际状态
-server:← {"type": "player.command", "data": {"op": "set_volume", "value": 37}}  // Room desired volume
+```json
+agent:  → {"type":"auth","data":{"player_key":"yzp_…"}}
+server: ← {"type":"auth.ok","data":{"identity":{"kind":"player",…}}}
+agent:  → {"type":"player.hello","data":{"device":"speaker-01","version":"1.0.0","caps":["volume","mute"]}}
+server: ← {"type":"player.hello.ok","data":{"player_id":"living-room-left"}}
+agent:  → {"type":"player.state","data":{"volume":42,"muted":false}}
+server: ← {"type":"player.command","data":{"op":"set_volume","value":37}}
 ```
 
-- 注册要求已认证身份；`player_id` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，在线时全局唯一。连接断开只注销在线状态，不删除 Room 分配。
-- 一个 Room 可持久分配多个 player，一个 player 最多属于一个 Room。`room_admin` 用 `PUT /api/v1/rooms/{id}/players/{player_id}` 分配并立即迁移在线连接，用对应 DELETE 解除分配；`GET .../players` 返回持久分配与当前在线 player 的并集。
+- Player ID 只由 key 的持久记录决定；`player.hello` 不能声明 ID。在线连接断开只清除 runtime state，不删除 Player 或 Room 分配。
+- 一个 Room 可持久分配多个 Player，一个 Player 最多属于一个 Room。`room_admin` 用 `PUT /api/v1/rooms/{id}/players/{player_id}` 分配在线或离线 Player；在线时立即迁入。对应 DELETE 解除分配并使在线 Agent 立即离房但保持连接；`GET .../players` 始终包含离线分配。
 - Room output volume 独立持久化。未设置时 `GET /api/v1/rooms/{id}/output` 返回 `"volume":null`，服务端不会覆盖设备本地音量；首次 PATCH 后成为 Room desired state。
-- `PATCH /api/v1/rooms/{id}/output {"volume":0..100}` 先持久化 desired volume，再向当前 Room 内所有已 `player.hello` 且声明 `volume` capability 的连接下发 `player.command`。没有在线 Agent 仍成功；离线 Agent、重连 Agent或之后迁入该 Room 的 Agent 会在注册/加入时自动收敛。
+- `PATCH /api/v1/rooms/{id}/output {"volume":0..100}` 先持久化 desired volume，再向当前 Room 内所有已 `player.hello` 且声明 `volume` capability 的连接下发 `player.command`。没有在线 Agent 仍成功；离线 Agent、重连 Agent 或之后迁入该 Room 的 Agent 会在注册/加入时自动收敛。
 - `player.state.volume` 只表示单设备实际状态，不反向修改 Room desired volume。管理员的单设备命令属于临时偏离，下一次 Room output 更新或 Agent 重连会覆盖它。
-- **换房间不收房间密码**：持久分配或 `join_room` 由服务端直接迁移连接；后者同时更新 player 的持久 Room 分配。
-- Room controller 可读写 output。普通 Integration actor 仅在 `policy.member_player_volume=true` 且 actor session 的签发 scope 当前映射到该 Room 时可读写；写请求必须带平台事件的 `Idempotency-Key`。Integration actor 不能调用 `/players` 列表或指定 `player_id`。
-- 普通 WebUI 没有执行 `player.hello`，不进入 player registry，也不会收到 `player.command`；浏览器本地音量完全不受 Room output 影响。
+- `player.command` 仅有 `set_volume` 与 `set_mute`。换房不是设备命令：Player 没有 Room 密码，也不能自行加入或离开；持久分配是唯一权威。
+- Room controller 可读写 output。普通 Integration actor 仅在 `policy.member_player_volume=true` 且 actor session 的签发 scope 当前映射到该 Room 时可读写；写请求必须带平台事件的 `Idempotency-Key`。Integration actor 不能管理 Player 资源、Room 分配或指定 `player_id`。
+- 普通 WebUI 不持有 Player key、不进入 player registry，也不会收到 `player.command`；浏览器本地音量完全不受 Room output 影响。
 
 ## 5. 房间状态机
 
@@ -534,12 +560,17 @@ pause│  │resume
 | `PATCH /api/v1/rooms/{id}/queue/{entry_id}` | controller | 移动待播条目 |
 | `POST /api/v1/rooms/{id}/playback/{op}` | controller | `pause/resume/skip/seek` |
 | `POST /api/v1/rooms/{id}/radio` / `DELETE /api/v1/rooms/{id}/radio` | controller | 开启/停止电台 |
-| `GET /api/v1/players` | `room_admin` | 全部在线 headless player 清单 |
-| `POST /api/v1/players/{id}/command` | `room_admin` | 单设备维护指令：set_volume / set_mute / join_room |
+| `GET /api/v1/players` | `room_admin` | 全部持久 Player 与在线状态；不返回 key/hash |
+| `POST /api/v1/players` | `room_admin` | 创建 `{"id","name"}`；HTTP 201，明文 key 只在本次响应返回 |
+| `GET /api/v1/players/{id}` | `room_admin` | Player 元数据、Room 分配与当前在线状态 |
+| `PATCH /api/v1/players/{id}` | `room_admin` | 修改 `name` 和/或 `active`；停用立即断开 Agent |
+| `POST /api/v1/players/{id}/key` | `room_admin` | 轮换 key；旧 key 和在线连接立即失效，新 key 只返回一次 |
+| `DELETE /api/v1/players/{id}` | `room_admin` | 删除 Player、Room 分配并断开在线 Agent |
+| `POST /api/v1/players/{id}/command` | `room_admin` | 在线设备维护指令：`set_volume` / `set_mute` |
 | `GET /api/v1/rooms/{id}/output` | controller，或同 Room 且 policy 允许的 Integration actor | Room headless output desired state；未设置时 `volume:null` |
 | `PATCH /api/v1/rooms/{id}/output` | controller，或同 Room 且 policy 允许的 Integration actor | 持久化 `{"volume":0..100}` 并 fan-out；Integration actor 必须有 `Idempotency-Key` |
-| `GET /api/v1/rooms/{id}/players` | `room_admin` | Room 持久分配与当前在线 headless player 的并集 |
-| `PUT/DELETE /api/v1/rooms/{id}/players/{player_id}` | `room_admin` | 分配/解除单个 player；PUT 要求 player 在线并迁入 Room |
+| `GET /api/v1/rooms/{id}/players` | `room_admin` | Room 持久分配与当前在线状态；离线 Player 仍在列表 |
+| `PUT/DELETE /api/v1/rooms/{id}/players/{player_id}` | `room_admin` | 分配/解除持久 Player；允许离线分配，在线时立即进入/离开 Room |
 
 **Room 访问配置：**
 
@@ -783,6 +814,21 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 周期任务：每 1s 校偏一次；每 60s 重校时一次（§2.2）
 ```
 
+
+#### 9.2.1 Headless Agent 连接时序
+
+```text
+1. 连接 WebSocket /ws/v1
+2. 校时：3–5 轮 ping/pong
+3. auth：{"player_key":"yzp_…"}
+4. player.hello：只上报 device/version/caps，不上报 Player ID
+5. 已分配 Room → 等 room.joined 与五类快照；未分配 → 保持在线等待
+6. player.state 上报设备实际 volume/muted；按 playback.changed 驱动渲染
+```
+
+Agent 不调用 `room.join`。管理员可以在 Agent 离线前先创建 Player 并绑定 Room；Agent 首次上线即自动进入目标 Room。
+
+
 ### 9.3 拉流
 
 - `GET {server}{stream_url}`（stream_url 已含 ticket 与版本前缀，直接拼接服务器基址即可）。
@@ -791,9 +837,10 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 
 ### 9.4 断线与重连
 
-- WS 连接和 Room listener 关系是内存态：断线即离房。普通 session 持久化且可在过期/吊销前复用；Integration `actor_token` 只有效 5 分钟，过期后须重新 resolve。
-- WS 重连后 MUST 重新校时、以仍有效的 session token 认证并 join 以取得全量快照；token 已失效则先重新登录/resolve。
-- 服务端会主动断开发送缓冲满的慢客户端；客户端实现 SHOULD 指数退避重连（如 1s/2s/5s/10s 封顶）。
+- 普通 WS 连接和 Room listener 关系是内存态：断线即离房。普通 session 持久化且可在过期/吊销前复用；Integration `actor_token` 只有效 5 分钟，过期后须重新 resolve。
+- 普通 WS 重连后 MUST 重新校时、以仍有效的 session token 认证并 join 以取得全量快照；token 已失效则先重新登录/resolve。
+- Headless Agent 重连后 MUST 用 Player key 重新认证并发送 `player.hello`；服务端按持久 Room 分配自动加入，不得发送 `room.join`。
+- 服务端会主动断开发送缓冲满、Player 停用/删除、key 轮换或同 ID 被新连接替代的连接。客户端 SHOULD 指数退避重连（如 1s/2s/5s/10s/30s 封顶），稳定运行后重置退避。
 
 ### 9.5 其他纪律
 
@@ -804,7 +851,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 
 ### 9.6 参考实现
 
-仓库 `internal/client/` 是本协议 WS、无状态 Room REST 与 Integration actor/管理 API 的 Go 参考实现；`cmd/yuzu-agent/`（MPV 渲染代理）与 `cmd/yuzu-cli/`（控制端）是两类 Client 的最小完整示例。
+仓库 `internal/client/` 是本协议 WS、无状态 Room REST、Player 生命周期与 Integration actor/管理 API 的 Go 参考实现；`cmd/yuzu-agent/`（MPV 渲染代理）与 `cmd/yuzu-cli/`（控制端）是两类 Client 的最小完整示例。
 
 Go Client 提供完整生命周期、管理查询和幂等写 helper，可直接供第一方 CLI 或外部 Integration Client 复用：
 
@@ -817,9 +864,11 @@ scopes, err := client.RESTListIntegrationScopes(ctx, server, roomAdminToken, int
 subjects, err := client.RESTListIntegrationSubjects(ctx, server, roomAdminToken, integrationID)
 principals, err := client.RESTListPrincipals(ctx, server, roomAdminToken, query, limit)
 grants, err := client.RESTListRoomGrants(ctx, server, roomAdminToken, roomID)
+player, err := client.RESTCreatePlayer(ctx, server, roomAdminToken, id, name)
+_, err = client.RESTBindRoomPlayer(ctx, server, roomAdminToken, roomID, player.Player.ID)
 
 writeCtx := client.WithIdempotencyKey(ctx, platformEventID)
 _, err = client.RESTRoomQueueAdd(writeCtx, server, actorToken, roomID, trackRef)
 ```
 
-`created.Token` / `rotated.Token` 只应写入 secret store，不得记录日志。`caps.Controller` 是服务端 Authorizer 的最终判断；管理查询 DTO 可用于选择目标后调用 scope/subject/grant helpers，无需读取服务端配置或 secret。
+Integration 的 `created.Token` / `rotated.Token` 与 Player 的 `player.Key` 只应写入 secret store，不得记录日志。`caps.Controller` 是服务端 Authorizer 的最终判断；管理查询 DTO 可用于选择目标后调用 scope/subject/grant/Player helpers，无需读取服务端配置或 secret。
