@@ -53,6 +53,10 @@ func TestManagementCommandsRejectMissingArgs(t *testing.T) {
 		{name: "room controller list"},
 		{name: "room controller grant", args: []string{"lobby"}},
 		{name: "room controller revoke", args: []string{"lobby"}},
+		{name: "player bind", args: []string{"speaker-1"}},
+		{name: "player unbind", args: []string{"speaker-1"}},
+		{name: "room players"},
+		{name: "room volume", args: []string{"lobby"}},
 	}
 
 	for _, tt := range tests {

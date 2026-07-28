@@ -156,10 +156,12 @@ yuzu-cli provider qrlogin ncm
 | `room top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
 | `policy set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
 | `policy show <room>` | 已认证 | 查看房间策略 |
-| `player list` | `room_admin` | 在线播放端清单 |
-| `player volume <id> <0-100>` | `room_admin` | 远程调音量 |
-| `player mute <id> on\|off` | `room_admin` | 远程静音 |
-| `player bind <id> <room>` / `player unbind <room>` | `room_admin` | 持久绑定/解绑 Room primary player |
+| `player list` | `room_admin` | 全部在线 headless player 清单 |
+| `player volume <id> <0-100>` | `room_admin` | 单设备维护音量 |
+| `player mute <id> on\|off` | `room_admin` | 单设备静音 |
+| `player bind <id> <room>` / `player unbind <id> <room>` | `room_admin` | 持久分配/解除一个 Room headless player |
+| `room players <room>` | `room_admin` | 查看 Room 的绑定和在线 headless players |
+| `room volume <room> <0-100>` | Room controller | 持久化 Room desired volume 并向在线 Agent fan-out |
 | `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
 | `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
 | `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
@@ -181,16 +183,18 @@ yuzu-cli policy set lobby '{"max_queue":100,"queue_limits":{"guest":5,"room_admi
 `max_queue` 为队列总上限；`queue_limits` 按身份 kind/role 限待播数
 （命中 0 = 显式不限）。guest 身份 ID 由名字确定性派生，限额跨会话成立。
 `member_player_volume` 缺省关闭；开启后也只允许由可信 Integration 签发、
-且 external scope 当前映射到该 Room 的 actor token 调整已绑定 primary player 的音量。
-普通 listener 和其他 Room 的 actor 仍无权控制。
+且 external scope 当前映射到该 Room 的 actor token 调整 Room headless output
+desired volume。普通 listener 和其他 Room 的 actor 仍无权控制。
 
 ### 代理重连
 
 yuzu-agent 内置断线重连：指数退避 1s→30s，重连后自动重走
 校时→认证→进房并恢复渲染。`-player-id`（或 `YUZU_PLAYER_ID`）应在同一物理
-设备上保持稳定；省略时使用 hostname。Room primary player 绑定持久化，
-agent 重连后按该 ID 自动回到绑定 Room。服务端重启后，各房间自动续播队首
-（当前曲目不持久化，队列保留）。
+设备上保持稳定；省略时使用 hostname。一个 Room 可持久分配多个 Agent，
+每个 Agent 重连后按稳定 ID 自动回到分配 Room。Room desired volume 初始未设置，
+不会覆盖设备本地音量；首次设置后持久化，在线 Agent 立即收到，离线 Agent
+重连时自动收敛。普通 WebUI 不注册 player plane，因此本地音量不受影响。
+服务端重启后，各房间自动续播队首（当前曲目不持久化，队列保留）。
 
 ### OIDC 登录（Zitadel 等 IdP）
 

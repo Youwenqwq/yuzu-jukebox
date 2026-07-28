@@ -87,9 +87,10 @@ func RESTPlayerCommand(ctx context.Context, server, token, playerID, op string, 
 		map[string]any{"op": op, "value": value}, &struct{}{})
 }
 
-// RoomPlayerInfo 是 Room primary player 的在线状态。
+// RoomPlayerInfo 是 Room 中 headless player 的绑定和在线状态。
 type RoomPlayerInfo struct {
 	ID       string `json:"id"`
+	Bound    bool   `json:"bound"`
 	Online   bool   `json:"online"`
 	Device   string `json:"device,omitempty"`
 	RoomID   string `json:"room_id,omitempty"`
@@ -98,18 +99,56 @@ type RoomPlayerInfo struct {
 	Identity string `json:"identity_name,omitempty"`
 }
 
-// RESTRoomPlayer 读取 Room 当前绑定的 primary player。
-// Room controller 和允许成员调音量的同 Room Integration actor 可调用。
-func RESTRoomPlayer(ctx context.Context, server, token, roomID string) (RoomPlayerInfo, error) {
-	var out struct {
-		Player RoomPlayerInfo `json:"player"`
-	}
-	err := restCall(ctx, server, http.MethodGet,
-		"/api/v1/rooms/"+url.PathEscape(roomID)+"/player", token, nil, &out)
-	return out.Player, err
+// RoomOutput 是 Room 的权威 headless output desired state。
+// Volume 为 nil 表示从未设置，不覆盖 Agent 的设备本地音量。
+type RoomOutput struct {
+	Volume    *int  `json:"volume"`
+	UpdatedAt int64 `json:"updated_at,omitempty"`
 }
 
-// RESTBindRoomPlayer 由 room_admin 绑定在线 player，并将其迁移到目标 Room。
+type RoomOutputUpdate struct {
+	Output   RoomOutput `json:"output"`
+	Delivery struct {
+		CommandsSent int `json:"commands_sent"`
+	} `json:"delivery"`
+}
+
+// RESTRoomOutput 读取 Room 的 desired output state。
+func RESTRoomOutput(ctx context.Context, server, token, roomID string) (RoomOutput, error) {
+	var out struct {
+		Output RoomOutput `json:"output"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/output", token, nil, &out)
+	return out.Output, err
+}
+
+// RESTRoomOutputSetVolume 设置 Room 的 desired volume 并 fan-out 至当前在线
+// headless players。Integration actor 调用时，ctx 必须通过
+// WithIdempotencyKey 携带平台事件 ID。
+func RESTRoomOutputSetVolume(
+	ctx context.Context,
+	server, actorToken, roomID string,
+	volume int,
+) (RoomOutputUpdate, error) {
+	var out RoomOutputUpdate
+	err := restCall(ctx, server, http.MethodPatch,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/output", actorToken,
+		map[string]any{"volume": volume}, &out)
+	return out, err
+}
+
+// RESTRoomPlayers 读取 Room 的绑定 player 与当前在线 headless player 并集。
+func RESTRoomPlayers(ctx context.Context, server, token, roomID string) ([]RoomPlayerInfo, error) {
+	var out struct {
+		Players []RoomPlayerInfo `json:"players"`
+	}
+	err := restCall(ctx, server, http.MethodGet,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/players", token, nil, &out)
+	return out.Players, err
+}
+
+// RESTBindRoomPlayer 由 room_admin 持久分配在线 player，并将其迁移到目标 Room。
 func RESTBindRoomPlayer(
 	ctx context.Context,
 	server, token, roomID, playerID string,
@@ -118,25 +157,14 @@ func RESTBindRoomPlayer(
 		Player RoomPlayerInfo `json:"player"`
 	}
 	err := restCall(ctx, server, http.MethodPut,
-		"/api/v1/rooms/"+url.PathEscape(roomID)+"/player", token,
-		map[string]any{"player_id": playerID}, &out)
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/players/"+url.PathEscape(playerID),
+		token, nil, &out)
 	return out.Player, err
 }
 
-// RESTUnbindRoomPlayer 由 room_admin 解除 Room primary player 绑定。
-func RESTUnbindRoomPlayer(ctx context.Context, server, token, roomID string) error {
+// RESTUnbindRoomPlayer 由 room_admin 解除指定 player 的 Room 分配。
+func RESTUnbindRoomPlayer(ctx context.Context, server, token, roomID, playerID string) error {
 	return restCall(ctx, server, http.MethodDelete,
-		"/api/v1/rooms/"+url.PathEscape(roomID)+"/player", token, nil, &struct{}{})
-}
-
-// RESTRoomPlayerSetVolume 调整 Room primary player 音量。
-// Integration actor 调用时，ctx 必须通过 WithIdempotencyKey 携带平台事件 ID。
-func RESTRoomPlayerSetVolume(
-	ctx context.Context,
-	server, actorToken, roomID string,
-	volume int,
-) error {
-	return restCall(ctx, server, http.MethodPost,
-		"/api/v1/rooms/"+url.PathEscape(roomID)+"/player/volume", actorToken,
-		map[string]any{"volume": volume}, &struct{}{})
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/players/"+url.PathEscape(playerID),
+		token, nil, &struct{}{})
 }

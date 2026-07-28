@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"time"
@@ -62,6 +63,20 @@ func (s *Server) Players() []PlayerInfo {
 	return out
 }
 
+// RoomPlayers 返回当前位于 Room 的全部在线 headless player。
+func (s *Server) RoomPlayers(roomID string) []PlayerInfo {
+	s.playersMu.Lock()
+	defer s.playersMu.Unlock()
+	var out []PlayerInfo
+	for _, c := range s.players {
+		if c.room != nil && c.room.ID == roomID {
+			out = append(out, playerInfo(c))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
 func (s *Server) Player(id string) (PlayerInfo, error) {
 	s.playersMu.Lock()
 	defer s.playersMu.Unlock()
@@ -106,6 +121,32 @@ func (s *Server) CommandPlayer(id, op string, value any) error {
 	return nil
 }
 
+// CommandRoomPlayers 向当前位于 Room 且声明了对应 capability 的全部
+// headless player 下发命令，返回已入队的目标数量。
+func (s *Server) CommandRoomPlayers(roomID, op string, value any) int {
+	requiredCapability := map[string]string{"set_volume": "volume", "set_mute": "mute"}[op]
+	s.playersMu.Lock()
+	targets := make([]*client, 0, len(s.players))
+	for _, c := range s.players {
+		if c.room == nil || c.room.ID != roomID {
+			continue
+		}
+		if requiredCapability != "" && !playerHasCapability(c.player, requiredCapability) {
+			continue
+		}
+		targets = append(targets, c)
+	}
+	s.playersMu.Unlock()
+	message := map[string]any{
+		"type": "player.command",
+		"data": map[string]any{"op": op, "value": value},
+	}
+	for _, c := range targets {
+		c.Send(message)
+	}
+	return len(targets)
+}
+
 func playerHasCapability(player *playerState, capability string) bool {
 	for _, current := range player.caps {
 		if current == capability {
@@ -131,7 +172,27 @@ func (s *Server) JoinPlayerRoom(id, roomID string) error {
 	c.room = r
 	c.Send(map[string]any{"type": "room.joined", "data": map[string]any{"room_id": roomID}})
 	r.Join(c)
+	s.applyRoomOutput(c)
 	return nil
+}
+
+func (s *Server) applyRoomOutput(c *client) {
+	if s.playerBindings == nil || c.player == nil || c.room == nil ||
+		!playerHasCapability(c.player, "volume") {
+		return
+	}
+	state, err := s.playerBindings.GetRoomOutputState(context.Background(), c.room.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		log.Printf("player %s: load room %s output: %v", c.player.id, c.room.ID, err)
+		return
+	}
+	c.Send(map[string]any{
+		"type": "player.command",
+		"data": map[string]any{"op": "set_volume", "value": state.Volume},
+	})
 }
 
 func (s *Server) playerConn(id string) (*client, error) {
@@ -210,8 +271,11 @@ func (c *client) handlePlayerHello(ref string, data json.RawMessage) {
 		"data": map[string]any{"player_id": player.id},
 	})
 	if boundRoomID != "" && (c.room == nil || c.room.ID != boundRoomID) {
-		_ = c.server.JoinPlayerRoom(player.id, boundRoomID)
+		if c.server.JoinPlayerRoom(player.id, boundRoomID) == nil {
+			return
+		}
 	}
+	c.server.applyRoomOutput(c)
 }
 
 func (c *client) handlePlayerState(data json.RawMessage) {

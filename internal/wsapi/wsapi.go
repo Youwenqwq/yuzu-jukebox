@@ -23,6 +23,7 @@ import (
 
 type PlayerBindingStore interface {
 	GetRoomPlayerBindingByPlayer(ctx context.Context, playerID string) (store.RoomPlayerBinding, error)
+	GetRoomOutputState(ctx context.Context, roomID string) (store.RoomOutputState, error)
 }
 
 type Server struct {
@@ -255,6 +256,9 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		c.room = r
 		c.Send(map[string]any{"type": "room.joined", "ref": ref, "data": map[string]any{"room_id": d.RoomID}})
 		r.Join(c) // 快照由 actor 随后推送
+		if c.player != nil {
+			c.server.applyRoomOutput(c)
+		}
 
 	case "room.leave":
 		if c.room == nil {

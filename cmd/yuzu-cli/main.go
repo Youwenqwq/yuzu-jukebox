@@ -686,9 +686,9 @@ source 取值：
 		},
 		"player bind": {
 			usage: "player bind <player_id> <room>",
-			desc:  "绑定 Room primary player（管理员）",
-			detail: `持久绑定指定在线播放端为 Room 的 primary player，并立即把连接迁入该 Room。
-agent 重连后会按稳定 player_id 自动回到绑定 Room。一个 Room 和一个 player 都只能有一个有效绑定。`,
+			desc:  "将 headless player 分配到 Room（管理员）",
+			detail: `持久分配指定在线播放端并立即把连接迁入该 Room。
+agent 重连后会按稳定 player_id 自动回到绑定 Room；一个 Room 可包含多个 player。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("player bind")
@@ -697,14 +697,36 @@ agent 重连后会按稳定 player_id 自动回到绑定 Room。一个 Room 和�
 			},
 		},
 		"player unbind": {
-			usage:  "player unbind <room>",
-			desc:   "解除 Room primary player 绑定（管理员）",
-			detail: "解除持久绑定；不会断开或迁移当前播放端连接。",
+			usage:  "player unbind <player_id> <room>",
+			desc:   "解除 headless player 的 Room 分配（管理员）",
+			detail: "解除持久分配；不会断开或迁移当前播放端连接。",
 			run: func(args []string) error {
-				if len(args) < 1 {
+				if len(args) < 2 {
 					return errUsage("player unbind")
 				}
-				return withCtx(func(ctx context.Context) error { return cmdPlayerUnbind(ctx, args[0]) })
+				return withCtx(func(ctx context.Context) error { return cmdPlayerUnbind(ctx, args[0], args[1]) })
+			},
+		},
+		"room players": {
+			usage:  "room players <room>",
+			desc:   "列出 Room 的 headless players（管理员）",
+			detail: "显示持久分配与当前在线 player 的并集，包括设备实际音量。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("room players")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdRoomPlayers(ctx, args[0]) })
+			},
+		},
+		"room volume": {
+			usage:  "room volume <room> <0-100>",
+			desc:   "设置 Room headless output 全局音量",
+			detail: "持久化 desired volume，并向当前 Room 的全部在线 headless Agent 下发；离线 Agent 重连后自动收敛。",
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("room volume")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdRoomVolume(ctx, args[0], args[1]) })
 			},
 		},
 		"queue del": {
@@ -777,8 +799,8 @@ agent 重连后会按稳定 player_id 自动回到绑定 Room。一个 Room 和�
   {"max_queue":100,"queue_limits":{"guest":5},"member_player_volume":true}
 max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 kind
 （guest/password/oidc）或 role，多命中取最宽松，0/缺省=不限。
-member_player_volume 允许同 Room 的 Integration actor 调节 primary player 音量，
-缺省为 false。
+member_player_volume 允许同 Room 的 Integration actor 调节 headless output 全局音量，
+缺省为 false；普通 WebUI 不受影响。
 
 需要 room_admin 角色。`,
 			run: func(args []string) error {

@@ -11,13 +11,12 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 )
 
-func TestIntegrationActorControlsOnlyItsRoomPlayerVolume(t *testing.T) {
+func TestIntegrationActorControlsAllHeadlessPlayersInItsRoom(t *testing.T) {
 	e := newIntegrationEnv(t)
 	_, adminToken := e.guestAuth("admin", "admin123")
 	for _, roomID := range []string{"lobby", "other"} {
 		resp := e.post(adminToken, "/api/v1/rooms", map[string]any{
-			"id": roomID, "name": roomID,
-			"policy": `{}`,
+			"id": roomID, "name": roomID, "policy": `{}`,
 		})
 		if resp.StatusCode != http.StatusCreated {
 			resp.Body.Close()
@@ -36,31 +35,47 @@ func TestIntegrationActorControlsOnlyItsRoomPlayerVolume(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	player, err := client.Dial(ctx, e.srv.URL)
+	web, err := client.Dial(ctx, e.srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer player.Close()
-	if _, err := player.Auth(ctx, "lobby-speaker", ""); err != nil {
+	defer web.Close()
+	if _, err := web.Auth(ctx, "web-listener", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := player.Join(ctx, "lobby", ""); err != nil {
+	if err := web.Join(ctx, "lobby", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := player.PlayerHello(ctx, "speaker-lobby", "Lobby speaker", "test", []string{"volume"}); err != nil {
-		t.Fatal(err)
-	}
-	resp := integrationJSONRequest(t, e, http.MethodPut, adminToken,
-		"/api/v1/rooms/lobby/player", map[string]any{"player_id": "speaker-lobby"})
-	if resp.StatusCode != http.StatusOK {
+	first := connectTestPlayer(t, ctx, e, "speaker-1", "lobby")
+	defer first.Close()
+	second := connectTestPlayer(t, ctx, e, "speaker-2", "lobby")
+	defer func() {
+		if second != nil {
+			second.Close()
+		}
+	}()
+	for _, playerID := range []string{"speaker-1", "speaker-2"} {
+		resp := integrationJSONRequest(t, e, http.MethodPut, adminToken,
+			"/api/v1/rooms/lobby/players/"+playerID, nil)
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("bind player %s status %d", playerID, resp.StatusCode)
+		}
 		resp.Body.Close()
-		t.Fatalf("bind player status %d", resp.StatusCode)
 	}
-	resp.Body.Close()
 
-	resp = e.post(adminToken, "/api/v1/rooms/lobby/player/volume", map[string]any{})
+	initialOutput, err := client.RESTRoomOutput(ctx, e.srv.URL, adminToken, "lobby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialOutput.Volume != nil {
+		t.Fatalf("initial Room output should be unset: %#v", initialOutput)
+	}
+
+	resp := integrationJSONRequest(t, e, http.MethodPatch, adminToken,
+		"/api/v1/rooms/lobby/output", map[string]any{})
 	if resp.StatusCode != http.StatusBadRequest {
 		resp.Body.Close()
 		t.Fatalf("missing volume status %d, want 400", resp.StatusCode)
@@ -78,7 +93,7 @@ func TestIntegrationActorControlsOnlyItsRoomPlayerVolume(t *testing.T) {
 		t.Fatalf("resolve other actor status %d", status)
 	}
 
-	resp = playerVolumeRequest(t, e, lobbyActor.ActorToken, "policy-disabled", 55)
+	resp = roomOutputRequest(t, e, lobbyActor.ActorToken, "policy-disabled", 55)
 	if resp.StatusCode != http.StatusForbidden {
 		resp.Body.Close()
 		t.Fatalf("disabled policy volume status %d, want 403", resp.StatusCode)
@@ -92,52 +107,135 @@ func TestIntegrationActorControlsOnlyItsRoomPlayerVolume(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	resp = playerVolumeRequest(t, e, otherActor.ActorToken, "wrong-room", 55)
+	resp = roomOutputRequest(t, e, otherActor.ActorToken, "wrong-room", 55)
 	if resp.StatusCode != http.StatusForbidden {
 		resp.Body.Close()
 		t.Fatalf("cross-room volume status %d, want 403", resp.StatusCode)
 	}
 	resp.Body.Close()
-
 	_, guestToken := e.guestAuth("ordinary-listener", "")
-	resp = playerVolumeRequest(t, e, guestToken, "", 55)
+	resp = roomOutputRequest(t, e, guestToken, "", 55)
 	if resp.StatusCode != http.StatusForbidden {
 		resp.Body.Close()
 		t.Fatalf("ordinary listener volume status %d, want 403", resp.StatusCode)
 	}
 	resp.Body.Close()
 
-	resp = playerVolumeRequest(t, e, lobbyActor.ActorToken, "lobby-volume-1", 37)
+	resp = roomOutputRequest(t, e, lobbyActor.ActorToken, "lobby-volume-1", 37)
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("same-room volume status %d, want 200", resp.StatusCode)
 	}
-	resp.Body.Close()
+	var update client.RoomOutputUpdate
+	decode(t, resp, &update)
+	if update.Output.Volume == nil || *update.Output.Volume != 37 || update.Delivery.CommandsSent != 2 {
+		t.Fatalf("room output update = %#v", update)
+	}
+	waitForPlayerVolume(t, ctx, first, 37)
+	waitForPlayerVolume(t, ctx, second, 37)
 
+	players, err := client.RESTRoomPlayers(ctx, e.srv.URL, adminToken, "lobby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(players) != 2 || !players[0].Bound || !players[1].Bound {
+		t.Fatalf("room players = %#v", players)
+	}
+
+	second.Close()
+	second = nil
+	waitForPlayerOffline(t, ctx, e, adminToken, "speaker-2")
+	resp = roomOutputRequest(t, e, lobbyActor.ActorToken, "lobby-volume-2", 44)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("offline convergence update status %d", resp.StatusCode)
+	}
+	decode(t, resp, &update)
+	if update.Delivery.CommandsSent != 1 {
+		t.Fatalf("offline delivery = %#v", update.Delivery)
+	}
+	waitForPlayerVolume(t, ctx, first, 44)
+
+	second = connectTestPlayer(t, ctx, e, "speaker-2", "other")
+	waitForPlayerVolume(t, ctx, second, 44)
+}
+
+func connectTestPlayer(t *testing.T, ctx context.Context, e *env, playerID, roomID string) *client.Client {
+	t.Helper()
+	player, err := client.Dial(ctx, e.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := player.Auth(ctx, playerID, ""); err != nil {
+		player.Close()
+		t.Fatal(err)
+	}
+	if err := player.Join(ctx, roomID, ""); err != nil {
+		player.Close()
+		t.Fatal(err)
+	}
+	if _, err := player.PlayerHello(ctx, playerID, playerID, "test", []string{"volume"}); err != nil {
+		player.Close()
+		t.Fatal(err)
+	}
+	return player
+}
+
+func waitForPlayerVolume(t *testing.T, ctx context.Context, player *client.Client, want int) {
+	t.Helper()
 	for {
 		select {
-		case message := <-player.Events():
+		case message, ok := <-player.Events():
+			if !ok {
+				t.Fatal("player event stream closed")
+			}
 			if message.Type != "player.command" {
 				continue
 			}
 			op, value, err := client.ParsePlayerCommand(message)
-			if err != nil || op != "set_volume" || string(value) != "37" {
-				t.Fatalf("player command = %q %s, %v", op, value, err)
+			var volume int
+			if err != nil || op != "set_volume" || json.Unmarshal(value, &volume) != nil {
+				continue
+			}
+			if volume != want {
+				t.Fatalf("player volume = %d, want %d", volume, want)
 			}
 			return
 		case <-ctx.Done():
-			t.Fatal("timed out waiting for player.command")
+			t.Fatalf("timed out waiting for player volume %d", want)
 		}
 	}
 }
 
-func playerVolumeRequest(t *testing.T, e *env, token, idempotencyKey string, volume int) *http.Response {
+func waitForPlayerOffline(t *testing.T, ctx context.Context, e *env, adminToken, playerID string) {
+	t.Helper()
+	for {
+		players, err := client.RESTPlayers(ctx, e.srv.URL, adminToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, player := range players {
+			found = found || player.ID == playerID
+		}
+		if !found {
+			return
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatalf("player %s stayed online", playerID)
+		}
+	}
+}
+
+func roomOutputRequest(t *testing.T, e *env, token, idempotencyKey string, volume int) *http.Response {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"volume": volume})
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequest(http.MethodPost, e.srv.URL+"/api/v1/rooms/lobby/player/volume", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPatch, e.srv.URL+"/api/v1/rooms/lobby/output", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

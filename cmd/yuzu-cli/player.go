@@ -87,14 +87,58 @@ func cmdPlayerBind(ctx context.Context, playerID, roomID string) error {
 	return nil
 }
 
-func cmdPlayerUnbind(ctx context.Context, roomID string) error {
+func cmdPlayerUnbind(ctx context.Context, playerID, roomID string) error {
 	token, err := restToken(ctx)
 	if err != nil {
 		return err
 	}
-	if err := client.RESTUnbindRoomPlayer(ctx, *server, token, roomID); err != nil {
+	if err := client.RESTUnbindRoomPlayer(ctx, *server, token, roomID, playerID); err != nil {
 		return err
 	}
 	fmt.Println("ok")
+	return nil
+}
+
+func cmdRoomPlayers(ctx context.Context, roomID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	players, err := client.RESTRoomPlayers(ctx, *server, token, roomID)
+	if err != nil {
+		return err
+	}
+	if len(players) == 0 {
+		fmt.Println("（无 headless player）")
+		return nil
+	}
+	for _, player := range players {
+		status := "offline"
+		if player.Online {
+			status = fmt.Sprintf("online volume:%d%%", player.Volume)
+		}
+		binding := "临时"
+		if player.Bound {
+			binding = "已绑定"
+		}
+		fmt.Printf("%s  %-8s %-20s %s\n", player.ID, binding, status, player.Device)
+	}
+	return nil
+}
+
+func cmdRoomVolume(ctx context.Context, roomID, volumeText string) error {
+	volume, err := strconv.Atoi(volumeText)
+	if err != nil || volume < 0 || volume > 100 {
+		return fmt.Errorf("音量须为 0-100 的整数")
+	}
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := client.RESTRoomOutputSetVolume(ctx, *server, token, roomID, volume)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("ok（已向 %d 个在线 Agent 下发）\n", result.Delivery.CommandsSent)
 	return nil
 }
