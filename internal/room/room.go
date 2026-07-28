@@ -19,8 +19,6 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 // ClientConn 是房间对 WS 客户端的抽象（由 wsapi 实现，避免包环依赖）。
@@ -173,10 +171,10 @@ type radioState struct {
 }
 
 type Room struct {
-	ID           string
-	Name         string
-	passwordHash string
-	policyRaw    string
+	ID        string
+	Name      string
+	policyRaw string
+	access    *roomAccess
 
 	st    *store.Store
 	authm *auth.Manager
@@ -188,9 +186,31 @@ type Room struct {
 }
 
 func New(id, name, passwordHash, policyRaw string, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Room {
+	mode := AccessModeOpen
+	if passwordHash != "" {
+		mode = AccessModeStaticPassword
+	}
+	return newPersistentRoom(store.Room{
+		ID: id, Name: name, PasswordHash: passwordHash, AccessMode: string(mode),
+		CodePeriodSeconds: DefaultCodePeriodSeconds, PolicyJSON: policyRaw,
+	}, nil, st, authm, c, reg)
+}
+
+func newPersistentRoom(row store.Room, codeKey []byte, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Room {
+	mode := AccessMode(row.AccessMode)
+	if mode == "" {
+		mode = AccessModeOpen
+		if row.PasswordHash != "" {
+			mode = AccessModeStaticPassword
+		}
+	}
+	config := AccessConfig{
+		Mode: mode, PasswordHash: row.PasswordHash, CodePeriodSeconds: row.CodePeriodSeconds,
+	}
 	return &Room{
-		ID: id, Name: name, passwordHash: passwordHash, policyRaw: policyRaw,
-		st: st, authm: authm, cache: c, reg: reg,
+		ID: row.ID, Name: row.Name, policyRaw: row.PolicyJSON,
+		access: newRoomAccess(row.ID, row.CreatedAt, codeKey, config),
+		st:     st, authm: authm, cache: c, reg: reg,
 		inbound: make(chan action, 64),
 		done:    make(chan struct{}),
 	}
@@ -199,12 +219,22 @@ func New(id, name, passwordHash, policyRaw string, st *store.Store, authm *auth.
 // PolicyRaw 当前策略 JSON（供 REST 展示）。
 func (r *Room) PolicyRaw() string { return r.policyRaw }
 
-// CheckPassword 校验访客密码（空密码房间直接放行）。
-func (r *Room) CheckPassword(password string) bool {
-	if r.passwordHash == "" {
-		return true
-	}
-	return bcrypt.CompareHashAndPassword([]byte(r.passwordHash), []byte(password)) == nil
+// CheckAccessCredential validates the credential required to enter this Room.
+func (r *Room) CheckAccessCredential(credential string) bool {
+	return r.access.check(credential, time.Now())
+}
+
+func (r *Room) AccessConfig() AccessConfig {
+	return r.access.load()
+}
+
+// ApplyAccessConfig makes a validated, persisted access configuration live.
+func (r *Room) ApplyAccessConfig(config AccessConfig) error {
+	return r.access.set(config)
+}
+
+func (r *Room) CurrentAccessCode() (AccessCode, error) {
+	return r.access.currentCode(time.Now())
 }
 
 // ErrRoomClosed 房间 actor 已停止（房间被删除）。

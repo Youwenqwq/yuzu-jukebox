@@ -30,6 +30,7 @@ type Server struct {
 	authm          *auth.Manager
 	control        *control.Service
 	playerBindings PlayerBindingStore
+	accessProbes   *accessProbeLimiter
 
 	playersMu sync.Mutex
 	players   map[string]*client // 已注册的播放端（player.hello）
@@ -42,7 +43,8 @@ func NewServer(
 ) *Server {
 	return &Server{
 		authm: authm, control: controlService, playerBindings: playerBindings,
-		players: map[string]*client{},
+		accessProbes: newAccessProbeLimiter(),
+		players:      map[string]*client{},
 	}
 }
 
@@ -232,7 +234,7 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 	case "room.join":
 		var d struct {
 			RoomID   string `json:"room_id"`
-			Password string `json:"password"` // 房间访客密码
+			Password string `json:"password"` // 房间访问凭据：静态密码或动态验证码
 		}
 		if err := json.Unmarshal(data, &d); err != nil {
 			c.replyErr(ref, "bad_request", "invalid join payload")
@@ -246,8 +248,13 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 			c.replyErr(ref, "not_found", "room not found")
 			return
 		}
-		if !r.CheckPassword(d.Password) {
-			c.replyErr(ref, "forbidden", "wrong room password")
+		matched := r.CheckAccessCredential(d.Password)
+		if !c.server.accessProbes.allow(d.RoomID, c.remote, matched) {
+			c.replyErr(ref, "rate_limited", "too many incorrect room access attempts; try again later")
+			return
+		}
+		if !matched {
+			c.replyErr(ref, "forbidden", "invalid room access credential")
 			return
 		}
 		if c.room != nil {

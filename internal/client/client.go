@@ -896,10 +896,23 @@ type RoomNowPlaying struct {
 	Rate       float64 `json:"rate"`
 }
 
+type RoomAccessInfo struct {
+	Mode              string `json:"mode"`
+	CodePeriodSeconds int64  `json:"code_period_seconds,omitempty"`
+}
+
+type RoomAccessCode struct {
+	Code          string `json:"code"`
+	PeriodSeconds int64  `json:"period_seconds"`
+	ValidFrom     int64  `json:"valid_from"`
+	ExpiresAt     int64  `json:"expires_at"`
+}
+
 type RoomInfo struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
 	Policy        json.RawMessage `json:"policy"`
+	GuestAccess   RoomAccessInfo  `json:"guest_access"`
 	ListenerCount int             `json:"listener_count"`
 	NowPlaying    *RoomNowPlaying `json:"now_playing"`
 }
@@ -1037,11 +1050,45 @@ func RESTSearch(ctx context.Context, server, token, provider, query string) ([]T
 	return out.Tracks, err
 }
 
-// RESTCreateRoom 创建房间（room_admin）。guestPassword 为空表示无密码房间。
-func RESTCreateRoom(ctx context.Context, server, token, id, roomName, guestPassword string) error {
-	return restCall(ctx, server, "POST", "/api/v1/rooms", token, map[string]any{
-		"id": id, "name": roomName, "guest_password": guestPassword,
-	}, &struct{}{})
+type RoomCreateRequest struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	GuestPassword          string `json:"guest_password,omitempty"`
+	GuestAccessMode        string `json:"guest_access_mode,omitempty"`
+	GuestCodePeriodSeconds int64  `json:"guest_code_period_seconds,omitempty"`
+}
+
+// RESTCreateRoom creates a persistent Room with the requested guest access mode.
+func RESTCreateRoom(ctx context.Context, server, token string, request RoomCreateRequest) error {
+	return restCall(ctx, server, "POST", "/api/v1/rooms", token, request, &struct{}{})
+}
+
+type RoomAccessUpdate struct {
+	Mode              string  `json:"guest_access_mode"`
+	GuestPassword     *string `json:"guest_password,omitempty"`
+	CodePeriodSeconds *int64  `json:"guest_code_period_seconds,omitempty"`
+}
+
+func RESTUpdateRoomAccess(
+	ctx context.Context,
+	server, token, roomID string,
+	update RoomAccessUpdate,
+) (RoomAccessInfo, error) {
+	var out struct {
+		Room struct {
+			GuestAccess RoomAccessInfo `json:"guest_access"`
+		} `json:"room"`
+	}
+	err := restCall(ctx, server, "PATCH", "/api/v1/rooms/"+url.PathEscape(roomID), token, update, &out)
+	return out.Room.GuestAccess, err
+}
+
+func RESTGetRoomAccessCode(ctx context.Context, server, token, roomID string) (RoomAccessCode, error) {
+	var out struct {
+		AccessCode RoomAccessCode `json:"access_code"`
+	}
+	err := restCall(ctx, server, "GET", "/api/v1/rooms/"+url.PathEscape(roomID)+"/access-code", token, nil, &out)
+	return out.AccessCode, err
 }
 
 // RESTUpdateRoomPolicy 热更新房间治理策略（room_admin）。policy 为 JSON 文本。

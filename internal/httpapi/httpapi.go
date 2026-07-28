@@ -21,8 +21,6 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 type Server struct {
@@ -86,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
+	mux.HandleFunc("GET /api/v1/rooms/{id}/access-code", s.getRoomAccessCode)
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}", s.deleteRoom)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/grants", s.listRoomGrants)
 	mux.HandleFunc("PUT /api/v1/rooms/{id}/grants/{principal_id}", s.manageRoomGrant)
@@ -308,6 +307,7 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 		ID            string                  `json:"id"`
 		Name          string                  `json:"name"`
 		Policy        json.RawMessage         `json:"policy"`
+		GuestAccess   roomAccessResponse      `json:"guest_access"`
 		ListenerCount int                     `json:"listener_count"`
 		NowPlaying    *room.NowPlayingSummary `json:"now_playing"`
 	}
@@ -319,6 +319,9 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, roomInfo{
 			ID: rm.ID, Name: rm.Name, Policy: pol,
+			GuestAccess: accessResponse(room.AccessConfig{
+				Mode: rm.AccessMode, CodePeriodSeconds: rm.CodePeriodSeconds,
+			}),
 			ListenerCount: rm.ListenerCount, NowPlaying: rm.NowPlaying,
 		})
 	}
@@ -331,10 +334,12 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		GuestPassword string `json:"guest_password"`
-		Policy        string `json:"policy"`
+		ID                     string `json:"id"`
+		Name                   string `json:"name"`
+		GuestPassword          string `json:"guest_password"`
+		GuestAccessMode        string `json:"guest_access_mode"`
+		GuestCodePeriodSeconds int64  `json:"guest_code_period_seconds"`
+		Policy                 string `json:"policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "name required")
@@ -343,21 +348,24 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	if body.ID == "" {
 		body.ID = slugify(body.Name)
 	}
-	hash := ""
-	if body.GuestPassword != "" {
-		h, err := bcrypt.GenerateFromPassword([]byte(body.GuestPassword), bcrypt.DefaultCost)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-		hash = string(h)
+	access, err := createRoomAccessConfig(
+		body.GuestAccessMode, body.GuestPassword, body.GuestCodePeriodSeconds,
+	)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if err := s.rooms.ValidateAccessConfig(access); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
 	}
 	policy := body.Policy
 	if policy == "" {
 		policy = "{}"
 	}
 	row := store.Room{
-		ID: body.ID, Name: body.Name, PasswordHash: hash,
+		ID: body.ID, Name: body.Name, PasswordHash: access.PasswordHash,
+		AccessMode: string(access.Mode), CodePeriodSeconds: access.CodePeriodSeconds,
 		PolicyJSON: policy, CreatedAt: nowMs(),
 	}
 	if err := s.st.CreateRoom(r.Context(), row); err != nil {
@@ -366,7 +374,9 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	s.rooms.Spawn(row)
 	s.st.Audit(r.Context(), id.ID, "room.create", row.ID, `{"name":`+strconv.Quote(row.Name)+`}`)
-	writeJSON(w, http.StatusCreated, map[string]any{"room": map[string]any{"id": row.ID, "name": row.Name}})
+	writeJSON(w, http.StatusCreated, map[string]any{"room": map[string]any{
+		"id": row.ID, "name": row.Name, "guest_access": accessResponse(access),
+	}})
 }
 
 func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
@@ -376,9 +386,11 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := r.PathValue("id")
 	var body struct {
-		Name          *string `json:"name"`
-		GuestPassword *string `json:"guest_password"`
-		Policy        *string `json:"policy"`
+		Name                   *string `json:"name"`
+		GuestPassword          *string `json:"guest_password"`
+		GuestAccessMode        *string `json:"guest_access_mode"`
+		GuestCodePeriodSeconds *int64  `json:"guest_code_period_seconds"`
+		Policy                 *string `json:"policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
@@ -393,21 +405,20 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	if body.Name != nil {
 		name = *body.Name
 	}
-	hash := row.PasswordHash
-	if body.GuestPassword != nil {
-		if *body.GuestPassword == "" {
-			hash = ""
-		} else {
-			h, err := bcrypt.GenerateFromPassword([]byte(*body.GuestPassword), bcrypt.DefaultCost)
-			if err != nil {
-				writeErr(w, http.StatusInternalServerError, "internal", err.Error())
-				return
-			}
-			hash = string(h)
-		}
+	access, err := updateRoomAccessConfig(
+		row, body.GuestAccessMode, body.GuestPassword, body.GuestCodePeriodSeconds,
+	)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
 	}
-	if err := s.st.UpdateRoom(r.Context(), roomID, name, hash); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+	if err := s.rooms.ValidateAccessConfig(access); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	rm, err := s.rooms.Get(roomID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "room not running")
 		return
 	}
 	if body.Policy != nil {
@@ -415,18 +426,29 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
-		rm, err := s.rooms.Get(roomID)
-		if err != nil {
-			writeErr(w, http.StatusNotFound, "not_found", "room not running")
-			return
-		}
+	}
+	row.Name = name
+	row.PasswordHash = access.PasswordHash
+	row.AccessMode = string(access.Mode)
+	row.CodePeriodSeconds = access.CodePeriodSeconds
+	if err := s.st.UpdateRoom(r.Context(), row); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := rm.ApplyAccessConfig(access); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if body.Policy != nil {
 		if err := rm.SetPolicy(*body.Policy); err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
 	}
 	s.st.Audit(r.Context(), id.ID, "room.update", roomID, "{}")
-	writeJSON(w, http.StatusOK, map[string]any{"room": map[string]any{"id": roomID, "name": name}})
+	writeJSON(w, http.StatusOK, map[string]any{"room": map[string]any{
+		"id": roomID, "name": name, "guest_access": accessResponse(access),
+	}})
 }
 
 // deleteRoom 删除房间：停 actor、清 DB（队列与历史级联）。

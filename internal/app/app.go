@@ -65,7 +65,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, st, reg)
 
-	rooms := room.NewManager(ctx, st, authm, c, reg)
+	rooms := room.NewManager(ctx, st, authm, c, reg, key)
 	if err := rooms.Load(); err != nil {
 		return nil, err
 	}

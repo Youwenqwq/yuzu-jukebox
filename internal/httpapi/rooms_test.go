@@ -57,7 +57,7 @@ func TestListRoomsIncludesLiveDirectorySummary(t *testing.T) {
 	authm := auth.NewManager("test", st)
 	reg := provider.NewRegistry()
 	roomCache := cache.New(filepath.Join(dir, "cache"), 1<<30, st, reg)
-	rooms := room.NewManager(ctx, st, authm, roomCache, reg)
+	rooms := room.NewManager(ctx, st, authm, roomCache, reg, nil)
 	for i, row := range []store.Room{
 		{ID: "active", Name: "Active", CreatedAt: 1},
 		{ID: "idle", Name: "Idle", CreatedAt: 2},

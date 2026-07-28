@@ -59,7 +59,7 @@ func setupManagementQueries(t *testing.T) managementQueryFixture {
 	integrations := auth.NewIntegrationRegistry(st)
 	reg := provider.NewRegistry()
 	roomCache := cache.New(filepath.Join(root, "cache"), 1<<20, st, reg)
-	rooms := room.NewManager(ctx, st, authm, roomCache, reg)
+	rooms := room.NewManager(ctx, st, authm, roomCache, reg, nil)
 	roomRow := store.Room{ID: managementRoomID, Name: "Main", CreatedAt: 1}
 	if err := st.CreateRoom(ctx, roomRow); err != nil {
 		t.Fatal(err)

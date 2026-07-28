@@ -64,23 +64,39 @@ func (s *Store) DB() *sql.DB { return s.db }
 // ---------- 房间 ----------
 
 type Room struct {
-	ID           string
-	Name         string
-	PasswordHash string
-	PolicyJSON   string
-	CreatedAt    int64
+	ID                string
+	Name              string
+	PasswordHash      string
+	AccessMode        string
+	CodePeriodSeconds int64
+	PolicyJSON        string
+	CreatedAt         int64
 }
 
 func (s *Store) CreateRoom(ctx context.Context, r Room) error {
+	if r.AccessMode == "" {
+		r.AccessMode = "open"
+		if r.PasswordHash != "" {
+			r.AccessMode = "static_password"
+		}
+	}
+	if r.CodePeriodSeconds == 0 {
+		r.CodePeriodSeconds = 86400
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO rooms (id, name, guest_password_hash, policy_json, created_at) VALUES (?,?,?,?,?)`,
-		r.ID, r.Name, r.PasswordHash, r.PolicyJSON, r.CreatedAt)
+		`INSERT INTO rooms
+		 (id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds, policy_json, created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		r.ID, r.Name, r.PasswordHash, r.AccessMode, r.CodePeriodSeconds, r.PolicyJSON, r.CreatedAt)
 	return err
 }
 
-func (s *Store) UpdateRoom(ctx context.Context, id, name, passwordHash string) error {
+func (s *Store) UpdateRoom(ctx context.Context, r Room) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE rooms SET name = ?, guest_password_hash = ? WHERE id = ?`, name, passwordHash, id)
+		`UPDATE rooms
+		 SET name = ?, guest_password_hash = ?, guest_access_mode = ?, guest_code_period_seconds = ?
+		 WHERE id = ?`,
+		r.Name, r.PasswordHash, r.AccessMode, r.CodePeriodSeconds, r.ID)
 	return err
 }
 
@@ -93,14 +109,21 @@ func (s *Store) UpdateRoomPolicy(ctx context.Context, id, policyJSON string) err
 func (s *Store) GetRoom(ctx context.Context, id string) (Room, error) {
 	var r Room
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, guest_password_hash, policy_json, created_at FROM rooms WHERE id = ?`, id).
-		Scan(&r.ID, &r.Name, &r.PasswordHash, &r.PolicyJSON, &r.CreatedAt)
+		`SELECT id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds,
+		        policy_json, created_at
+		 FROM rooms WHERE id = ?`, id).
+		Scan(
+			&r.ID, &r.Name, &r.PasswordHash, &r.AccessMode, &r.CodePeriodSeconds,
+			&r.PolicyJSON, &r.CreatedAt,
+		)
 	return r, err
 }
 
 func (s *Store) ListRooms(ctx context.Context) ([]Room, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, guest_password_hash, policy_json, created_at FROM rooms ORDER BY created_at`)
+		`SELECT id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds,
+		        policy_json, created_at
+		 FROM rooms ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +131,10 @@ func (s *Store) ListRooms(ctx context.Context) ([]Room, error) {
 	var out []Room
 	for rows.Next() {
 		var r Room
-		if err := rows.Scan(&r.ID, &r.Name, &r.PasswordHash, &r.PolicyJSON, &r.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&r.ID, &r.Name, &r.PasswordHash, &r.AccessMode, &r.CodePeriodSeconds,
+			&r.PolicyJSON, &r.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

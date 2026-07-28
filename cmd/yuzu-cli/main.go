@@ -2,10 +2,12 @@
 //
 // 全局参数（可放在子命令前后任意位置，也可用环境变量代替）：
 //
-//	-server         服务器地址        (YUZU_SERVER, 默认 http://127.0.0.1:8080)
-//	-name           显示名            (YUZU_NAME)
-//	-password       全局管理员口令     (YUZU_PASSWORD)
-//	-room-password  房间访客密码       (YUZU_ROOM_PASSWORD)
+//	-server           服务器地址       (YUZU_SERVER, 默认 http://127.0.0.1:8080)
+//	-name             显示名           (YUZU_NAME)
+//	-password         全局管理员口令    (YUZU_PASSWORD)
+//	-room-password    房间访问凭据      (YUZU_ROOM_PASSWORD)
+//	-room-access      建房访问模式
+//	-room-code-period 动态码轮换周期
 //
 // 查看子命令帮助：yuzu-cli help <命令> 或 yuzu-cli <命令> --help
 package main
@@ -22,17 +24,19 @@ import (
 )
 
 var (
-	server       = flag.String("server", envOr("YUZU_SERVER", "http://127.0.0.1:8080"), "server base URL")
-	name         = flag.String("name", envOr("YUZU_NAME", "cli"), "display name")
-	password     = flag.String("password", envOr("YUZU_PASSWORD", ""), "global admin password")
-	roomPassword = flag.String("room-password", envOr("YUZU_ROOM_PASSWORD", ""), "room guest password")
-	provider     = flag.String("provider", "local", "search provider")
-	title        = flag.String("title", "", "upload title")
-	artist       = flag.String("artist", "", "upload artist")
-	durationMs   = flag.Int64("duration-ms", 0, "upload duration in milliseconds (auto-detected if 0)")
-	shuffle      = flag.Bool("shuffle", false, "radio: shuffle mode")
-	once         = flag.Bool("once", false, "radio: play through once, no loop")
-	limit        = flag.Int("limit", 50, "pagination limit")
+	server         = flag.String("server", envOr("YUZU_SERVER", "http://127.0.0.1:8080"), "server base URL")
+	name           = flag.String("name", envOr("YUZU_NAME", "cli"), "display name")
+	password       = flag.String("password", envOr("YUZU_PASSWORD", ""), "global admin password")
+	roomPassword   = flag.String("room-password", envOr("YUZU_ROOM_PASSWORD", ""), "room access credential or static password")
+	roomAccessMode = flag.String("room-access", "", "room guest access mode: open, static_password, rotating_code")
+	roomCodePeriod = flag.Duration("room-code-period", 24*time.Hour, "rotating room code period")
+	provider       = flag.String("provider", "local", "search provider")
+	title          = flag.String("title", "", "upload title")
+	artist         = flag.String("artist", "", "upload artist")
+	durationMs     = flag.Int64("duration-ms", 0, "upload duration in milliseconds (auto-detected if 0)")
+	shuffle        = flag.Bool("shuffle", false, "radio: shuffle mode")
+	once           = flag.Bool("once", false, "radio: play through once, no loop")
+	limit          = flag.Int("limit", 50, "pagination limit")
 
 	helpWanted bool
 )
@@ -367,17 +371,47 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 		"room create": {
 			usage: "room create <id> <名称>",
 			desc:  "创建房间（管理员）",
-			detail: `创建一个持久房间。访客密码取 -room-password（不传则无密码）。
+			detail: `创建一个持久房间。-room-access 可选 open、static_password、
+rotating_code；动态码轮换周期取 -room-code-period，默认 24h。静态密码取
+-room-password。不传 -room-access 时保持兼容：有密码为 static_password，
+否则为 open。
 
 需要 room_admin 角色。
 
 示例：
-  yuzu-cli mkroom lobby 大厅 -room-password room123`,
+  yuzu-cli room create lobby 大厅 -room-access rotating_code -room-code-period 24h`,
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("room create")
 				}
 				return withCtx(func(ctx context.Context) error { return cmdMkRoom(ctx, args[0], args[1]) })
+			},
+		},
+		"room access": {
+			usage: "room access <id> <open|static_password|rotating_code>",
+			desc:  "修改房间访问模式（管理员）",
+			detail: `热更新房间访问模式。static_password 从 -room-password 读取新密码；
+rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
+
+需要 room_admin 角色。`,
+			run: func(args []string) error {
+				if len(args) < 2 {
+					return errUsage("room access")
+				}
+				return withCtx(func(ctx context.Context) error {
+					return cmdRoomAccess(ctx, args[0], args[1])
+				})
+			},
+		},
+		"room code": {
+			usage:  "room code <id>",
+			desc:   "查看当前房间动态验证码",
+			detail: "显示当前动态验证码及过期时间。CLI 认证需要 room_admin；外部 Integration 应使用 actor token 直接调用对应 REST API。",
+			run: func(args []string) error {
+				if len(args) < 1 {
+					return errUsage("room code")
+				}
+				return withCtx(func(ctx context.Context) error { return cmdRoomCode(ctx, args[0]) })
 			},
 		},
 		"media upload": {

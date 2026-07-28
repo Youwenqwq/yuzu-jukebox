@@ -23,7 +23,11 @@ func cmdRooms(ctx context.Context) error {
 		return nil
 	}
 	for _, r := range rooms {
-		fmt.Printf("%-20s %s\n", r.ID, r.Name)
+		period := ""
+		if r.GuestAccess.CodePeriodSeconds > 0 {
+			period = " " + (time.Duration(r.GuestAccess.CodePeriodSeconds) * time.Second).String()
+		}
+		fmt.Printf("%-20s %-16s%s %s\n", r.ID, r.GuestAccess.Mode, period, r.Name)
 	}
 	return nil
 }
@@ -33,10 +37,63 @@ func cmdMkRoom(ctx context.Context, id, roomName string) error {
 	if err != nil {
 		return err
 	}
-	if err := client.RESTCreateRoom(ctx, *server, token, id, roomName, *roomPassword); err != nil {
+	request := client.RoomCreateRequest{
+		ID: id, Name: roomName,
+		GuestPassword: *roomPassword, GuestAccessMode: *roomAccessMode,
+		GuestCodePeriodSeconds: int64(roomCodePeriod.Seconds()),
+	}
+	if err := client.RESTCreateRoom(ctx, *server, token, request); err != nil {
 		return err
 	}
-	fmt.Printf("room %q created (guest password: %s)\n", id, orNone(*roomPassword))
+	mode := *roomAccessMode
+	if mode == "" {
+		mode = "open"
+		if *roomPassword != "" {
+			mode = "static_password"
+		}
+	}
+	fmt.Printf("room %q created (guest access: %s)\n", id, mode)
+	return nil
+}
+
+func cmdRoomAccess(ctx context.Context, roomID, mode string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	update := client.RoomAccessUpdate{Mode: mode}
+	switch mode {
+	case "static_password":
+		update.GuestPassword = roomPassword
+	case "rotating_code":
+		period := int64(roomCodePeriod.Seconds())
+		update.CodePeriodSeconds = &period
+	case "open":
+	default:
+		return fmt.Errorf("invalid room access mode %q", mode)
+	}
+	access, err := client.RESTUpdateRoomAccess(ctx, *server, token, roomID, update)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("room %q guest access: %s", roomID, access.Mode)
+	if access.CodePeriodSeconds > 0 {
+		fmt.Printf(" (%s)", time.Duration(access.CodePeriodSeconds)*time.Second)
+	}
+	fmt.Println()
+	return nil
+}
+
+func cmdRoomCode(ctx context.Context, roomID string) error {
+	token, err := restToken(ctx)
+	if err != nil {
+		return err
+	}
+	code, err := client.RESTGetRoomAccessCode(ctx, *server, token, roomID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s (expires %s)\n", code.Code, time.UnixMilli(code.ExpiresAt).Format(time.RFC3339))
 	return nil
 }
 

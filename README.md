@@ -82,10 +82,17 @@ TOKEN=$(curl -s -X POST localhost:8080/api/v1/auth/guest \
   -H 'Content-Type: application/json' \
   -d '{"name":"admin","password":"admin123"}' | jq -r .session_token)
 
-# 建房（guest_password 是房间访客密码）
+# 建房：静态密码
 curl -X POST localhost:8080/api/v1/rooms -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"id":"lobby","name":"大厅","guest_password":"room123"}'
+
+# 或使用默认每日轮换的动态验证码
+curl -X POST localhost:8080/api/v1/rooms -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"event","name":"活动厅","guest_access_mode":"rotating_code","guest_code_period_seconds":86400}'
+curl localhost:8080/api/v1/rooms/event/access-code \
+  -H "Authorization: Bearer $TOKEN"
 
 # 上传媒体（WAV 自动解析时长，其他格式需 ffprobe 或显式传 duration_ms）
 curl -X POST localhost:8080/api/v1/media/upload -H "Authorization: Bearer $TOKEN" \
@@ -126,7 +133,9 @@ yuzu-cli provider qrlogin ncm
 | `-server` | `YUZU_SERVER` | 服务器地址，默认 `http://127.0.0.1:8080` |
 | `-name` | `YUZU_NAME` | 显示名 |
 | `-password` | `YUZU_PASSWORD` | 全局管理员口令 |
-| `-room-password` | `YUZU_ROOM_PASSWORD` | 房间访客密码（mkroom 时作为新房间的密码） |
+| `-room-password` | `YUZU_ROOM_PASSWORD` | 入房凭据；建静态密码房间时作为新密码 |
+| `-room-access` | — | 建房访问模式：`open/static_password/rotating_code` |
+| `-room-code-period` | — | 动态码轮换周期，默认 `24h` |
 
 | 子命令 | 权限 | 说明 |
 |---|---|---|
@@ -139,6 +148,8 @@ yuzu-cli provider qrlogin ncm
 | `pause / resume <room>` | Room controller | 暂停 / 恢复 |
 | `seek <room> <秒>` | Room controller | 跳转进度 |
 | `room create <id> <名称>` | `room_admin` | 创建持久房间 |
+| `room access <id> <mode>` | `room_admin` | 热更新访问模式；动态码周期取 `-room-code-period` |
+| `room code <id>` | `room_admin` | 查看当前动态验证码及过期时间；Integration adapter 使用 actor token 调 REST API |
 | `room delete <id>` | `room_admin` | 删除房间（队列与历史级联） |
 | `media upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
 | `playlist list` | `requester` | 歌单列表 |

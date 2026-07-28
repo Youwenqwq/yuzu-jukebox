@@ -108,7 +108,7 @@ should_be = position_ms                                        (paused 时)
 ```
 
 - `password` 字段是**全局管理员口令**（可选）：不传或错误时签发普通 guest Principal（`g_` + `sha256("guest:"+name)` 前 12 hex，`kind=guest`，roles 为 `listener+requester`）；命中 `admin_password` 时签发独立 password Principal（`p_` + `sha256("password:"+name)` 前 12 hex，`kind=password`），追加 `room_admin+media_admin`。两种 Principal 即使显示名相同也绝不共享身份或角色。
-- **房间访客密码不在此处传递**——它是每房间一个的进门凭证，在 `room.join` 时校验（见 4.2）。
+- **房间访问凭据不在此处传递**——每个 Room 可配置 `open`、`static_password` 或 `rotating_code`，在 `room.join.password` 校验（见 4.2、6.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
 - 普通 guest 身份 ID 由名字确定性派生，同名重连仍是同一人；管理员口令身份使用上述独立 `password` 命名空间。
 - 普通会话默认 TTL 24h，**持久化于 sessions 表**：重启不失效，过期自动清理；`DELETE /api/v1/auth/session` 吊销。Integration actor 会话例外，固定 TTL 5 分钟（见 3.6）。
@@ -212,7 +212,7 @@ Content-Type: application/json
 ```
 
 - `actor_token` 是标准 session token，可直接用于 `Authorization: Bearer <actor_token>`，也可作为 WS `auth` 的 `session_token`；固定有效期 **5 分钟**。`expires_at` 是与实际会话过期点相同的 Unix 毫秒。
-- `default_room_id` 来自 external scope 绑定；未绑定时该字段**省略**，不是空值错误。它只是 Client 的默认选择，不授予权限，也不替代 WS `room.join` 的房间密码。
+- `default_room_id` 来自 external scope 绑定；未绑定时该字段**省略**，不是空值错误。它只是 Client 的默认选择，不自动加入 WS Room。映射到该 Room 的 actor session 可读取当前动态验证码，随后用于 `room.join`。
 - `integration_id` 从通过认证的 Integration token 得出，请求体不能冒充。external scope key 为
   `(integration_id, adapter_id, scope.type, scope.id)`；external subject key 再追加 `subject.id`。`display_name` 不参与 key：未链接的 synthetic guest 在下次 resolve 时更新名称；已链接时忽略它并以当前 Principal 名称为准。
 - 若 external subject key 已链接到一个 Principal，返回该 Principal 的**当前** identity/roles；若未链接，则生成稳定 guest：ID 为 `ig_` + `sha256(JSON([integration_id, adapter_id, scope.type, scope.id, subject.id]))` 的完整十六进制，`kind=guest`，roles 为 `listener+requester`。Client MUST 把返回的 `identity.id` 当作不透明值。
@@ -316,7 +316,7 @@ Content-Type: application/json
 
 | type | data | 权限 | 说明 |
 |---|---|---|---|
-| `room.join` | `{room_id, password}` | 任何已认证身份 | 密码错误返回 `error` |
+| `room.join` | `{room_id, password}` | 任何已认证身份 | `password` 承载静态密码或动态验证码；无效凭据返回 `error` |
 | `room.leave` | `{room_id}` | — | |
 | `queue.add` | `{room_id, track_ref}` 或 `{room_id, track_refs[1..100]}` | `requester` | 队尾追加；批量为原子：整体预校验，任一失败一条不加；ack 回 entry_ids |
 | `queue.remove` | `{room_id, entry_id}` | 条目所有者 / 该 Room 的 controller | |
@@ -347,8 +347,8 @@ Content-Type: application/json
 
 ### 4.4 WS 与无状态 REST 的操作边界
 
-- WS 房间命令要求连接先以 `room.join` 加入同一个 Room；`room.join` 会检查房间访客密码，并建立实时广播订阅。
-- 6.3 的 Room REST 不建立 listener、不要求先 join，也不接收或检查房间访客密码；它只校验标准 Bearer session 及各操作的 requester/controller 权限。
+- WS 房间命令要求连接先以 `room.join` 加入同一个 Room；`room.join.password` 按 Room 当前访问模式解释，并建立实时广播订阅。
+- 6.3 的 Room REST 不建立 listener、不要求先 join，也不接收或检查房间访问凭据；它只校验标准 Bearer session 及各操作的 requester/controller 权限。
 - 两种传输适配器调用同一个 Room 领域服务和同一个 actor。REST 命令造成的状态变化会照常广播给已加入该 Room 的 WS 客户端；WS 命令也可由后续 REST state 查询观察。
 - `GET .../state` 是一次性、按调用身份投影的完整快照，不是订阅。需要实时变化时仍 MUST 使用 `/ws/v1` 加房并处理四类 `*.changed` 广播。
 
@@ -519,8 +519,9 @@ pause│  │resume
 | `GET /api/v1/integrations/{id}/subjects` | `room_admin` | 该 Integration 的全部 external subject→Principal 链接，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/subjects` | `room_admin` | 链接/解绑 external subject 与 Principal |
 | `GET /api/v1/principals?q=&limit=` | `room_admin` | 按 ID 或名称可选搜索 Principal；默认/上限 100，稳定排序；不返回 OIDC subject |
-| `GET /api/v1/rooms` | `listener` | 房间目录；每项在 `id/name/policy` 外含实时 `listener_count`，以及空闲为 `null`、播放或暂停时为 `{title,artist,duration_ms,cover_url,position_ms,updated_at,playing,rate}` 的 `now_playing`；绝不含 `stream_url` |
-| `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 建/改房间（名称、访客密码、policy） |
+| `GET /api/v1/rooms` | `listener` | 房间目录；每项含 `id/name/policy/guest_access/listener_count/now_playing`；`guest_access` 只公开 mode 与动态码周期，不公开静态密码或当前码；绝不含 `stream_url` |
+| `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 建/改房间名称、访问模式及 policy；访问配置热更新 |
+| `GET /api/v1/rooms/{id}/access-code` | `room_admin`，或当前 scope 映射到该 Room 的 Integration actor | 返回当前动态验证码与有效期；`Cache-Control: no-store` |
 | `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
 | `GET /api/v1/rooms/{id}/grants` | `room_admin` | 该 Room 的全部显式 `controller` grants，稳定排序 |
 | `PUT/DELETE /api/v1/rooms/{id}/grants/{principal_id}` | `room_admin` | 授予/撤销该 Principal 的 Room `controller` capability |
@@ -539,6 +540,30 @@ pause│  │resume
 | `PATCH /api/v1/rooms/{id}/output` | controller，或同 Room 且 policy 允许的 Integration actor | 持久化 `{"volume":0..100}` 并 fan-out；Integration actor 必须有 `Idempotency-Key` |
 | `GET /api/v1/rooms/{id}/players` | `room_admin` | Room 持久分配与当前在线 headless player 的并集 |
 | `PUT/DELETE /api/v1/rooms/{id}/players/{player_id}` | `room_admin` | 分配/解除单个 player；PUT 要求 player 在线并迁入 Room |
+
+**Room 访问配置：**
+
+- `guest_access_mode` 取 `open | static_password | rotating_code`。创建时省略该字段会按兼容规则推断：非空 `guest_password` 为 `static_password`，否则为 `open`。
+- `static_password` 必须携带非空 `guest_password`，服务端只保存 bcrypt hash。显式 `open`/`rotating_code` 不接受非空 `guest_password`。
+- `rotating_code` 的 `guest_code_period_seconds` 默认 `86400`（24 小时），范围为 `60..2592000`（1 分钟至 30 天）。PATCH 省略字段即保留原值；仅携带 `guest_password` 的旧式 PATCH 仍按非空→静态、空→开放解释。
+- 动态码使用与 external binding code 相同的 12 字符无歧义 Base32 alphabet，展示为 `XXXX-XXXX-XXXX`；输入忽略大小写、连字符与 Unicode 空白。它由服务端 `secret_key`、Room ID/创建时间、周期和 UTC 时间 counter 经域隔离 HMAC-SHA256 派生，不落库、不需要轮换任务。
+- 周期切换后的前 15 秒接受上一周期码；之后只接受当前码。周期变化和访问配置热更新只影响后续 join，不踢出已经加入的连接。
+- 错误入房凭据按 `(room_id, source_ip)` 限制为 10 分钟窗口内 10 次；正确凭据清空失败桶，超过阈值返回 `rate_limited`。
+- `GET /api/v1/rooms/{id}/access-code` 响应：
+
+```json
+{
+  "room_id": "lobby",
+  "access_code": {
+    "code": "7M2K-Q9TR-W4HX",
+    "period_seconds": 86400,
+    "valid_from": 1720000000000,
+    "expires_at": 1720086400000
+  }
+}
+```
+
+普通 session 只有当前 `room_admin` 可读取。Integration actor 只有在其签发 scope **当前**映射到路径 Room 时可读取；Integration 停用、token 轮换、scope 解绑/改绑或 actor session 过期都会立即阻断。响应和 audit detail 均不记录其它秘密，验证码正文不进入 audit。
 
 **Provider、歌单、媒体与出流：**
 
@@ -735,7 +760,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 1. 连接 WebSocket /ws/v1
 2. 校时：3–5 轮 ping/pong（§2.1），得 offset
 3. auth：guest name/password，或 {"session_token": "..."}（OIDC/actor token 均可）
-4. room.join（§4.2）→ 等 room.joined；即使用了 default_room_id，仍须提供该 Room 的访客密码
+4. room.join（§4.2）→ 等 room.joined；`password` 按 Room 当前访问模式填写。映射到该 Room 的 Integration actor 可先读 `GET .../access-code`
 5. 接收四条状态快照（§4.1）：playback / queue / radio / listeners
 6. 进入事件循环：四类 *.changed 广播覆盖本地副本
 ```

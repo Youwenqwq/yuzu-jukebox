@@ -4,20 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base32"
 	"errors"
 	"io"
 	"strings"
 	"time"
-	"unicode"
 
+	"github.com/youwenqwq/yuzu-jukebox/internal/shortcode"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
-const (
-	bindingCodeTTL    = 10 * time.Minute
-	bindingCodeLength = 12
-)
+const bindingCodeTTL = 10 * time.Minute
 
 var (
 	ErrBindingRequiresOIDC           = errors.New("binding code requires an OIDC login")
@@ -26,8 +22,6 @@ var (
 	ErrBindingPrincipalUnavailable   = store.ErrBindingPrincipalUnavailable
 	ErrBindingIntegrationUnavailable = store.ErrBindingIntegrationUnavailable
 )
-
-var bindingCodeEncoding = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
 
 type BindingService struct {
 	st   *store.Store
@@ -66,7 +60,10 @@ func (s *BindingService) Issue(ctx context.Context, identity Identity) (BindingC
 	if _, err := io.ReadFull(s.rand, raw); err != nil {
 		return BindingCode{}, err
 	}
-	canonical := bindingCodeEncoding.EncodeToString(raw)[:bindingCodeLength]
+	canonical, ok := shortcode.Encode(raw)
+	if !ok {
+		return BindingCode{}, errors.New("insufficient binding code entropy")
+	}
 	now := s.now().UTC().Truncate(time.Millisecond)
 	expiresAt := now.Add(bindingCodeTTL).UnixMilli()
 	hash := sha256.Sum256([]byte(canonical))
@@ -75,7 +72,8 @@ func (s *BindingService) Issue(ctx context.Context, identity Identity) (BindingC
 	); err != nil {
 		return BindingCode{}, err
 	}
-	return BindingCode{Code: formatBindingCode(canonical), ExpiresAt: expiresAt}, nil
+	display, _ := shortcode.Format(canonical)
+	return BindingCode{Code: display, ExpiresAt: expiresAt}, nil
 }
 
 func (s *BindingService) Redeem(
@@ -87,7 +85,7 @@ func (s *BindingService) Redeem(
 		anyEmpty(target.IntegrationID, target.AdapterID, target.ScopeType, target.ScopeID, target.SubjectID) {
 		return BindingRedemption{}, ErrBindingCodeInvalid
 	}
-	canonical, ok := normalizeBindingCode(code)
+	canonical, ok := shortcode.Normalize(code)
 	if !ok {
 		return BindingRedemption{}, ErrBindingCodeInvalid
 	}
@@ -112,28 +110,6 @@ func (s *BindingService) Redeem(
 		Identity: identityFromPrincipal(redemption.Principal),
 		Replayed: redemption.Replayed,
 	}, nil
-}
-
-func normalizeBindingCode(code string) (string, bool) {
-	canonical := strings.Map(func(r rune) rune {
-		if r == '-' || unicode.IsSpace(r) {
-			return -1
-		}
-		return unicode.ToUpper(r)
-	}, code)
-	if len(canonical) != bindingCodeLength {
-		return "", false
-	}
-	for _, r := range canonical {
-		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", r) {
-			return "", false
-		}
-	}
-	return canonical, true
-}
-
-func formatBindingCode(code string) string {
-	return code[:4] + "-" + code[4:8] + "-" + code[8:]
 }
 
 func anyEmpty(values ...string) bool {

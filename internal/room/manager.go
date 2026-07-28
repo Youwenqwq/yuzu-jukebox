@@ -15,19 +15,25 @@ var ErrRoomNotFound = errors.New("room not found")
 // Manager 持有所有房间 actor。房间在启动时从 DB 加载，
 // 生命周期与进程一致（持久房间模型）。
 type Manager struct {
-	st    *store.Store
-	authm *auth.Manager
-	cache *cache.Cache
-	reg   *provider.Registry
+	st      *store.Store
+	authm   *auth.Manager
+	cache   *cache.Cache
+	reg     *provider.Registry
+	codeKey []byte
 
 	ctx     context.Context // actor 生命周期绑定进程，而非任何请求
 	rooms   map[string]*Room
 	cancels map[string]context.CancelFunc
 }
 
-func NewManager(ctx context.Context, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry) *Manager {
-	return &Manager{ctx: ctx, st: st, authm: authm, cache: c, reg: reg,
-		rooms: map[string]*Room{}, cancels: map[string]context.CancelFunc{}}
+func NewManager(ctx context.Context, st *store.Store, authm *auth.Manager, c *cache.Cache, reg *provider.Registry, codeKey []byte) *Manager {
+	return &Manager{
+		ctx: ctx, st: st, authm: authm, cache: c, reg: reg, codeKey: codeKey,
+		rooms: map[string]*Room{}, cancels: map[string]context.CancelFunc{},
+	}
+}
+func (m *Manager) ValidateAccessConfig(config AccessConfig) error {
+	return ValidateAccessConfig(config, len(m.codeKey) > 0)
 }
 
 // Load 从 DB 加载全部房间并启动 actor。
@@ -48,7 +54,7 @@ func (m *Manager) Spawn(row store.Room) *Room {
 }
 
 func (m *Manager) spawn(row store.Room) *Room {
-	r := New(row.ID, row.Name, row.PasswordHash, row.PolicyJSON, m.st, m.authm, m.cache, m.reg)
+	r := newPersistentRoom(row, m.codeKey, m.st, m.authm, m.cache, m.reg)
 	m.rooms[row.ID] = r
 	rctx, cancel := context.WithCancel(m.ctx)
 	m.cancels[row.ID] = cancel
@@ -75,11 +81,13 @@ func (m *Manager) Get(id string) (*Room, error) {
 
 // DirectoryRoom 是 manager 汇总后的大厅目录条目。
 type DirectoryRoom struct {
-	ID            string
-	Name          string
-	PolicyRaw     string
-	ListenerCount int
-	NowPlaying    *NowPlayingSummary
+	ID                string
+	Name              string
+	PolicyRaw         string
+	AccessMode        AccessMode
+	CodePeriodSeconds int64
+	ListenerCount     int
+	NowPlaying        *NowPlayingSummary
 }
 
 // Directory 汇总各房间 actor 的实时非敏感摘要。
@@ -90,8 +98,10 @@ func (m *Manager) Directory() []DirectoryRoom {
 		if err != nil {
 			continue
 		}
+		access := r.AccessConfig()
 		out = append(out, DirectoryRoom{
 			ID: r.ID, Name: r.Name, PolicyRaw: r.PolicyRaw(),
+			AccessMode: access.Mode, CodePeriodSeconds: access.CodePeriodSeconds,
 			ListenerCount: snapshot.ListenerCount, NowPlaying: snapshot.NowPlaying,
 		})
 	}
