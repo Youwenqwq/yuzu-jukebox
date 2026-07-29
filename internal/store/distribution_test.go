@@ -16,6 +16,7 @@ func TestDistributionLeaseLifecycle(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	ctx := context.Background()
 	const now = int64(1_000_000)
+	createDistributionTestAcceleration(t, st)
 
 	if err := st.RequestDistribution(ctx, "edgeone", "local:song", now); err != nil {
 		t.Fatal(err)
@@ -43,7 +44,7 @@ func TestDistributionLeaseLifecycle(t *testing.T) {
 	}
 
 	candidate := DistributionCandidate{
-		Backend: "edgeone", TrackRef: "local:song",
+		AccelerationID: "edgeone", TrackRef: "local:song",
 		ContentVersion: "abc", Locator: "opaque/blob/key", Layout: "object",
 		SizeBytes: 1234, ContentType: "audio/mpeg", ETag: "etag-a",
 	}
@@ -83,6 +84,7 @@ func TestDistributionExpiredLeaseCanBeReclaimedAndFailed(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	ctx := context.Background()
+	createDistributionTestAcceleration(t, st)
 
 	if err := st.RequestDistribution(ctx, "edgeone", "ncm:1", 100); err != nil {
 		t.Fatal(err)
@@ -105,5 +107,22 @@ func TestDistributionExpiredLeaseCanBeReclaimedAndFailed(t *testing.T) {
 	}
 	if _, err := st.ClaimDistribution(ctx, "edgeone", "retry", "retry-lease", 230, 600); err != nil {
 		t.Fatalf("claim at retry time: %v", err)
+	}
+}
+
+func createDistributionTestAcceleration(t *testing.T, st *Store) {
+	t.Helper()
+	publisherHash := make([]byte, 32)
+	edgeHash := make([]byte, 32)
+	publisherHash[0] = 1
+	edgeHash[0] = 2
+	_, err := st.CreateAcceleration(context.Background(), Acceleration{
+		ID: "edgeone", Name: "EdgeOne", Kind: "edgeone",
+		PublishOnCacheReady: true, ControlBaseURL: "https://control.test/yuzu-edge",
+		SignerBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
+	}, publisherHash, edgeHash, "signer-token")
+	if err != nil {
+		t.Fatal(err)
 	}
 }

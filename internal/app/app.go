@@ -67,25 +67,15 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, st, reg)
 
-	var distributionService *distribution.Service
-	if cfg.Distribution.Enabled {
-		if cfg.Distribution.Backend == "" {
-			return nil, errors.New("distribution.backend is required when distribution is enabled")
+	distributionService := distribution.New(st)
+	accelerationRegistry := distribution.NewRegistry(st)
+	healthMonitor := distribution.NewHealthMonitor(st)
+	go healthMonitor.Run(ctx)
+	c.SetReadyHook(func(ref provider.TrackRef) {
+		if err := distributionService.RequestCacheReady(context.Background(), ref); err != nil {
+			log.Printf("[distribution] request %s failed: %v", ref, err)
 		}
-		if cfg.Distribution.PublisherToken == "" || cfg.Distribution.EdgeToken == "" {
-			return nil, errors.New("distribution publisher_token and edge_token are required")
-		}
-		if cfg.Distribution.PublisherToken == cfg.Distribution.EdgeToken {
-			return nil, errors.New("distribution publisher_token and edge_token must be distinct")
-		}
-		leaseTTL := time.Duration(cfg.Distribution.LeaseTTLSeconds) * time.Second
-		distributionService = distribution.New(st, cfg.Distribution.Backend, leaseTTL)
-		c.SetReadyHook(func(ref provider.TrackRef) {
-			if err := distributionService.Request(context.Background(), ref); err != nil {
-				log.Printf("[distribution] request %s failed: %v", ref, err)
-			}
-		})
-	}
+	})
 
 	rooms := room.NewManager(ctx, st, authm, c, reg, key)
 	if err := rooms.Load(); err != nil {
@@ -105,13 +95,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	ws := wsapi.NewServer(authm, playerAuth, controls, st)
 	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping)
-	if distributionService != nil {
-		api.ConfigureDistribution(
-			distributionService,
-			cfg.Distribution.PublisherToken,
-			cfg.Distribution.EdgeToken,
-		)
-	}
+	api.ConfigureDistribution(distributionService, accelerationRegistry)
 
 	if cfg.CacheAutoPruneDays > 0 {
 		go runCacheJanitor(ctx, c, cfg.CacheAutoPruneDays)

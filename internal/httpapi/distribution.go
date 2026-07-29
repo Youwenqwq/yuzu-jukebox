@@ -1,7 +1,7 @@
 package httpapi
 
 import (
-	"crypto/subtle"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,12 +14,14 @@ import (
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
+	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
 const distributionBodyLimit = 32 << 10
 
 func (s *Server) distributionIntrospect(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionEdge) {
+	acceleration, ok := s.authenticateAccelerationEdge(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -38,22 +40,36 @@ func (s *Server) distributionIntrospect(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid or expired ticket")
 		return
 	}
-	if err := s.distribution.Request(r.Context(), ref); err != nil {
+	if !acceleration.Enabled {
+		writeDistributionJSON(w, http.StatusOK, map[string]any{
+			"valid": true, "enabled": false, "acceleration_id": acceleration.ID,
+			"track_ref": ref.String(), "ready": false, "candidate": nil,
+			"fallback_reason": "acceleration_disabled",
+		})
+		return
+	}
+	if err := s.distribution.Request(r.Context(), acceleration.ID, ref); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "request distribution")
 		return
 	}
-	candidate, ready, err := s.distribution.Candidate(r.Context(), ref)
+	candidate, ready, err := s.distribution.Candidate(r.Context(), acceleration.ID, ref)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "resolve distribution candidate")
 		return
 	}
 	writeDistributionJSON(w, http.StatusOK, map[string]any{
-		"valid":     true,
-		"backend":   s.distribution.Backend(),
-		"track_ref": ref.String(),
-		"ready":     ready,
-		"candidate": optionalCandidate(candidate, ready),
+		"valid": true, "enabled": true, "acceleration_id": acceleration.ID,
+		"track_ref": ref.String(), "ready": ready,
+		"candidate":       optionalCandidate(candidate, ready),
+		"fallback_reason": fallbackReason(ready, "candidate_not_ready"),
 	})
+}
+
+func fallbackReason(ready bool, reason string) string {
+	if ready {
+		return ""
+	}
+	return reason
 }
 
 func optionalCandidate(candidate distribution.Candidate, ready bool) any {
@@ -63,8 +79,51 @@ func optionalCandidate(candidate distribution.Candidate, ready bool) any {
 	return candidate
 }
 
+func (s *Server) distributionPublisherConfig(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	writeDistributionJSON(w, http.StatusOK, map[string]any{
+		"acceleration_id": acceleration.ID, "enabled": acceleration.Enabled,
+		"kind": acceleration.Kind, "signer_base_url": acceleration.SignerBaseURL,
+		"signer_token":                 acceleration.SignerToken,
+		"lease_ttl_seconds":            acceleration.LeaseTTLSeconds,
+		"upload_rate_bytes_per_second": acceleration.UploadRateBytesPerSecond,
+		"max_object_bytes":             acceleration.MaxObjectBytes,
+	})
+}
+
+func (s *Server) distributionHeartbeat(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Owner          string   `json:"owner"`
+		Version        string   `json:"version"`
+		State          string   `json:"state"`
+		LeaseID        string   `json:"lease_id"`
+		TrackRef       string   `json:"track_ref"`
+		Capabilities   []string `json:"capabilities"`
+		BackendHealthy bool     `json:"backend_healthy"`
+		LastError      string   `json:"last_error"`
+	}
+	if !decodeDistributionJSON(w, r, &body) {
+		return
+	}
+	if err := s.distribution.Heartbeat(r.Context(), acceleration.ID, body.Owner,
+		body.Version, body.State, body.LeaseID, body.TrackRef, body.Capabilities,
+		body.BackendHealthy, body.LastError); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) distributionClaim(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionPublisher) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -78,10 +137,9 @@ func (s *Server) distributionClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "owner is required")
 		return
 	}
-	lease, err := s.distribution.Claim(
-		r.Context(), body.Owner, time.Duration(body.LeaseSeconds)*time.Second,
-	)
-	if errors.Is(err, distribution.ErrNoWork) {
+	lease, err := s.distribution.Claim(r.Context(), acceleration, body.Owner,
+		time.Duration(body.LeaseSeconds)*time.Second)
+	if errors.Is(err, distribution.ErrNoWork) || errors.Is(err, distribution.ErrAccelerationDisabled) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -90,30 +148,29 @@ func (s *Server) distributionClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeDistributionJSON(w, http.StatusCreated, map[string]any{
-		"lease": lease,
-		"source_url": fmt.Sprintf(
-			"/internal/v1/distribution/leases/%s/source", lease.ID,
-		),
+		"lease":      lease,
+		"source_url": fmt.Sprintf("/internal/v1/distribution/leases/%s/source", lease.ID),
 	})
 }
 
 func (s *Server) distributionSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionPublisher) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
 		return
 	}
-	lease, err := s.distribution.Lease(r.Context(), r.PathValue("id"))
+	lease, err := s.distribution.Lease(r.Context(), acceleration.ID, r.PathValue("id"))
 	if err != nil {
 		writeDistributionLeaseError(w, err)
 		return
 	}
 	ref := provider.TrackRef(lease.TrackRef)
-	f, err := s.cache.Open(r.Context(), ref)
+	file, err := s.cache.Open(r.Context(), ref)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
 	}
-	defer f.Close()
-	info, err := f.Stat()
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "stat distribution source")
 		return
@@ -125,11 +182,36 @@ func (s *Server) distributionSource(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Yuzu-Distribution-Lease", lease.ID)
-	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func (s *Server) distributionProgress(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Owner       string `json:"owner"`
+		Phase       string `json:"phase"`
+		SourceBytes int64  `json:"source_bytes"`
+		UploadBytes int64  `json:"upload_bytes"`
+		TotalBytes  int64  `json:"total_bytes"`
+	}
+	if !decodeDistributionJSON(w, r, &body) {
+		return
+	}
+	lease, err := s.distribution.Progress(r.Context(), acceleration, r.PathValue("id"),
+		body.Owner, body.Phase, body.SourceBytes, body.UploadBytes, body.TotalBytes)
+	if err != nil {
+		writeDistributionLeaseError(w, err)
+		return
+	}
+	writeDistributionJSON(w, http.StatusOK, map[string]any{"lease": lease})
 }
 
 func (s *Server) distributionComplete(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionPublisher) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -144,7 +226,7 @@ func (s *Server) distributionComplete(w http.ResponseWriter, r *http.Request) {
 	if !decodeDistributionJSON(w, r, &body) {
 		return
 	}
-	lease, err := s.distribution.Lease(r.Context(), r.PathValue("id"))
+	lease, err := s.distribution.Lease(r.Context(), acceleration.ID, r.PathValue("id"))
 	if err != nil {
 		writeDistributionLeaseError(w, err)
 		return
@@ -158,7 +240,8 @@ func (s *Server) distributionComplete(w http.ResponseWriter, r *http.Request) {
 		Locator: body.Locator, Layout: body.Layout, SizeBytes: body.SizeBytes,
 		ContentType: body.ContentType, ETag: body.ETag,
 	}
-	if err := s.distribution.Complete(r.Context(), lease.ID, body.Owner, candidate); err != nil {
+	if err := s.distribution.Complete(r.Context(), acceleration.ID, lease.ID,
+		body.Owner, candidate); err != nil {
 		if errors.Is(err, distribution.ErrInvalidLease) || errors.Is(err, distribution.ErrExpiredLease) {
 			writeDistributionLeaseError(w, err)
 			return
@@ -170,7 +253,8 @@ func (s *Server) distributionComplete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) distributionFail(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionPublisher) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -185,10 +269,8 @@ func (s *Server) distributionFail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "retry_after_seconds out of range")
 		return
 	}
-	err := s.distribution.Fail(
-		r.Context(), r.PathValue("id"), body.Owner, body.Error,
-		time.Duration(body.RetryAfterSeconds)*time.Second,
-	)
+	err := s.distribution.Fail(r.Context(), acceleration.ID, r.PathValue("id"),
+		body.Owner, body.Error, time.Duration(body.RetryAfterSeconds)*time.Second)
 	if err != nil {
 		writeDistributionLeaseError(w, err)
 		return
@@ -197,13 +279,15 @@ func (s *Server) distributionFail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) distributionEvent(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionEdge) {
+	acceleration, ok := s.authenticateAccelerationEdge(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
 		TrackRef   string `json:"track_ref"`
 		Ticket     string `json:"ticket"`
 		Kind       string `json:"kind"`
+		Reason     string `json:"reason"`
 		DurationMS int64  `json:"duration_ms"`
 		Bytes      int64  `json:"bytes"`
 	}
@@ -223,13 +307,18 @@ func (s *Server) distributionEvent(w http.ResponseWriter, r *http.Request) {
 		metrics["blob_response_samples"] = 1
 		metrics["blob_bytes_served"] = max(body.Bytes, 0)
 	case "fallback":
+		if !validFallbackReason(body.Reason) {
+			writeErr(w, http.StatusBadRequest, "bad_request", "unknown fallback reason")
+			return
+		}
 		metrics["edge_fallback"] = 1
+		metrics["edge_fallback_"+body.Reason] = 1
 	default:
 		writeErr(w, http.StatusBadRequest, "bad_request", "unknown distribution event")
 		return
 	}
 	for name, delta := range metrics {
-		if err := s.distribution.AddMetric(r.Context(), name, delta); err != nil {
+		if err := s.distribution.AddMetric(r.Context(), acceleration.ID, name, delta); err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", "record distribution event")
 			return
 		}
@@ -237,27 +326,61 @@ func (s *Server) distributionEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func validFallbackReason(reason string) bool {
+	switch reason {
+	case "acceleration_disabled", "candidate_not_ready", "signer_unavailable",
+		"blob_http_status", "blob_fetch_error", "control_unavailable":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) distributionMetrics(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDistributionToken(w, r, s.distributionPublisher) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
 		return
 	}
-	metrics, status, err := s.distribution.Metrics(r.Context())
+	metrics, status, err := s.distribution.Metrics(r.Context(), acceleration.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "read distribution metrics")
 		return
 	}
+	rolling, err := s.distribution.Metrics24Hours(r.Context(), acceleration.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "read rolling distribution metrics")
+		return
+	}
 	writeDistributionJSON(w, http.StatusOK, map[string]any{
-		"backend": s.distribution.Backend(), "status": status, "counters": metrics,
+		"acceleration_id": acceleration.ID, "status": status,
+		"counters": metrics, "last_24_hours": rolling,
 	})
 }
 
-func (s *Server) requireDistributionToken(w http.ResponseWriter, r *http.Request, expected string) bool {
-	provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if len(provided) != len(expected) || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid distribution credential")
-		return false
+func (s *Server) authenticateAccelerationPublisher(w http.ResponseWriter, r *http.Request) (store.Acceleration, bool) {
+	return s.authenticateAccelerationCredential(w, r, s.accelerationRegistry.ResolvePublisher)
+}
+
+func (s *Server) authenticateAccelerationEdge(w http.ResponseWriter, r *http.Request) (store.Acceleration, bool) {
+	return s.authenticateAccelerationCredential(w, r, s.accelerationRegistry.ResolveEdge)
+}
+
+func (s *Server) authenticateAccelerationCredential(
+	w http.ResponseWriter,
+	r *http.Request,
+	resolve func(context.Context, string) (store.Acceleration, error),
+) (store.Acceleration, bool) {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid acceleration credential")
+		return store.Acceleration{}, false
 	}
-	return true
+	acceleration, err := resolve(r.Context(), strings.TrimPrefix(header, "Bearer "))
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid acceleration credential")
+		return store.Acceleration{}, false
+	}
+	return acceleration, true
 }
 
 func decodeDistributionJSON(w http.ResponseWriter, r *http.Request, value any) bool {
@@ -272,17 +395,20 @@ func decodeDistributionJSON(w http.ResponseWriter, r *http.Request, value any) b
 }
 
 func writeDistributionJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, status, value)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func writeDistributionLeaseError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, sql.ErrNoRows), errors.Is(err, distribution.ErrInvalidLease):
-		writeErr(w, http.StatusConflict, "lease_invalid", "distribution lease is not active")
+	case errors.Is(err, distribution.ErrInvalidLease), errors.Is(err, sql.ErrNoRows):
+		writeErr(w, http.StatusNotFound, "lease_not_found", "distribution lease not found")
 	case errors.Is(err, distribution.ErrExpiredLease):
 		writeErr(w, http.StatusConflict, "lease_expired", "distribution lease expired")
+	case errors.Is(err, distribution.ErrStaleProgress):
+		writeErr(w, http.StatusConflict, "progress_stale", "distribution progress moved backwards")
 	default:
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, http.StatusInternalServerError, "internal", "distribution lease operation failed")
 	}
 }

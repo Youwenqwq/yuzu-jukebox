@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
@@ -46,9 +45,27 @@ func TestDistributionInternalAPI(t *testing.T) {
 	reg.Register(local.New(mediaDir, st))
 	authm := auth.NewManager("", st)
 	roomCache := cache.New(cacheDir, 1<<30, st, reg)
-	dist := distribution.New(st, "edgeone", 10*time.Minute)
+	dist := distribution.New(st)
+	_, err = st.CreateAcceleration(context.Background(), store.Acceleration{
+		ID: "edgeone-main", Name: "EdgeOne", Kind: "edgeone",
+		PublishOnCacheReady: true, ControlBaseURL: "https://control.test/yuzu-edge",
+		SignerBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
+	}, distribution.HashCredential("publisher-secret"), distribution.HashCredential("edge-secret"), "signer-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.UpdateAcceleration(context.Background(), "edgeone-main", store.AccelerationUpdate{
+		Name: "EdgeOne", Enabled: true, PublishOnCacheReady: true,
+		ControlBaseURL: "https://control.test/yuzu-edge",
+		SignerBaseURL:  "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := &Server{st: st, authm: authm, reg: reg, cache: roomCache}
-	server.ConfigureDistribution(dist, "publisher-secret", "edge-secret")
+	server.ConfigureDistribution(dist, distribution.NewRegistry(st))
 	handler := server.Handler()
 
 	ref := "local:song"
@@ -80,15 +97,35 @@ func TestDistributionInternalAPI(t *testing.T) {
 	}
 	var claimed struct {
 		Lease struct {
-			ID       string `json:"id"`
-			TrackRef string `json:"track_ref"`
-			Owner    string `json:"owner"`
+			ID        string `json:"id"`
+			TrackRef  string `json:"track_ref"`
+			Owner     string `json:"owner"`
+			ExpiresAt int64  `json:"expires_at"`
 		} `json:"lease"`
 		SourceURL string `json:"source_url"`
 	}
 	decodeRecorder(t, claim, &claimed)
 	if claimed.Lease.TrackRef != ref || claimed.SourceURL == "" {
 		t.Fatalf("claimed = %#v", claimed)
+	}
+	progress := distributionRequest(t, handler, http.MethodPatch,
+		"/internal/v1/distribution/leases/"+claimed.Lease.ID+"/progress",
+		"publisher-secret", map[string]any{
+			"owner": "publisher-1", "phase": "uploading",
+			"source_bytes": len(content), "upload_bytes": 4,
+			"total_bytes": len(content),
+		})
+	if progress.Code != http.StatusOK {
+		t.Fatalf("progress = %d: %s", progress.Code, progress.Body.String())
+	}
+	var progressed struct {
+		Lease struct {
+			ExpiresAt int64 `json:"expires_at"`
+		} `json:"lease"`
+	}
+	decodeRecorder(t, progress, &progressed)
+	if progressed.Lease.ExpiresAt < claimed.Lease.ExpiresAt {
+		t.Fatalf("renewed expiry = %d, original %d", progressed.Lease.ExpiresAt, claimed.Lease.ExpiresAt)
 	}
 
 	sourceReq := httptest.NewRequest(http.MethodGet, claimed.SourceURL, nil)

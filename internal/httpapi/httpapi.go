@@ -39,17 +39,15 @@ type Server struct {
 	oidc        *auth.OIDCValidator // nil = OIDC 未启用
 	oidcRoleMap map[string][]string
 
-	distribution          *distribution.Service
-	distributionPublisher string
-	distributionEdge      string
+	distribution         *distribution.Service
+	accelerationRegistry *distribution.Registry
 }
 
-// ConfigureDistribution enables the optional internal distribution control
-// plane. It is called only during app assembly, before Handler is exposed.
-func (s *Server) ConfigureDistribution(service *distribution.Service, publisherToken, edgeToken string) {
+// ConfigureDistribution installs the persistent acceleration control plane
+// during app assembly, before Handler is exposed.
+func (s *Server) ConfigureDistribution(service *distribution.Service, registry *distribution.Registry) {
 	s.distribution = service
-	s.distributionPublisher = publisherToken
-	s.distributionEdge = edgeToken
+	s.accelerationRegistry = registry
 }
 
 func NewServer(
@@ -93,6 +91,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/integrations/{id}/subjects", s.listIntegrationSubjects)
 	mux.HandleFunc("PUT /api/v1/integrations/{id}/subjects", s.manageIntegrationSubject)
 	mux.HandleFunc("DELETE /api/v1/integrations/{id}/subjects", s.manageIntegrationSubject)
+	mux.HandleFunc("GET /api/v1/accelerations", s.listAccelerations)
+	mux.HandleFunc("POST /api/v1/accelerations", s.createAcceleration)
+	mux.HandleFunc("GET /api/v1/accelerations/{id}", s.getAcceleration)
+	mux.HandleFunc("PATCH /api/v1/accelerations/{id}", s.updateAcceleration)
+	mux.HandleFunc("DELETE /api/v1/accelerations/{id}", s.deleteAcceleration)
+	mux.HandleFunc("GET /api/v1/accelerations/{id}/status", s.accelerationStatus)
+	mux.HandleFunc("GET /api/v1/accelerations/{id}/requests", s.accelerationRequests)
+	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare", s.prepareAccelerationCredential)
+	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/activate", s.activateAccelerationCredential)
 	mux.HandleFunc("GET /api/v1/principals", s.listPrincipals)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
@@ -149,7 +156,10 @@ func (s *Server) Handler() http.Handler {
 	if s.distribution != nil {
 		mux.HandleFunc("POST /internal/v1/distribution/introspect", s.distributionIntrospect)
 		mux.HandleFunc("POST /internal/v1/distribution/leases", s.distributionClaim)
+		mux.HandleFunc("GET /internal/v1/distribution/publisher/config", s.distributionPublisherConfig)
+		mux.HandleFunc("POST /internal/v1/distribution/publishers/heartbeat", s.distributionHeartbeat)
 		mux.HandleFunc("GET /internal/v1/distribution/leases/{id}/source", s.distributionSource)
+		mux.HandleFunc("PATCH /internal/v1/distribution/leases/{id}/progress", s.distributionProgress)
 		mux.HandleFunc("POST /internal/v1/distribution/leases/{id}/complete", s.distributionComplete)
 		mux.HandleFunc("POST /internal/v1/distribution/leases/{id}/fail", s.distributionFail)
 		mux.HandleFunc("POST /internal/v1/distribution/events", s.distributionEvent)
