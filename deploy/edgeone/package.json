@@ -1,0 +1,12 @@
+{
+  "name": "yuzu-jukebox-edgeone",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check 'edge-functions/stream/v1/[ref].js' && node --check 'cloud-functions/yuzu-blob/[action].js' && node --check 'cloud-functions/yuzu-edge/[action].js' && node --check 'lib/blob-signing.js' && pnpm run test",
+    "test": "node --test ../../internal/edgeonepublisher/testdata/blob-signing.test.mjs"
+  },
+  "dependencies": {
+    "@edgeone/pages-blob": "0.0.13"
+  }
+}

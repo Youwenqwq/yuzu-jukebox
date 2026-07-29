@@ -16,6 +16,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
+	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
@@ -37,6 +38,18 @@ type Server struct {
 
 	oidc        *auth.OIDCValidator // nil = OIDC 未启用
 	oidcRoleMap map[string][]string
+
+	distribution          *distribution.Service
+	distributionPublisher string
+	distributionEdge      string
+}
+
+// ConfigureDistribution enables the optional internal distribution control
+// plane. It is called only during app assembly, before Handler is exposed.
+func (s *Server) ConfigureDistribution(service *distribution.Service, publisherToken, edgeToken string) {
+	s.distribution = service
+	s.distributionPublisher = publisherToken
+	s.distributionEdge = edgeToken
 }
 
 func NewServer(
@@ -133,6 +146,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/players/{id}", s.deletePlayer)
 	mux.HandleFunc("POST /api/v1/players/{id}/key", s.rotatePlayerKey)
 	mux.HandleFunc("POST /api/v1/players/{id}/command", s.playerCommand)
+	if s.distribution != nil {
+		mux.HandleFunc("POST /internal/v1/distribution/introspect", s.distributionIntrospect)
+		mux.HandleFunc("POST /internal/v1/distribution/leases", s.distributionClaim)
+		mux.HandleFunc("GET /internal/v1/distribution/leases/{id}/source", s.distributionSource)
+		mux.HandleFunc("POST /internal/v1/distribution/leases/{id}/complete", s.distributionComplete)
+		mux.HandleFunc("POST /internal/v1/distribution/leases/{id}/fail", s.distributionFail)
+		mux.HandleFunc("POST /internal/v1/distribution/events", s.distributionEvent)
+		mux.HandleFunc("GET /internal/v1/distribution/metrics", s.distributionMetrics)
+	}
 	mux.Handle("/ws/v1", s.ws)
 	return mux
 }

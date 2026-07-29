@@ -281,7 +281,7 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 
 - `player_key` 不能与 `name/password/session_token` 混用。认证后连接只允许 `ping`、`player.hello`、`player.state`；Player 没有 Yuzu role，不能作为 Principal 点歌或控制 Room。
 - `player.hello` 不接受客户端声明的 Player ID；服务端只信任 key 解析出的持久 Player。每个 Player ID 同时只保留一条在线连接，新连接会关闭旧连接。
-- Room 分配由 `room_admin` 持久管理。若 Player 已分配 Room，`player.hello.ok` 之后服务端自动推送 `room.joined` 和五类快照；未分配时 Agent 保持在线等待。Player 不能自行 `room.join`/`room.leave`。
+- Room 分配由 `room_admin` 持久管理。若 Player 已分配 Room，`player.hello.ok` 之后服务端自动推送 `room.joined` 与 `playback.changed`；未分配时 Agent 保持在线等待。Player 不能自行 `room.join`/`room.leave`。Headless Player 是输出端：不接收 `queue/radio/listeners.changed`（长队列整包会撑爆 WS 帧），也不进入 `listeners` 列表；其加入/离开不触发 `listeners.changed`，也不计入大厅 `listener_count`。
 - 停用 Player、轮换 key 或删除 Player 都会立即关闭在线连接。停用保留 key 与 Room 分配；重新启用后可用原 key 重连。轮换后旧 key 立即失效；删除级联清理 Room 分配。
 - `last_seen_at` 在成功 Player-key 认证时更新。Agent SHOULD 对断线使用有上限的指数退避；连续稳定运行后重置退避。
 - 从旧版自声明 `player_id` 升级时，已有 Room 分配迁移为 `active=false`、尚无 key 的 Player；管理员必须先轮换 key，再显式启用。没有凭据的 Player 不能启用。
@@ -332,7 +332,7 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 - 物理层（仅 `playback.current`，Resolve/缓存后可得）：`size_bytes/bitrate_kbps`。
 - provider 能力缺席合法：bili 无歌词、local 无 source_url，字段缺省即降级。
 
-**`listeners.changed` 的 data：**`{"listeners": [ {"id": "...", "name": "..."}, ... ]}`
+**`listeners.changed` 的 data：**`{"listeners": [ {"id": "...", "name": "..."}, ... ]}`。仅含普通 Client / Integration 的 Room 会话；Headless Player 不算 listener。
 
 **`radio.changed` 的 data：**`{"radio": null | {"source": "...", "description": "...", "finite": true, "shuffle": false, "once": false}}`（见 4.5）
 
@@ -656,7 +656,7 @@ pause│  │resume
 
 - 四个字段的完整形状与 4.1 的 WS 快照相同；区别是 REST 顶层直接使用 `queue` 数组与 `radio` 值，没有 `queue.changed`/`radio.changed` 的 data 包装。
 - `playback.current` 非空时包含按本次调用 identity 签发的 `stream_url`；队列条目仍不含 `stream_url`。
-- `listeners` 只反映已加入的 WS listener。查询本身无副作用，重复查询不会把调用者加入列表。
+- `listeners` 只反映已加入的普通 WS listener（不含 Headless Player）。查询本身无副作用，重复查询不会把调用者加入列表。
 
 **命令请求与成功响应：**
 
@@ -822,7 +822,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 2. 校时：3–5 轮 ping/pong
 3. auth：{"player_key":"yzp_…"}
 4. player.hello：只上报 device/version/caps，不上报 Player ID
-5. 已分配 Room → 等 room.joined 与五类快照；未分配 → 保持在线等待
+5. 已分配 Room → 等 `room.joined` 与 `playback.changed`；未分配 → 保持在线等待。Player 不收 queue/radio/listeners 快照
 6. player.state 上报设备实际 volume/muted；按 playback.changed 驱动渲染
 ```
 

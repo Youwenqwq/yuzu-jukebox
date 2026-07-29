@@ -46,6 +46,9 @@ type Config struct {
 	NCM NCMConfig `json:"ncm"`
 	// Bili Provider（bilibili-api sidecar 实例）
 	Bili BiliConfig `json:"bili"`
+	// 可选媒体分发控制面。关闭时不注册任何 /internal/v1/distribution 路由，
+	// 原有 /stream/v1 行为完全不变。
+	Distribution DistributionConfig `json:"distribution"`
 }
 
 type OIDCConfig struct {
@@ -71,6 +74,18 @@ type BiliConfig struct {
 	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3002
 }
 
+type DistributionConfig struct {
+	Enabled bool `json:"enabled"`
+	// Backend 是 Core 看见的稳定后端标识；locator 对 Core 保持不透明。
+	Backend string `json:"backend"`
+	// PublisherToken 只供 yuzu-edgeone claim/source/complete 使用。
+	PublisherToken string `json:"publisher_token"`
+	// EdgeToken 只供 Edge Function introspect/event 使用。
+	EdgeToken string `json:"edge_token"`
+	// 单次发布租约上限。sidecar 可请求更短租约，但不能超过此值。
+	LeaseTTLSeconds int `json:"lease_ttl_seconds"`
+}
+
 func Default() Config {
 	return Config{
 		Addr:               ":8080",
@@ -92,6 +107,11 @@ func Default() Config {
 		Bili: BiliConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3002",
+		},
+		Distribution: DistributionConfig{
+			Enabled:         false,
+			Backend:         "edgeone",
+			LeaseTTLSeconds: 600,
 		},
 	}
 }

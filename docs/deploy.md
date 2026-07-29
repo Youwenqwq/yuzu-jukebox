@@ -69,6 +69,16 @@ server {
 仅在受控的私域（LAN）部署中，才可按需要保留强 `admin_password`；即使如此，
 OIDC 仍是多人管理与角色审计的推荐方式。
 
+## 可选 EdgeOne 媒体旁路
+
+公网实例若受源站上行带宽限制，可选择部署 `yuzu-edgeone` 与
+[`deploy/edgeone`](../deploy/edgeone/README.md)。该模块只接管已经由 Yuzu 拉取并缓存的媒体
+文件分发；Provider 拉流、现有 `/stream/v1` 协议和局域网部署行为都不改变。
+
+部署时需要在 EdgeOne 层把外部主机的 `/stream/v1/*` 路径直接挂到 Makers 工程，REST、
+WebSocket 和管理接口仍回 Yuzu Core。不要让 3 Mbps 源站反向代理 Blob 响应。完整设计、
+配置项、限制和 P1 状态见 [EdgeOne 旁路分发设计与部署](edgeone-distribution.md)。
+
 ## config.json 生产注意
 
 ```jsonc

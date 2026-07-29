@@ -1,0 +1,13 @@
+{
+  "core_url": "http://127.0.0.1:8080",
+  "publisher_token": "replace-with-distribution-publisher-token",
+  "signer_base_url": "https://your-makers-domain.example/yuzu-blob",
+  "signer_token": "replace-with-edgeone-signer-token",
+  "state_path": "data/yuzu-edgeone.db",
+  "owner": "publisher-1",
+  "poll_interval_seconds": 2,
+  "lease_seconds": 600,
+  "upload_rate_bytes_per_second": 187500,
+  "max_object_bytes": 24117248,
+  "http_timeout_seconds": 600
+}

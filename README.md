@@ -40,10 +40,14 @@
 go build -o bin/yuzu-server ./cmd/yuzu-server
 go build -o bin/yuzu-agent  ./cmd/yuzu-agent
 go build -o bin/yuzu-cli    ./cmd/yuzu-cli
+go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone  # 公网低带宽部署可选
 
 # 启动服务器（首次启动自动生成默认 config.json，按需修改后重启）
 ./bin/yuzu-server -config config.json
 ```
+
+公网源站带宽较小时，可选用 EdgeOne Blob + Functions 旁路分发缓存文件；局域网部署无需启用。
+参见 [EdgeOne 旁路分发设计与部署](docs/edgeone-distribution.md)。
 
 `config.json` 示例：
 

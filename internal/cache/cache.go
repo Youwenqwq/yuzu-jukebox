@@ -32,6 +32,9 @@ type Cache struct {
 	mu       sync.Mutex
 	inflight map[provider.TrackRef]*download
 	history  []DownloadStatus // 最近完成的下载（最新在前，环形上限 historyCap）
+
+	hookMu    sync.RWMutex
+	readyHook func(provider.TrackRef)
 }
 
 // download 表示一次进行中的拉取；跟随者等待完成后读缓存文件。
@@ -77,6 +80,24 @@ func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *C
 // MaxBytes 返回当前缓存容量上限。
 func (c *Cache) MaxBytes() int64 {
 	return c.maxBytes
+}
+
+// SetReadyHook installs an optional callback for complete local files. The
+// hook is advisory and runs asynchronously; cache correctness never depends
+// on it. This keeps optional distribution backends outside the cache package.
+func (c *Cache) SetReadyHook(hook func(provider.TrackRef)) {
+	c.hookMu.Lock()
+	c.readyHook = hook
+	c.hookMu.Unlock()
+}
+
+func (c *Cache) notifyReady(ref provider.TrackRef) {
+	c.hookMu.RLock()
+	hook := c.readyHook
+	c.hookMu.RUnlock()
+	if hook != nil {
+		go hook(ref)
+	}
 }
 
 // TotalBytes 返回全部缓存索引条目记录的字节数总和。
@@ -429,6 +450,7 @@ func (t *teeReader) finalize() {
 	t.c.finishInflight(t.ref, t.dl, err)
 	if err == nil {
 		log.Printf("[cache] %s: cached %d bytes -> %s", t.ref, size, final)
+		t.c.notifyReady(t.ref)
 		go t.c.evict()
 	}
 }
@@ -437,7 +459,11 @@ func (t *teeReader) finalize() {
 func (c *Cache) Prefetch(ref provider.TrackRef) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	c.ensure(ctx, ref)
+	if c.ensure(ctx, ref) == nil {
+		// Local-provider files bypass finalize, so notify here as well. Remote
+		// files may notify twice; the distribution request is idempotent.
+		c.notifyReady(ref)
+	}
 }
 
 // evict 超出容量时按 LRU 清理。
