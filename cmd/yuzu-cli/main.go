@@ -235,8 +235,8 @@ func init() {
 		},
 		"room controller list": {
 			usage:  "room controller list <room>",
-			desc:   "列出 Room controller grants",
-			detail: "列出指定 Room 的显式 controller grants。\n\n需要 room_admin 角色。",
+desc:   "列出房间控制权限",
+detail: "列出指定房间的控制权限。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
 					return errUsage("room controller list")
@@ -248,8 +248,8 @@ func init() {
 		},
 		"room controller grant": {
 			usage:  "room controller grant <room> <principal_id>",
-			desc:   "授予 Principal 指定 Room 的 controller capability",
-			detail: "为 Principal 授予指定 Room 的 controller capability。\n\n需要 room_admin 角色。",
+desc:   "授予房间控制权限",
+detail: "为 Principal 授予指定房间的控制权限。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("room controller grant")
@@ -261,8 +261,8 @@ func init() {
 		},
 		"room controller revoke": {
 			usage:  "room controller revoke <room> <principal_id>",
-			desc:   "撤销 Principal 指定 Room 的 controller capability",
-			detail: "撤销 Principal 在指定 Room 的 controller capability。\n\n需要 room_admin 角色。",
+desc:   "撤销房间控制权限",
+detail: "撤销 Principal 在指定房间的控制权限。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("room controller revoke")
@@ -275,7 +275,7 @@ func init() {
 		"room list": {
 			usage: "room list",
 			desc:  "列出所有房间",
-			detail: `列出服务器上的全部房间（大厅目录）。
+			detail: `列出服务器上的全部房间。
 
 需要任意已认证身份。`,
 			run: func(args []string) error {
@@ -288,7 +288,7 @@ func init() {
 			detail: `在指定 provider 上搜索曲目，输出 track_ref / 标题 / 艺术家 / 时长。
 track_ref 用于 add 点歌。
 
-  -provider   搜索源（默认 local；ncm 需服务器启用对应 provider）
+  -provider   搜索源（默认 local）
 
 示例：
   yuzu-cli search "海阔天空" -provider ncm`,
@@ -302,7 +302,7 @@ track_ref 用于 add 点歌。
 		"queue": {
 			usage: "queue <room>",
 			desc:  "查看房间当前播放与队列",
-			detail: `显示房间正在播放的曲目（含实时进度）和等待队列。
+			detail: `显示房间正在播放的曲目和等待队列。
 
 需要房间访客密码（-room-password，若房间设有密码）。`,
 			run: func(args []string) error {
@@ -314,7 +314,7 @@ track_ref 用于 add 点歌。
 		},
 		"add": {
 			usage: "add <room> <track_ref> [<track_ref>...]",
-			desc:  "点歌：把曲目追加到房间队列（多首原子批量入队）",
+			desc:  "点歌：把曲目追加到房间队列",
 			detail: `把 track_ref 指定的曲目追加到房间队列尾部；房间空闲时自动开播。
 track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 
@@ -330,28 +330,28 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 		},
 		"skip": {
 			usage:  "skip <room>",
-			desc:   "切歌：结束当前曲目，播放下一首（Room controller）",
-			detail: "结束当前曲目（记入播放历史），队列非空时自动播放下一首。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
+desc:   "切歌：结束当前曲目，播放下一首",
+detail: "结束当前曲目（记入播放历史），队列非空时自动播放下一首。\n\n需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。",
 			run:    playbackCmd("playback.skip"),
 		},
 		"pause": {
 			usage:  "pause <room>",
-			desc:   "暂停播放（Room controller）",
-			detail: "暂停当前曲目，进度冻结。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
+desc:   "暂停播放",
+detail: "暂停当前曲目，进度冻结。\n\n需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。",
 			run:    playbackCmd("playback.pause"),
 		},
 		"resume": {
 			usage:  "resume <room>",
-			desc:   "恢复播放（Room controller）",
-			detail: "从暂停位置继续播放。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
+desc:   "恢复播放",
+detail: "从暂停位置继续播放。\n\n需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。",
 			run:    playbackCmd("playback.resume"),
 		},
 		"seek": {
 			usage: "seek <room> <秒>",
-			desc:  "跳转播放进度（Room controller）",
+desc:  "跳转播放进度",
 			detail: `把当前曲目跳转到指定秒数，越界自动收敛到 [0, 时长]。
 
-需要该 Room controller（全局 room_admin 或 Room grant）。
+需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。
 
 示例：
   yuzu-cli seek lobby 120    # 跳到 2 分钟处`,
@@ -370,7 +370,7 @@ track_ref 来自 search 的输出，格式 "<provider>:<id>"，如 ncm:347230。
 		},
 		"room create": {
 			usage: "room create <id> <名称>",
-			desc:  "创建房间（管理员）",
+desc:  "创建房间",
 			detail: `创建一个持久房间。-room-access 可选 open、static_password、
 rotating_code；动态码轮换周期取 -room-code-period，默认 24h。静态密码取
 -room-password。不传 -room-access 时保持兼容：有密码为 static_password，
@@ -389,7 +389,7 @@ rotating_code；动态码轮换周期取 -room-code-period，默认 24h。静态
 		},
 		"room access": {
 			usage: "room access <id> <open|static_password|rotating_code>",
-			desc:  "修改房间访问模式（管理员）",
+desc:  "修改房间访问模式",
 			detail: `热更新房间访问模式。static_password 从 -room-password 读取新密码；
 rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 
@@ -416,7 +416,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"media upload": {
 			usage: "media upload <文件> [-title t] [-artist a] [-duration-ms n]",
-			desc:  "上传本地媒体文件（管理员）",
+desc:  "上传本地媒体文件",
 			detail: `上传音频文件到 local provider。时长自动探测
 （WAV 直接解析，其他格式依赖服务器上的 ffprobe），失败时需显式传 -duration-ms。
 
@@ -433,7 +433,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"media cache": {
 			usage: "media cache",
-			desc:  "查看媒体缓存：已缓存条目、进行中的下载、最近下载历史（管理员）",
+desc:  "查看媒体缓存：已缓存条目、进行中的下载、最近下载历史",
 			detail: `显示三段缓存状态：
   entries   已落盘的缓存文件（DB 索引）
   downloads 正在进行中的下载（含进度）
@@ -446,7 +446,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"provider credential": {
 			usage: "provider credential <provider> <payload>",
-			desc:  "热更新 provider 凭据（管理员）",
+desc:  "热更新 provider 凭据",
 			detail: `提交 provider 凭据（如 ncm 的 MUSIC_U cookie）。服务端先校验
 有效性再生效，无需重启。凭据存于服务端，不会下发给客户端。
 
@@ -502,7 +502,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"playlist create": {
 			usage:  "playlist create <名称> [描述]",
-			desc:   "创建歌单（管理员）",
+desc:   "创建歌单",
 			detail: "创建一张空的通用歌单。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
@@ -519,7 +519,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"playlist delete": {
 			usage:  "playlist delete <id>",
-			desc:   "删除歌单（管理员）",
+desc:   "删除歌单",
 			detail: "删除歌单及其全部条目。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
@@ -532,7 +532,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"playlist add": {
 			usage: "playlist add <id> <track_ref>...",
-			desc:  "向歌单追加曲目（管理员）",
+desc:  "向歌单追加曲目",
 			detail: `把一个或多个 track_ref 追加到歌单尾部（单次最多 100 首）。
 元数据快照自各 provider 实时获取。
 
@@ -548,7 +548,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"playlist delitem": {
 			usage:  "playlist delitem <id> <ord>",
-			desc:   "删除歌单中的指定条目（管理员）",
+			desc:   "删除歌单中的指定条目",
 			detail: "按序号（ord，playlist show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 2 {
@@ -565,7 +565,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"playlist move": {
 			usage:  "playlist move <id> <ord> <to_ord>",
-			desc:   "移动歌单条目到指定位置（管理员）",
+desc:   "移动歌单条目到指定位置",
 			detail: "把序号 ord 的条目移动到 to_ord（超出范围自动 clamp 到 [1, 歌单长度]），其余序号自动重排。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 3 {
@@ -586,7 +586,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"playlist import": {
 			usage: "playlist import <ncm:歌单id|URL|ncm:daily> [名称]",
-			desc:  "导入外部歌单或曲目源快照（管理员）",
+desc:  "导入外部歌单或曲目源快照",
 			detail: `两种用法：
   playlist import ncm:24381616     导入 ncm 歌单（也接受完整 URL）
   playlist import ncm:daily        把每日推荐物化成歌单
@@ -607,7 +607,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		},
 		"radio play": {
 			usage: "radio play <room> <source> [-shuffle] [-once]",
-			desc:  "房间进入电台模式：绑定曲目源自动续播（Room controller）",
+desc:  "房间进入电台模式：绑定曲目源自动续播",
 			detail: `让房间绑定一个曲目源，队列见底时自动批量补充，实现无人值守续播。
 
 source 取值：
@@ -618,7 +618,7 @@ source 取值：
   ncm:heart:<song_id> 心动模式（种子=我喜欢+当前播放）
 
 -shuffle 洗牌袋随机（仅有限源）；-once 播完即停（仅有限源）。
-需要该 Room controller（全局 room_admin 或 Room grant）。
+需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。
 
 示例：
   yuzu-cli radio play lobby playlist:pl_a1b2c3 -shuffle
@@ -634,8 +634,8 @@ source 取值：
 		},
 		"radio stop": {
 			usage:  "radio stop <room>",
-			desc:   "退出电台模式（Room controller）",
-			detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
+desc:   "退出电台模式",
+detail: "解绑曲目源；队列中已有的曲目继续播放。\n\n需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。",
 			run: func(args []string) error {
 				if len(args) < 1 {
 					return errUsage("radio stop")
@@ -691,7 +691,7 @@ source 取值：
 		},
 		"player list": {
 			usage:  "player list",
-			desc:   "列出持久 Player 资源及在线状态（管理员）",
+desc:   "列出持久 Player 资源及在线状态",
 			detail: "显示全部 Player：ID、名称、启停状态、Room 分配，以及在线设备状态。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				return withCtx(func(ctx context.Context) error { return cmdPlayers(ctx) })
@@ -699,7 +699,7 @@ source 取值：
 		},
 		"player show": {
 			usage: "player show <player_id>",
-			desc:  "查看 Player 资源（管理员）",
+desc:  "查看 Player 资源",
 			run: func(args []string) error {
 				if len(args) != 1 {
 					return errUsage("player show")
@@ -709,7 +709,7 @@ source 取值：
 		},
 		"player create": {
 			usage:  "player create <player_id> <name>",
-			desc:   "创建 Player 并签发一次性 key（管理员）",
+desc:   "创建 Player 并签发一次性 key",
 			detail: "key 仅在创建响应中显示一次；保存后配置给 yuzu-agent -key。",
 			run: func(args []string) error {
 				if len(args) != 2 {
@@ -720,7 +720,7 @@ source 取值：
 		},
 		"player rename": {
 			usage: "player rename <player_id> <name>",
-			desc:  "重命名 Player（管理员）",
+desc:  "重命名 Player",
 			run: func(args []string) error {
 				if len(args) != 2 {
 					return errUsage("player rename")
@@ -730,7 +730,7 @@ source 取值：
 		},
 		"player enable": {
 			usage: "player enable <player_id>",
-			desc:  "启用 Player（管理员）",
+desc:  "启用 Player",
 			run: func(args []string) error {
 				if len(args) != 1 {
 					return errUsage("player enable")
@@ -740,7 +740,7 @@ source 取值：
 		},
 		"player disable": {
 			usage:  "player disable <player_id>",
-			desc:   "停用 Player 并立即断开在线 Agent（管理员）",
+desc:   "停用 Player 并立即断开在线 Agent",
 			detail: "Room 分配保留；重新启用后，Agent 可使用现有 key 重连。",
 			run: func(args []string) error {
 				if len(args) != 1 {
@@ -751,7 +751,7 @@ source 取值：
 		},
 		"player key rotate": {
 			usage:  "player key rotate <player_id>",
-			desc:   "轮换 Player key 并断开旧连接（管理员）",
+desc:   "轮换 Player key 并断开旧连接",
 			detail: "新 key 仅显示一次；旧 key 立即失效。",
 			run: func(args []string) error {
 				if len(args) != 1 {
@@ -762,7 +762,7 @@ source 取值：
 		},
 		"player delete": {
 			usage:  "player delete <player_id>",
-			desc:   "删除 Player、Room 分配并断开 Agent（管理员）",
+desc:   "删除 Player、Room 分配并断开 Agent",
 			detail: "删除不可撤销；Player key 同时失效。",
 			run: func(args []string) error {
 				if len(args) != 1 {
@@ -773,7 +773,7 @@ source 取值：
 		},
 		"player volume": {
 			usage:  "player volume <player_id> <0-100>",
-			desc:   "远程设置播放端音量（管理员）",
+desc:   "远程设置播放端音量",
 			detail: "向指定播放端下发音量指令，立即生效。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 2 {
@@ -784,7 +784,7 @@ source 取值：
 		},
 		"player mute": {
 			usage: "player mute <player_id> on|off",
-			desc:  "远程静音/取消静音播放端（管理员）",
+desc:  "远程静音/取消静音播放端",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("player mute")
@@ -794,7 +794,7 @@ source 取值：
 		},
 		"player bind": {
 			usage: "player bind <player_id> <room>",
-			desc:  "将 headless player 分配到 Room（管理员）",
+desc:  "将 headless player 分配到 Room",
 			detail: `持久分配指定 Player；在线时立即迁入目标 Room，离线时等待重连。
 Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Player。`,
 			run: func(args []string) error {
@@ -806,7 +806,7 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 		},
 		"player unbind": {
 			usage:  "player unbind <player_id> <room>",
-			desc:   "解除 headless player 的 Room 分配（管理员）",
+desc:   "解除 headless player 的 Room 分配",
 			detail: "解除持久分配；在线 Agent 立即离开 Room，但保持连接等待重新分配。",
 			run: func(args []string) error {
 				if len(args) < 2 {
@@ -817,7 +817,7 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 		},
 		"room players": {
 			usage:  "room players <room>",
-			desc:   "列出 Room 的 headless players（管理员）",
+desc:   "列出 Room 的 headless players",
 			detail: "显示持久分配与当前在线 player 的并集，包括设备实际音量。",
 			run: func(args []string) error {
 				if len(args) < 1 {
@@ -839,8 +839,8 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 		},
 		"queue del": {
 			usage:  "queue del <room> <entry_id>",
-			desc:   "移除队列条目（本人或 Room controller）",
-			detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；该 Room controller（全局 room_admin 或 Room grant）可移除他人点的。\n\nentry_id 见 queue 输出第一列。",
+desc:   "移除队列条目",
+detail: "按 entry_id 移除队列条目。普通用户只能移除自己点的；拥有该房间控制权限者（全局 room_admin 或房间级别授权）可移除他人点的。\n\nentry_id 见 queue 输出第一列。",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("queue del")
@@ -850,8 +850,8 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 		},
 		"queue move": {
 			usage:  "queue move <room> <entry_id> <位置>",
-			desc:   "移动队列条目到指定位置（Room controller）",
-			detail: "把队列条目移动到目标序号（0 起）。\n\n需要该 Room controller（全局 room_admin 或 Room grant）。",
+desc:   "移动队列条目到指定位置",
+detail: "把队列条目移动到目标序号（0 起）。\n\n需要该房间的控制权限（全局 room_admin 或房间级别授权均可）。",
 			run: func(args []string) error {
 				if len(args) < 3 {
 					return errUsage("queue move")
@@ -865,7 +865,7 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 		},
 		"room delete": {
 			usage:  "room delete <id>",
-			desc:   "删除房间（管理员）",
+desc:   "删除房间",
 			detail: "删除房间并级联清理其队列与播放历史。\n\n需要 room_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
@@ -902,7 +902,7 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 		},
 		"policy set": {
 			usage: "policy set <room> <JSON>",
-			desc:  "设置房间治理策略（管理员）",
+desc:  "设置房间治理策略",
 			detail: `热更新房间策略，JSON 结构：
   {"max_queue":100,"queue_limits":{"guest":5},"member_player_volume":true}
 max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 kind
@@ -931,7 +931,7 @@ member_player_volume 允许同 Room 的 Integration actor 调节 headless output
 		},
 		"provider qrlogin": {
 			usage: "provider qrlogin <provider>",
-			desc:  "扫码登录 provider（管理员）",
+desc:  "扫码登录 provider",
 			detail: `在终端渲染二维码，用对应 App（如网易云音乐）扫码并确认。
 凭据由服务端在扫码成功后自动提取、校验并热生效，不经过本机。
 
@@ -958,7 +958,7 @@ var groupMeta = map[string]struct {
 	"identity":    {"OIDC 身份与 external subject 绑定", ""},
 	"principal":   {"Principal 查询", "list"},
 	"playlist":    {"通用歌单管理", "list"},
-	"queue":       {"队列操作（queue <room> 为查看）", ""},
+"queue":       {"队列操作", ""},
 	"radio":       {"电台模式", ""},
 	"policy":      {"房间治理策略", ""},
 	"room":        {"房间管理与统计", "list"},
@@ -1086,11 +1086,7 @@ func printHelp(args []string) {
 	sort.Strings(names)
 	for _, n := range names {
 		c := commands[n]
-		note := ""
-		if children := groupChildren(n); len(children) > 0 {
-			note = "（子命令: " + strings.Join(children, ", ") + "）"
-		}
-		fmt.Printf("  %-20s %s%s\n", c.usage, c.desc, note)
+		fmt.Printf("  %-20s %s\n", c.usage, c.desc)
 	}
 	groups := make([]string, 0, len(groupMeta))
 	for g := range groupMeta {
@@ -1100,18 +1096,14 @@ func printHelp(args []string) {
 	}
 	sort.Strings(groups)
 	for _, g := range groups {
-		fmt.Printf("  %-20s %s（子命令: %s）\n", g+" <子命令>", groupMeta[g].desc,
-			strings.Join(groupChildren(g), ", "))
+		fmt.Printf("  %-20s %s\n", g+" <子命令>", groupMeta[g].desc)
 	}
 	fmt.Println(`
-全局 flag（可放任意位置，括号内为对应环境变量）:
+全局 flag:
   -server          服务器地址 (YUZU_SERVER, 默认 http://127.0.0.1:8080)
   -name            显示名 (YUZU_NAME)
   -password        全局管理员口令 (YUZU_PASSWORD)
-  -room-password   房间访客密码 (YUZU_ROOM_PASSWORD)
-
-高频收听操作为顶级命令；管理与身份类操作按域分组（room/integration/identity/principal/provider/media/playlist/radio/policy）。
-查看详细帮助: yuzu-cli help <命令>，如 yuzu-cli help playlist add`)
+  -room-password   房间访客密码 (YUZU_ROOM_PASSWORD)`)
 }
 
 func printCommandHelp(cmd command) {
