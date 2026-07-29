@@ -14,39 +14,50 @@ var (
 )
 
 type Acceleration struct {
-	ID                        string
-	Name                      string
-	Kind                      string
-	Enabled                   bool
-	PublishOnCacheReady       bool
-	ControlBaseURL            string
-	SignerBaseURL             string
-	PublisherTokenHash        []byte
-	PublisherPendingTokenHash []byte
-	EdgeTokenHash             []byte
-	EdgePendingTokenHash      []byte
-	SignerToken               string
-	SignerPendingToken        string
-	LeaseTTLSeconds           int
-	UploadRateBytesPerSecond  int64
-	MaxObjectBytes            int64
-	ControlHealthy            *bool
-	SignerHealthy             *bool
-	HealthError               string
-	LastHealthAt              *int64
-	CreatedAt                 int64
-	UpdatedAt                 int64
+	ID                          string
+	Name                        string
+	Kind                        string
+	Enabled                     bool
+	PublishOnCacheReady         bool
+	ControlBaseURL              string
+	BackendBaseURL              string
+	PublisherTokenHash          []byte
+	PublisherPendingTokenHash   []byte
+	DeliveryTokenHash           []byte
+	DeliveryPendingTokenHash    []byte
+	BackendToken                string
+	BackendPendingToken         string
+	LeaseTTLSeconds             int
+	UploadRateBytesPerSecond    int64
+	MaxObjectBytes              int64
+	StorageBudgetBytes          int64
+	StorageHighWatermarkPercent int
+	StorageLowWatermarkPercent  int
+	ControlHealthy              *bool
+	BackendHealthy              *bool
+	HealthError                 string
+	LastHealthAt                *int64
+	CreatedAt                   int64
+	UpdatedAt                   int64
 }
 
 type AccelerationUpdate struct {
-	Name                     string
-	Enabled                  bool
-	PublishOnCacheReady      bool
-	ControlBaseURL           string
-	SignerBaseURL            string
-	LeaseTTLSeconds          int
-	UploadRateBytesPerSecond int64
-	MaxObjectBytes           int64
+	Name                        string
+	Enabled                     bool
+	PublishOnCacheReady         bool
+	ControlBaseURL              string
+	BackendBaseURL              string
+	LeaseTTLSeconds             int
+	UploadRateBytesPerSecond    int64
+	MaxObjectBytes              int64
+	StorageBudgetBytes          int64
+	StorageHighWatermarkPercent int
+	StorageLowWatermarkPercent  int
+	HealthChecked               bool
+	ControlHealthy              bool
+	BackendHealthy              bool
+	HealthError                 string
+	HealthCheckedAt             int64
 }
 
 type AccelerationPublisher struct {
@@ -81,25 +92,37 @@ type DistributionAttempt struct {
 func (s *Store) CreateAcceleration(
 	ctx context.Context,
 	acceleration Acceleration,
-	publisherHash, edgeHash []byte,
-	signerToken string,
+	publisherHash, deliveryHash []byte,
+	backendToken string,
 ) (Acceleration, error) {
+	if acceleration.StorageBudgetBytes == 0 {
+		acceleration.StorageBudgetBytes = 850 << 20
+	}
+	if acceleration.StorageHighWatermarkPercent == 0 {
+		acceleration.StorageHighWatermarkPercent = 95
+	}
+	if acceleration.StorageLowWatermarkPercent == 0 {
+		acceleration.StorageLowWatermarkPercent = 85
+	}
 	now := nowMs()
-	encryptedSigner, err := s.encrypt(signerToken)
+	encryptedBackend, err := s.encrypt(backendToken)
 	if err != nil {
 		return Acceleration{}, err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO accelerations
 		(id, name, kind, enabled, publish_on_cache_ready, control_base_url,
-		 signer_base_url, publisher_token_hash, edge_token_hash, signer_token,
+		 backend_base_url, publisher_token_hash, delivery_token_hash, backend_token,
 		 lease_ttl_seconds, upload_rate_bytes_per_second, max_object_bytes,
-		 created_at, updated_at)
-		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 storage_budget_bytes, storage_high_watermark_percent,
+		 storage_low_watermark_percent, created_at, updated_at)
+		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		acceleration.ID, acceleration.Name, acceleration.Kind,
 		acceleration.PublishOnCacheReady, acceleration.ControlBaseURL,
-		acceleration.SignerBaseURL, publisherHash, edgeHash, encryptedSigner,
+		acceleration.BackendBaseURL, publisherHash, deliveryHash, encryptedBackend,
 		acceleration.LeaseTTLSeconds, acceleration.UploadRateBytesPerSecond,
-		acceleration.MaxObjectBytes, now, now)
+		acceleration.MaxObjectBytes, acceleration.StorageBudgetBytes,
+		acceleration.StorageHighWatermarkPercent,
+		acceleration.StorageLowWatermarkPercent, now, now)
 	if err != nil {
 		return Acceleration{}, err
 	}
@@ -146,13 +169,32 @@ func (s *Store) ListCacheReadyAccelerations(ctx context.Context) ([]Acceleration
 }
 
 func (s *Store) UpdateAcceleration(ctx context.Context, id string, update AccelerationUpdate) (Acceleration, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE accelerations SET
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Acceleration{}, err
+	}
+	defer tx.Rollback()
+	now := nowMs()
+	result, err := tx.ExecContext(ctx, `UPDATE accelerations SET
 		name = ?, enabled = ?, publish_on_cache_ready = ?, control_base_url = ?,
-		signer_base_url = ?, lease_ttl_seconds = ?, upload_rate_bytes_per_second = ?,
-		max_object_bytes = ?, updated_at = ? WHERE id = ?`,
+		backend_base_url = ?, lease_ttl_seconds = ?, upload_rate_bytes_per_second = ?,
+		max_object_bytes = ?, storage_budget_bytes = ?,
+		storage_high_watermark_percent = ?, storage_low_watermark_percent = ?,
+		control_healthy = CASE WHEN ? THEN ? ELSE control_healthy END,
+		backend_healthy = CASE WHEN ? THEN ? ELSE backend_healthy END,
+		health_error = CASE WHEN ? THEN ? ELSE health_error END,
+		last_health_at = CASE WHEN ? THEN ? ELSE last_health_at END,
+		updated_at = ? WHERE id = ?`,
 		update.Name, update.Enabled, update.PublishOnCacheReady,
-		update.ControlBaseURL, update.SignerBaseURL, update.LeaseTTLSeconds,
-		update.UploadRateBytesPerSecond, update.MaxObjectBytes, nowMs(), id)
+		update.ControlBaseURL, update.BackendBaseURL, update.LeaseTTLSeconds,
+		update.UploadRateBytesPerSecond, update.MaxObjectBytes,
+		update.StorageBudgetBytes, update.StorageHighWatermarkPercent,
+		update.StorageLowWatermarkPercent,
+		update.HealthChecked, update.ControlHealthy,
+		update.HealthChecked, update.BackendHealthy,
+		update.HealthChecked, update.HealthError,
+		update.HealthChecked, update.HealthCheckedAt,
+		now, id)
 	if err != nil {
 		return Acceleration{}, err
 	}
@@ -160,6 +202,23 @@ func (s *Store) UpdateAcceleration(ctx context.Context, id string, update Accele
 		return Acceleration{}, err
 	} else if affected == 0 {
 		return Acceleration{}, sql.ErrNoRows
+	}
+	var accounted int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(size_bytes), 0)
+		FROM acceleration_objects WHERE acceleration_id = ? AND state <> 'missing'`,
+		id).Scan(&accounted); err != nil {
+		return Acceleration{}, err
+	}
+	if update.StorageBudgetBytes > 0 &&
+		accounted > update.StorageBudgetBytes*int64(update.StorageHighWatermarkPercent)/100 {
+		if err := enqueueStorageGCTx(ctx, tx, id,
+			update.StorageBudgetBytes*int64(update.StorageLowWatermarkPercent)/100,
+			"", now); err != nil {
+			return Acceleration{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Acceleration{}, err
 	}
 	return s.GetAcceleration(ctx, id)
 }
@@ -180,8 +239,12 @@ func (s *Store) DeleteAcceleration(ctx context.Context, id string) error {
 	var state int64
 	if err := tx.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM distribution_leases WHERE acceleration_id = ?) +
-		(SELECT COUNT(*) FROM distribution_candidates WHERE acceleration_id = ?)`, id, id).Scan(&state); err != nil {
-		return err
+		(SELECT COUNT(*) FROM distribution_candidates WHERE acceleration_id = ?) +
+		(SELECT COUNT(*) FROM acceleration_objects WHERE acceleration_id = ?) +
+		(SELECT COUNT(*) FROM acceleration_storage_reservations WHERE acceleration_id = ?) +
+		(SELECT COUNT(*) FROM acceleration_deletion_jobs WHERE acceleration_id = ?) +
+		(SELECT COUNT(*) FROM acceleration_inventory_snapshots WHERE acceleration_id = ?)`,
+		id, id, id, id, id, id).Scan(&state); err != nil {
 	}
 	if state != 0 {
 		return ErrAccelerationNotEmpty
@@ -197,9 +260,9 @@ func (s *Store) ResolveAccelerationPublisherToken(ctx context.Context, hash []by
 		` WHERE publisher_token_hash = ? OR publisher_pending_token_hash = ?`, hash, hash))
 }
 
-func (s *Store) ResolveAccelerationEdgeToken(ctx context.Context, hash []byte) (Acceleration, error) {
+func (s *Store) ResolveAccelerationDeliveryToken(ctx context.Context, hash []byte) (Acceleration, error) {
 	return s.scanAcceleration(s.db.QueryRowContext(ctx, accelerationSelect+
-		` WHERE edge_token_hash = ? OR edge_pending_token_hash = ?`, hash, hash))
+		` WHERE delivery_token_hash = ? OR delivery_pending_token_hash = ?`, hash, hash))
 }
 
 func (s *Store) PrepareAccelerationCredential(
@@ -213,14 +276,14 @@ func (s *Store) PrepareAccelerationCredential(
 	switch purpose {
 	case "publisher":
 		column, value = "publisher_pending_token_hash", hash
-	case "edge":
-		column, value = "edge_pending_token_hash", hash
-	case "signer":
+	case "delivery":
+		column, value = "delivery_pending_token_hash", hash
+	case "backend":
 		encrypted, err := s.encrypt(secret)
 		if err != nil {
 			return Acceleration{}, err
 		}
-		column, value = "signer_pending_token", encrypted
+		column, value = "backend_pending_token", encrypted
 	default:
 		return Acceleration{}, fmt.Errorf("unknown acceleration credential purpose %q", purpose)
 	}
@@ -244,14 +307,14 @@ func (s *Store) ActivateAccelerationCredential(ctx context.Context, id, purpose 
 		statement = `UPDATE accelerations SET publisher_token_hash = publisher_pending_token_hash,
 			publisher_pending_token_hash = NULL, updated_at = ?
 			WHERE id = ? AND publisher_pending_token_hash IS NOT NULL`
-	case "edge":
-		statement = `UPDATE accelerations SET edge_token_hash = edge_pending_token_hash,
-			edge_pending_token_hash = NULL, updated_at = ?
-			WHERE id = ? AND edge_pending_token_hash IS NOT NULL`
-	case "signer":
-		statement = `UPDATE accelerations SET signer_token = signer_pending_token,
-			signer_pending_token = '', updated_at = ?
-			WHERE id = ? AND signer_pending_token <> ''`
+	case "delivery":
+		statement = `UPDATE accelerations SET delivery_token_hash = delivery_pending_token_hash,
+			delivery_pending_token_hash = NULL, updated_at = ?
+			WHERE id = ? AND delivery_pending_token_hash IS NOT NULL`
+	case "backend":
+		statement = `UPDATE accelerations SET backend_token = backend_pending_token,
+			backend_pending_token = '', updated_at = ?
+			WHERE id = ? AND backend_pending_token <> ''`
 	default:
 		return Acceleration{}, fmt.Errorf("unknown acceleration credential purpose %q", purpose)
 	}
@@ -270,13 +333,13 @@ func (s *Store) ActivateAccelerationCredential(ctx context.Context, id, purpose 
 func (s *Store) UpdateAccelerationHealth(
 	ctx context.Context,
 	id string,
-	controlHealthy, signerHealthy bool,
+	controlHealthy, backendHealthy bool,
 	healthError string,
 	checkedAt int64,
 ) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE accelerations SET
-		control_healthy = ?, signer_healthy = ?, health_error = ?, last_health_at = ?
-		WHERE id = ?`, controlHealthy, signerHealthy, healthError, checkedAt, id)
+		control_healthy = ?, backend_healthy = ?, health_error = ?, last_health_at = ?
+		WHERE id = ?`, controlHealthy, backendHealthy, healthError, checkedAt, id)
 	return err
 }
 
@@ -331,34 +394,48 @@ func (s *Store) AccelerationReadyFor(
 	acceleration Acceleration,
 	publisherCutoff int64,
 ) (bool, []string, error) {
-	problems := make([]string, 0, 4)
-	if acceleration.ControlBaseURL == "" || acceleration.SignerBaseURL == "" {
+	problems := make([]string, 0, 6)
+	if acceleration.ControlBaseURL == "" || acceleration.BackendBaseURL == "" {
 		problems = append(problems, "endpoints_not_configured")
 	}
-	if len(acceleration.PublisherTokenHash) == 0 || len(acceleration.EdgeTokenHash) == 0 || acceleration.SignerToken == "" {
+	if len(acceleration.PublisherTokenHash) == 0 || len(acceleration.DeliveryTokenHash) == 0 || acceleration.BackendToken == "" {
 		problems = append(problems, "credentials_not_configured")
 	}
+	if acceleration.StorageBudgetBytes <= 0 {
+		problems = append(problems, "storage_unmanaged")
+	}
 	if acceleration.ControlHealthy == nil || !*acceleration.ControlHealthy ||
-		acceleration.SignerHealthy == nil || !*acceleration.SignerHealthy {
+		acceleration.BackendHealthy == nil || !*acceleration.BackendHealthy {
 		problems = append(problems, "health_check_failed")
 	}
-	var publishers int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM distribution_publishers
-		WHERE acceleration_id = ? AND last_seen_at >= ?`, acceleration.ID, publisherCutoff).Scan(&publishers); err != nil {
+	var publishers, storageManagers int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN EXISTS (
+		 SELECT 1 FROM json_each(distribution_publishers.capabilities)
+		 WHERE value = 'storage.inventory'
+		) AND EXISTS (
+		 SELECT 1 FROM json_each(distribution_publishers.capabilities)
+		 WHERE value = 'object.delete'
+		) THEN 1 ELSE 0 END), 0)
+		FROM distribution_publishers WHERE acceleration_id = ? AND last_seen_at >= ?`,
+		acceleration.ID, publisherCutoff).Scan(&publishers, &storageManagers); err != nil {
 		return false, nil, err
 	}
 	if publishers == 0 {
 		problems = append(problems, "publisher_offline")
+	} else if storageManagers == 0 {
+		problems = append(problems, "storage_manager_offline")
 	}
 	return len(problems) == 0, problems, nil
 }
 
 const accelerationSelect = `SELECT id, name, kind, enabled, publish_on_cache_ready,
-	control_base_url, signer_base_url, publisher_token_hash,
-	publisher_pending_token_hash, edge_token_hash, edge_pending_token_hash,
-	signer_token, signer_pending_token, lease_ttl_seconds,
-	upload_rate_bytes_per_second, max_object_bytes, control_healthy,
-	signer_healthy, health_error, last_health_at, created_at, updated_at
+	control_base_url, backend_base_url, publisher_token_hash,
+	publisher_pending_token_hash, delivery_token_hash, delivery_pending_token_hash,
+	backend_token, backend_pending_token, lease_ttl_seconds,
+	upload_rate_bytes_per_second, max_object_bytes, storage_budget_bytes,
+	storage_high_watermark_percent, storage_low_watermark_percent, control_healthy,
+	backend_healthy, health_error, last_health_at, created_at, updated_at
 	FROM accelerations`
 
 type accelerationScanner interface {
@@ -367,17 +444,19 @@ type accelerationScanner interface {
 
 func (s *Store) scanAcceleration(row accelerationScanner) (Acceleration, error) {
 	var acceleration Acceleration
-	var publisherHash, publisherPendingHash, edgeHash, edgePendingHash []byte
-	var encryptedSigner, encryptedPendingSigner string
-	var controlHealthy, signerHealthy sql.NullBool
+	var publisherHash, publisherPendingHash, deliveryHash, deliveryPendingHash []byte
+	var encryptedBackend, encryptedPendingBackend string
+	var controlHealthy, backendHealthy sql.NullBool
 	var lastHealth sql.NullInt64
 	err := row.Scan(
 		&acceleration.ID, &acceleration.Name, &acceleration.Kind, &acceleration.Enabled,
 		&acceleration.PublishOnCacheReady, &acceleration.ControlBaseURL,
-		&acceleration.SignerBaseURL, &publisherHash, &publisherPendingHash,
-		&edgeHash, &edgePendingHash, &encryptedSigner, &encryptedPendingSigner,
+		&acceleration.BackendBaseURL, &publisherHash, &publisherPendingHash,
+		&deliveryHash, &deliveryPendingHash, &encryptedBackend, &encryptedPendingBackend,
 		&acceleration.LeaseTTLSeconds, &acceleration.UploadRateBytesPerSecond,
-		&acceleration.MaxObjectBytes, &controlHealthy, &signerHealthy,
+		&acceleration.MaxObjectBytes, &acceleration.StorageBudgetBytes,
+		&acceleration.StorageHighWatermarkPercent,
+		&acceleration.StorageLowWatermarkPercent, &controlHealthy, &backendHealthy,
 		&acceleration.HealthError, &lastHealth, &acceleration.CreatedAt,
 		&acceleration.UpdatedAt,
 	)
@@ -386,21 +465,21 @@ func (s *Store) scanAcceleration(row accelerationScanner) (Acceleration, error) 
 	}
 	acceleration.PublisherTokenHash = publisherHash
 	acceleration.PublisherPendingTokenHash = publisherPendingHash
-	acceleration.EdgeTokenHash = edgeHash
-	acceleration.EdgePendingTokenHash = edgePendingHash
-	if acceleration.SignerToken, err = s.decrypt(encryptedSigner); err != nil {
+	acceleration.DeliveryTokenHash = deliveryHash
+	acceleration.DeliveryPendingTokenHash = deliveryPendingHash
+	if acceleration.BackendToken, err = s.decrypt(encryptedBackend); err != nil {
 		return Acceleration{}, err
 	}
-	if acceleration.SignerPendingToken, err = s.decrypt(encryptedPendingSigner); err != nil {
+	if acceleration.BackendPendingToken, err = s.decrypt(encryptedPendingBackend); err != nil {
 		return Acceleration{}, err
 	}
 	if controlHealthy.Valid {
 		value := controlHealthy.Bool
 		acceleration.ControlHealthy = &value
 	}
-	if signerHealthy.Valid {
-		value := signerHealthy.Bool
-		acceleration.SignerHealthy = &value
+	if backendHealthy.Valid {
+		value := backendHealthy.Bool
+		acceleration.BackendHealthy = &value
 	}
 	if lastHealth.Valid {
 		value := lastHealth.Int64

@@ -244,6 +244,50 @@ func (s *Store) CompleteDistribution(
 	if candidate.Layout == "" {
 		candidate.Layout = "object"
 	}
+	candidate.Locator = strings.TrimSpace(candidate.Locator)
+	if candidate.Locator == "" || candidate.SizeBytes <= 0 {
+		return fmt.Errorf("%w: invalid candidate object", ErrDistributionLeaseInvalid)
+	}
+	var reservationSize int64
+	reservationErr := tx.QueryRowContext(ctx, `SELECT size_bytes
+		FROM acceleration_storage_reservations WHERE lease_id = ?
+		AND acceleration_id = ? AND locator = ? AND expires_at > ?`,
+		leaseID, lease.AccelerationID, candidate.Locator, now).Scan(&reservationSize)
+	uploaded := reservationErr == nil
+	if reservationErr != nil {
+		if !errors.Is(reservationErr, sql.ErrNoRows) {
+			return reservationErr
+		}
+		var existingSize int64
+		if err := tx.QueryRowContext(ctx, `SELECT size_bytes FROM acceleration_objects
+			WHERE acceleration_id = ? AND locator = ? AND state IN ('ready', 'orphan')`,
+			lease.AccelerationID, candidate.Locator).Scan(&existingSize); err != nil {
+			return fmt.Errorf("%w: object was not reserved", ErrDistributionLeaseInvalid)
+		}
+		reservationSize = existingSize
+	}
+	if reservationSize != candidate.SizeBytes {
+		return fmt.Errorf("%w: object size does not match reservation", ErrDistributionLeaseInvalid)
+	}
+	var previousLocator sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT locator FROM distribution_candidates
+		WHERE acceleration_id = ? AND track_ref = ?`, lease.AccelerationID,
+		lease.TrackRef).Scan(&previousLocator); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO acceleration_objects
+		(acceleration_id, locator, content_version, size_bytes, external_version,
+		 state, reference_count, last_accessed_at, last_observed_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'ready', 0, ?, 0, ?, ?)
+		ON CONFLICT(acceleration_id, locator) DO UPDATE SET
+		 content_version = excluded.content_version, size_bytes = excluded.size_bytes,
+		 external_version = excluded.external_version, state = 'ready',
+		 last_accessed_at = MAX(acceleration_objects.last_accessed_at, excluded.last_accessed_at),
+		 updated_at = excluded.updated_at`,
+		lease.AccelerationID, candidate.Locator, candidate.ContentVersion,
+		candidate.SizeBytes, candidate.ETag, now, now, now); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO distribution_candidates
 		(acceleration_id, track_ref, content_version, locator, layout, size_bytes,
 		 content_type, etag, created_at, updated_at)
@@ -256,6 +300,14 @@ func (s *Store) CompleteDistribution(
 		candidate.TrackRef, candidate.ContentVersion, candidate.Locator,
 		candidate.Layout, candidate.SizeBytes, candidate.ContentType,
 		candidate.ETag, now, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE acceleration_objects SET
+		reference_count = (SELECT COUNT(*) FROM distribution_candidates
+		 WHERE acceleration_id = ? AND locator = acceleration_objects.locator),
+		updated_at = ? WHERE acceleration_id = ? AND locator IN (?, ?)`,
+		lease.AccelerationID, now, lease.AccelerationID, candidate.Locator,
+		previousLocator.String); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_attempts SET
@@ -273,8 +325,11 @@ func (s *Store) CompleteDistribution(
 		return err
 	}
 	metrics := map[string]int64{
-		"publish_success": 1, "uploaded_bytes": candidate.SizeBytes,
+		"publish_success":        1,
 		"ready_latency_ms_total": max(now-requestedAt, 0), "ready_latency_samples": 1,
+	}
+	if uploaded {
+		metrics["uploaded_bytes"] = candidate.SizeBytes
 	}
 	for name, delta := range metrics {
 		if err := addDistributionMetricTx(ctx, tx, lease.AccelerationID, name, delta, now); err != nil {

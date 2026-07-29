@@ -78,8 +78,10 @@ Yuzu 拉取并缓存的媒体文件分发；Provider 拉流、现有 `/stream/v1
 
 在主域名所属 EdgeOne 加速站点中创建站点级 Edge Function，粘贴该文件代码，并为
 `/stream/v1/*` 配置 URL path 触发规则。REST、WebSocket、管理接口和 SPA 仍按站点原有
-规则回源。Makers 仅保留 control/signer Cloud Functions。具体资源创建、凭据、触发规则与
-健康检查见 [EdgeOne 旁路分发设计与部署](edgeone-distribution.md)。
+规则回源。Makers 仅保留 control/backend Cloud Functions。Core 使用 850 MiB 默认预算及
+95%/85% 水位；adapter 负责 Blob inventory、orphan/missing reconciliation 和删除 job。
+具体资源创建、凭据、容量字段、触发规则与健康检查见
+[EdgeOne 旁路分发设计与部署](edgeone-distribution.md)。
 
 ## config.json 生产注意
 

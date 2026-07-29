@@ -14,14 +14,14 @@ import (
 )
 
 func TestAccelerationManagementLifecycle(t *testing.T) {
-	var signerToken string
+	var backendToken string
 	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/yuzu-edge/health":
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		case "/yuzu-blob/health":
-			if r.Header.Get("Authorization") != "Bearer "+signerToken {
-				writeErr(w, http.StatusUnauthorized, "unauthorized", "wrong signer token")
+			if r.Header.Get("Authorization") != "Bearer "+backendToken {
+				writeErr(w, http.StatusUnauthorized, "unauthorized", "wrong backend token")
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -48,7 +48,7 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 	created := authenticatedJSONRequest(t, handler, http.MethodPost, "/api/v1/accelerations", adminToken, map[string]any{
 		"id": "edgeone-main", "name": "Main EdgeOne", "kind": "edgeone",
 		"control_base_url": health.URL + "/yuzu-edge",
-		"signer_base_url":  health.URL + "/yuzu-blob",
+		"backend_base_url": health.URL + "/yuzu-blob",
 	})
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
@@ -57,14 +57,14 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 		Acceleration accelerationView `json:"acceleration"`
 		Credentials  struct {
 			PublisherToken string `json:"publisher_token"`
-			EdgeToken      string `json:"edge_token"`
-			SignerToken    string `json:"signer_token"`
+			DeliveryToken  string `json:"delivery_token"`
+			BackendToken   string `json:"backend_token"`
 		} `json:"credentials"`
 	}
 	decodeRecorder(t, created, &createResponse)
-	signerToken = createResponse.Credentials.SignerToken
+	backendToken = createResponse.Credentials.BackendToken
 	if createResponse.Acceleration.Enabled || createResponse.Credentials.PublisherToken == "" ||
-		createResponse.Credentials.EdgeToken == "" || signerToken == "" {
+		createResponse.Credentials.DeliveryToken == "" || backendToken == "" {
 		t.Fatalf("created acceleration = %#v", createResponse)
 	}
 
@@ -72,15 +72,15 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 	if listed.Code != http.StatusOK {
 		t.Fatalf("list = %d: %s", listed.Code, listed.Body.String())
 	}
-	for _, secret := range []string{createResponse.Credentials.PublisherToken, createResponse.Credentials.EdgeToken, signerToken} {
+	for _, secret := range []string{createResponse.Credentials.PublisherToken, createResponse.Credentials.DeliveryToken, backendToken} {
 		if strings.Contains(listed.Body.String(), secret) {
 			t.Fatalf("list leaked credential %q", secret)
 		}
 	}
 
 	config := distributionRequest(t, handler, http.MethodGet,
-		"/internal/v1/distribution/publisher/config", createResponse.Credentials.PublisherToken, nil)
-	if config.Code != http.StatusOK || !strings.Contains(config.Body.String(), signerToken) {
+		"/internal/v1/accelerations/publisher/config", createResponse.Credentials.PublisherToken, nil)
+	if config.Code != http.StatusOK || !strings.Contains(config.Body.String(), backendToken) {
 		t.Fatalf("publisher config = %d: %s", config.Code, config.Body.String())
 	}
 	notReady := authenticatedJSONRequest(t, handler, http.MethodPatch,
@@ -91,10 +91,11 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 	}
 
 	heartbeat := distributionRequest(t, handler, http.MethodPost,
-		"/internal/v1/distribution/publishers/heartbeat", createResponse.Credentials.PublisherToken,
+		"/internal/v1/accelerations/publishers/heartbeat", createResponse.Credentials.PublisherToken,
 		map[string]any{
 			"owner": "publisher-1", "version": "test", "state": "idle",
-			"lease_id": "", "track_ref": "", "capabilities": []string{"object"},
+			"lease_id": "", "track_ref": "",
+			"capabilities":    []string{"object.publish", "storage.inventory", "object.delete"},
 			"backend_healthy": true, "last_error": "",
 		})
 	if heartbeat.Code != http.StatusNoContent {
@@ -134,7 +135,7 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 		t.Fatal("prepared token is empty")
 	}
 	pendingConfig := distributionRequest(t, handler, http.MethodGet,
-		"/internal/v1/distribution/publisher/config", preparedResponse.Token, nil)
+		"/internal/v1/accelerations/publisher/config", preparedResponse.Token, nil)
 	if pendingConfig.Code != http.StatusOK {
 		t.Fatalf("pending token = %d: %s", pendingConfig.Code, pendingConfig.Body.String())
 	}
@@ -144,7 +145,7 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 		t.Fatalf("activate publisher token = %d: %s", activated.Code, activated.Body.String())
 	}
 	oldConfig := distributionRequest(t, handler, http.MethodGet,
-		"/internal/v1/distribution/publisher/config", createResponse.Credentials.PublisherToken, nil)
+		"/internal/v1/accelerations/publisher/config", createResponse.Credentials.PublisherToken, nil)
 	if oldConfig.Code != http.StatusUnauthorized {
 		t.Fatalf("old token after activation = %d", oldConfig.Code)
 	}

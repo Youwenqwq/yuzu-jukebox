@@ -11,13 +11,13 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
-func TestHealthMonitorRecordsControlAndSignerHealth(t *testing.T) {
-	const signerToken = "signer-secret"
+func TestHealthMonitorRecordsControlAndBackendHealth(t *testing.T) {
+	const backendToken = "backend-secret"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/control/health":
-		case "/signer/health":
-			if r.Header.Get("Authorization") != "Bearer "+signerToken {
+		case "/backend/health":
+			if r.Header.Get("Authorization") != "Bearer "+backendToken {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -38,10 +38,10 @@ func TestHealthMonitorRecordsControlAndSignerHealth(t *testing.T) {
 	_, err = st.CreateAcceleration(context.Background(), store.Acceleration{
 		ID: "edgeone-main", Name: "EdgeOne", Kind: "edgeone",
 		ControlBaseURL:  server.URL + "/control",
-		SignerBaseURL:   server.URL + "/signer",
+		BackendBaseURL:  server.URL + "/backend",
 		LeaseTTLSeconds: 600, UploadRateBytesPerSecond: 187500,
 		MaxObjectBytes: 23 << 20,
-	}, bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), signerToken)
+	}, bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), backendToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +57,8 @@ func TestHealthMonitorRecordsControlAndSignerHealth(t *testing.T) {
 	if acceleration.ControlHealthy == nil || !*acceleration.ControlHealthy {
 		t.Fatalf("control health = %v", acceleration.ControlHealthy)
 	}
-	if acceleration.SignerHealthy == nil || !*acceleration.SignerHealthy {
-		t.Fatalf("signer health = %v", acceleration.SignerHealthy)
+	if acceleration.BackendHealthy == nil || !*acceleration.BackendHealthy {
+		t.Fatalf("backend health = %v", acceleration.BackendHealthy)
 	}
 	if acceleration.LastHealthAt == nil || *acceleration.LastHealthAt == 0 {
 		t.Fatalf("last health at = %v", acceleration.LastHealthAt)

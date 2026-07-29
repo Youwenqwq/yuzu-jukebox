@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-var ErrNoWork = errors.New("no distribution work")
+var (
+	ErrNoWork        = errors.New("no distribution work")
+	ErrLeaseInactive = errors.New("distribution lease is no longer active")
+)
 
 type Lease struct {
 	ID             string `json:"id"`
@@ -32,6 +35,22 @@ type Candidate struct {
 	SizeBytes      int64  `json:"size_bytes"`
 	ContentType    string `json:"content_type"`
 	ETag           string `json:"etag,omitempty"`
+}
+type StorageReservation struct {
+	AlreadyPresent bool `json:"already_present"`
+}
+
+type StorageInventoryObject struct {
+	Locator         string `json:"locator"`
+	SizeBytes       int64  `json:"size_bytes"`
+	ExternalVersion string `json:"external_version,omitempty"`
+}
+
+type StorageDeletion struct {
+	ID        string `json:"id"`
+	Locator   string `json:"locator"`
+	Owner     string `json:"owner"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 
 type PublisherHeartbeat struct {
@@ -57,7 +76,7 @@ func NewCoreClient(baseURL, token string, client *http.Client) *CoreClient {
 
 func (c *CoreClient) ManagedConfig(ctx context.Context) (ManagedConfig, error) {
 	var config ManagedConfig
-	status, err := c.json(ctx, http.MethodGet, "/internal/v1/distribution/publisher/config", nil, &config)
+	status, err := c.json(ctx, http.MethodGet, "/internal/v1/accelerations/publisher/config", nil, &config)
 	if err != nil {
 		return ManagedConfig{}, err
 	}
@@ -72,7 +91,7 @@ func (c *CoreClient) ManagedConfig(ctx context.Context) (ManagedConfig, error) {
 
 func (c *CoreClient) Heartbeat(ctx context.Context, heartbeat PublisherHeartbeat) error {
 	status, err := c.json(ctx, http.MethodPost,
-		"/internal/v1/distribution/publishers/heartbeat", heartbeat, nil)
+		"/internal/v1/accelerations/publishers/heartbeat", heartbeat, nil)
 	if err != nil {
 		return err
 	}
@@ -87,7 +106,7 @@ func (c *CoreClient) Claim(ctx context.Context, owner string, leaseSeconds int) 
 		Lease     Lease  `json:"lease"`
 		SourceURL string `json:"source_url"`
 	}
-	status, err := c.json(ctx, http.MethodPost, "/internal/v1/distribution/leases", map[string]any{
+	status, err := c.json(ctx, http.MethodPost, "/internal/v1/accelerations/leases", map[string]any{
 		"owner": owner, "lease_seconds": leaseSeconds,
 	}, &response)
 	if err != nil {
@@ -123,7 +142,7 @@ func (c *CoreClient) Progress(
 	sourceBytes, uploadBytes, totalBytes int64,
 ) error {
 	status, err := c.json(ctx, http.MethodPatch,
-		"/internal/v1/distribution/leases/"+url.PathEscape(lease.ID)+"/progress",
+		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID)+"/progress",
 		map[string]any{
 			"owner": lease.Owner, "phase": phase, "source_bytes": sourceBytes,
 			"upload_bytes": uploadBytes, "total_bytes": totalBytes,
@@ -137,6 +156,28 @@ func (c *CoreClient) Progress(
 	return nil
 }
 
+func (c *CoreClient) Reserve(
+	ctx context.Context,
+	lease Lease,
+	locator string,
+	sizeBytes int64,
+) (StorageReservation, error) {
+	var response struct {
+		Reservation StorageReservation `json:"reservation"`
+	}
+	status, err := c.json(ctx, http.MethodPost,
+		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID)+"/reserve",
+		map[string]any{"owner": lease.Owner, "locator": locator, "size_bytes": sizeBytes},
+		&response)
+	if err != nil {
+		return StorageReservation{}, err
+	}
+	if status != http.StatusOK {
+		return StorageReservation{}, fmt.Errorf("reserve storage: status %d", status)
+	}
+	return response.Reservation, nil
+}
+
 func (c *CoreClient) Complete(ctx context.Context, lease Lease, candidate Candidate) error {
 	body := map[string]any{
 		"owner": lease.Owner, "content_version": candidate.ContentVersion,
@@ -145,7 +186,7 @@ func (c *CoreClient) Complete(ctx context.Context, lease Lease, candidate Candid
 		"etag": candidate.ETag,
 	}
 	status, err := c.json(ctx, http.MethodPost,
-		"/internal/v1/distribution/leases/"+url.PathEscape(lease.ID)+"/complete", body, nil)
+		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID)+"/complete", body, nil)
 	if err != nil {
 		return err
 	}
@@ -161,7 +202,7 @@ func (c *CoreClient) Fail(ctx context.Context, lease Lease, publishErr error, re
 		message = message[:2000]
 	}
 	status, err := c.json(ctx, http.MethodPost,
-		"/internal/v1/distribution/leases/"+url.PathEscape(lease.ID)+"/fail",
+		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID)+"/fail",
 		map[string]any{
 			"owner": lease.Owner, "error": message,
 			"retry_after_seconds": int(retryAfter / time.Second),
@@ -169,8 +210,84 @@ func (c *CoreClient) Fail(ctx context.Context, lease Lease, publishErr error, re
 	if err != nil {
 		return err
 	}
+	if status == http.StatusNotFound || status == http.StatusConflict {
+		return ErrLeaseInactive
+	}
 	if status != http.StatusOK {
 		return fmt.Errorf("fail lease: status %d", status)
+	}
+	return nil
+}
+
+func (c *CoreClient) Inventory(
+	ctx context.Context,
+	owner, snapshotID string,
+	observedAt int64,
+	objects []StorageInventoryObject,
+	complete bool,
+) error {
+	status, err := c.json(ctx, http.MethodPost, "/internal/v1/accelerations/inventory",
+		map[string]any{"owner": owner, "snapshot_id": snapshotID, "observed_at": observedAt,
+			"objects": objects, "complete": complete}, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("report inventory: status %d", status)
+	}
+	return nil
+}
+
+func (c *CoreClient) ClaimDeletion(
+	ctx context.Context,
+	owner string,
+	leaseSeconds int,
+) (StorageDeletion, error) {
+	var response struct {
+		Deletion StorageDeletion `json:"deletion"`
+	}
+	status, err := c.json(ctx, http.MethodPost, "/internal/v1/accelerations/deletions/claim",
+		map[string]any{"owner": owner, "lease_seconds": leaseSeconds}, &response)
+	if err != nil {
+		return StorageDeletion{}, err
+	}
+	if status == http.StatusNoContent {
+		return StorageDeletion{}, ErrNoWork
+	}
+	if status != http.StatusOK {
+		return StorageDeletion{}, fmt.Errorf("claim deletion: status %d", status)
+	}
+	return response.Deletion, nil
+}
+
+func (c *CoreClient) CompleteDeletion(ctx context.Context, deletion StorageDeletion) error {
+	status, err := c.json(ctx, http.MethodPost,
+		"/internal/v1/accelerations/deletions/"+url.PathEscape(deletion.ID)+"/complete",
+		map[string]any{"owner": deletion.Owner}, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("complete deletion: status %d", status)
+	}
+	return nil
+}
+
+func (c *CoreClient) FailDeletion(
+	ctx context.Context,
+	deletion StorageDeletion,
+	deletionErr error,
+	retryAfter time.Duration,
+) error {
+	status, err := c.json(ctx, http.MethodPost,
+		"/internal/v1/accelerations/deletions/"+url.PathEscape(deletion.ID)+"/fail",
+		map[string]any{"owner": deletion.Owner, "error": deletionErr.Error(),
+			"retry_after_seconds": int(retryAfter / time.Second)}, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("fail deletion: status %d", status)
 	}
 	return nil
 }
@@ -210,7 +327,7 @@ func (c *CoreClient) json(ctx context.Context, method, path string, body, result
 	return response.StatusCode, nil
 }
 
-type SignerClient struct {
+type BackendClient struct {
 	baseURL string
 	token   string
 	client  *http.Client
@@ -231,11 +348,11 @@ type BlobMetadata struct {
 	CacheControl string `json:"cache_control"`
 }
 
-func NewSignerClient(baseURL, token string, client *http.Client) *SignerClient {
-	return &SignerClient{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: client}
+func NewBackendClient(baseURL, token string, client *http.Client) *BackendClient {
+	return &BackendClient{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: client}
 }
 
-func (c *SignerClient) Health(ctx context.Context) error {
+func (c *BackendClient) Health(ctx context.Context) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
 	if err != nil {
 		return err
@@ -247,12 +364,12 @@ func (c *SignerClient) Health(ctx context.Context) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("signer health: status %d", response.StatusCode)
+		return fmt.Errorf("backend health: status %d", response.StatusCode)
 	}
 	return nil
 }
 
-func (c *SignerClient) SignPUT(ctx context.Context, locator, contentType string) (SignedPUT, error) {
+func (c *BackendClient) SignPUT(ctx context.Context, locator, contentType string) (SignedPUT, error) {
 	var response struct {
 		Objects []SignedPUT `json:"objects"`
 	}
@@ -262,12 +379,12 @@ func (c *SignerClient) SignPUT(ctx context.Context, locator, contentType string)
 		return SignedPUT{}, err
 	}
 	if len(response.Objects) != 1 || response.Objects[0].URL == "" {
-		return SignedPUT{}, errors.New("signer returned no PUT URL")
+		return SignedPUT{}, errors.New("backend returned no PUT URL")
 	}
 	return response.Objects[0], nil
 }
 
-func (c *SignerClient) Metadata(ctx context.Context, locator string) (BlobMetadata, error) {
+func (c *BackendClient) Metadata(ctx context.Context, locator string) (BlobMetadata, error) {
 	var response struct {
 		Objects []BlobMetadata `json:"objects"`
 	}
@@ -275,12 +392,32 @@ func (c *SignerClient) Metadata(ctx context.Context, locator string) (BlobMetada
 		return BlobMetadata{}, err
 	}
 	if len(response.Objects) != 1 {
-		return BlobMetadata{}, errors.New("signer returned no metadata")
+		return BlobMetadata{}, errors.New("backend returned no metadata")
 	}
 	return response.Objects[0], nil
 }
+func (c *BackendClient) Inventory(
+	ctx context.Context,
+	cursor string,
+) ([]StorageInventoryObject, string, error) {
+	var response struct {
+		Objects []StorageInventoryObject `json:"objects"`
+		Cursor  string                   `json:"cursor"`
+	}
+	if err := c.post(ctx, "/inventory", map[string]any{
+		"prefix": "media/", "cursor": cursor,
+	}, &response); err != nil {
+		return nil, "", err
+	}
+	return response.Objects, response.Cursor, nil
+}
 
-func (c *SignerClient) post(ctx context.Context, path string, body, result any) error {
+func (c *BackendClient) Delete(ctx context.Context, locator string) error {
+	var response map[string]any
+	return c.post(ctx, "/delete", map[string]any{"locators": []string{locator}}, &response)
+}
+
+func (c *BackendClient) post(ctx context.Context, path string, body, result any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -298,7 +435,7 @@ func (c *SignerClient) post(ctx context.Context, path string, body, result any) 
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
-		return fmt.Errorf("signer %s: status %d: %s", path, response.StatusCode,
+		return fmt.Errorf("backend %s: status %d: %s", path, response.StatusCode,
 			strings.TrimSpace(string(detail)))
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(result)

@@ -13,7 +13,7 @@ export async function onRequest(context) {
     return json({
       ok: true,
       core_configured: Boolean(env("EO_YUZU_CORE_ORIGIN")),
-      edge_credential_configured: Boolean(env("EO_YUZU_EDGE_TOKEN")),
+      delivery_credential_configured: Boolean(env("EO_YUZU_DELIVERY_TOKEN")),
       get_signer_compatible: getSignerCompatible(store),
     });
   }
@@ -44,7 +44,7 @@ async function introspect(request) {
   const ticket = validTicket(body?.ticket);
   const origin = coreOrigin();
   const response = await fetch(
-    new URL("/internal/v1/distribution/introspect", origin),
+    new URL("/internal/v1/accelerations/introspect", origin),
     {
       method: "POST",
       headers: coreHeaders(),
@@ -94,8 +94,8 @@ async function introspect(request) {
       result.signed_url = signed.url;
       result.fallback_reason = "";
     } catch (cause) {
-      console.warn("GET signer unavailable", cause?.message || cause);
-      result.fallback_reason = "signer_unavailable";
+      console.warn("Blob GET signing unavailable", cause?.message || cause);
+      result.fallback_reason = "backend_unavailable";
     }
   }
   return json(result);
@@ -106,7 +106,7 @@ async function event(request) {
   const trackRef = validTrackRef(body?.track_ref);
   const ticket = validTicket(body?.ticket);
   const response = await fetch(
-    new URL("/internal/v1/distribution/events", coreOrigin()),
+    new URL("/internal/v1/accelerations/events", coreOrigin()),
     {
       method: "POST",
       headers: coreHeaders(),
@@ -128,7 +128,7 @@ async function event(request) {
 
 function coreOrigin() {
   const raw = env("EO_YUZU_CORE_ORIGIN");
-  const token = env("EO_YUZU_EDGE_TOKEN");
+  const token = env("EO_YUZU_DELIVERY_TOKEN");
   if (!raw || !token) {
     const cause = new Error("Cloud control bridge is not configured");
     cause.code = "control_not_configured";
@@ -144,7 +144,7 @@ function coreOrigin() {
 
 function coreHeaders() {
   return {
-    Authorization: `Bearer ${env("EO_YUZU_EDGE_TOKEN")}`,
+    Authorization: `Bearer ${env("EO_YUZU_DELIVERY_TOKEN")}`,
     "Content-Type": "application/json",
   };
 }

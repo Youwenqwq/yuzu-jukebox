@@ -11,11 +11,11 @@ const LOCATOR_PATTERN = /^media\/[a-f0-9]{64}\/object$/;
 
 export async function onRequest(context) {
   const action = actionFrom(context.request);
-  const signerToken = env("EO_YUZU_SIGNER_TOKEN");
-  if (!signerToken) {
-    return error("signer_not_configured", "signer credential is missing", 503);
+  const backendToken = env("EO_YUZU_BACKEND_TOKEN");
+  if (!backendToken) {
+    return error("backend_not_configured", "backend credential is missing", 503);
   }
-  if (!secureEqual(bearer(context.request), signerToken)) {
+  if (!secureEqual(bearer(context.request), backendToken)) {
     return error("not_found", "not found", 404);
   }
   if (context.request.method !== "POST" && action !== "health") {
@@ -36,14 +36,16 @@ export async function onRequest(context) {
         return await getURLs(context.request);
       case "metadata":
         return await metadata(context.request);
+      case "inventory":
+        return await inventory(context.request);
       case "delete":
         return await deleteObjects(context.request);
       default:
-        return error("not_found", "unknown signer action", 404);
+        return error("not_found", "unknown backend action", 404);
     }
   } catch (cause) {
     return error(
-      cause?.code || "signer_error",
+      cause?.code || "backend_error",
       cause?.message || String(cause),
       cause?.status || 500,
     );
@@ -145,6 +147,46 @@ async function metadata(request) {
     });
   }
   return json({ objects });
+}
+
+async function inventory(request) {
+  const body = await readJSON(request);
+  if (body?.prefix !== "media/") {
+    throw badRequest("inventory prefix must be media/");
+  }
+  if (
+    body?.cursor !== undefined &&
+    (typeof body.cursor !== "string" || body.cursor.length > 2048)
+  ) {
+    throw badRequest("invalid inventory cursor");
+  }
+  const store = blobStore();
+  const options = {
+    prefix: "media/",
+    paginate: false,
+    consistency: "strong",
+  };
+  if (body?.cursor) {
+    options.cursor = body.cursor;
+  }
+  const page = await store.list(options);
+  const objects = [];
+  for (const blob of page.blobs || []) {
+    if (!LOCATOR_PATTERN.test(blob.key)) {
+      continue;
+    }
+    const value = await store.getMetadata(blob.key, { consistency: "strong" });
+    if (!value) {
+      continue;
+    }
+    const headers = lowerCaseHeaders(value.headers || {});
+    objects.push({
+      locator: blob.key,
+      size_bytes: Number(headers["content-length"] || value.size || 0),
+      external_version: blob.etag || value.etag || headers.etag || "",
+    });
+  }
+  return json({ objects, cursor: page.cursor || "" });
 }
 
 function validateBatch(value) {

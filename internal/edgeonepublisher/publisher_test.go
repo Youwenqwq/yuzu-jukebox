@@ -60,6 +60,39 @@ func TestPublisherCompleteObject(t *testing.T) {
 	}
 }
 
+func TestPublisherRecoversInterruptedLease(t *testing.T) {
+	fake := &publisherTransport{}
+	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Close() })
+	interrupted := UploadState{
+		LeaseID: "interrupted-lease", TrackRef: "local:song", Owner: "publisher-1",
+		ExpiresAt: time.Now().Add(time.Minute).UnixMilli(), Status: "uploading",
+	}
+	if err := state.Put(context.Background(), interrupted); err != nil {
+		t.Fatal(err)
+	}
+	publisher := newPublisher(testPublisherConfig(), state,
+		&http.Client{Transport: fake, Timeout: time.Minute})
+	if err := publisher.recoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	states, err := state.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("upload states = %#v, want none", states)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.failRetrySeconds != 0 {
+		t.Fatalf("retry seconds = %d, want immediate retry", fake.failRetrySeconds)
+	}
+}
+
 func TestPublisherRejectsOversizedObject(t *testing.T) {
 	fake := &publisherTransport{content: bytes.Repeat([]byte("x"), 128)}
 	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
@@ -84,6 +117,31 @@ func TestPublisherRejectsOversizedObject(t *testing.T) {
 		t.Fatal("oversized object was uploaded")
 	}
 }
+func TestPublisherReconcilesInventoryAndDeletesObjects(t *testing.T) {
+	fake := &publisherTransport{}
+	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Close() })
+	publisher := newPublisher(testPublisherConfig(), state,
+		&http.Client{Transport: fake, Timeout: time.Minute})
+	if err := publisher.ReconcileStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.DeleteOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.inventoryObjects != 1 || !fake.inventoryComplete {
+		t.Fatalf("inventory report = %d objects, complete=%v", fake.inventoryObjects, fake.inventoryComplete)
+	}
+	if fake.deletedLocator != "media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/object" ||
+		!fake.deletionCompleted {
+		t.Fatalf("deletion = %q, completed=%v", fake.deletedLocator, fake.deletionCompleted)
+	}
+}
 
 func testPublisherConfig() Config {
 	return Config{
@@ -104,29 +162,80 @@ type publisherTransport struct {
 	completed          Candidate
 	failRetrySeconds   int
 	maxObjectBytes     int64
+	inventoryObjects   int
+	inventoryComplete  bool
+	deletedLocator     string
+	deletionCompleted  bool
 }
 
 func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	switch {
-	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/distribution/publisher/config":
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/publisher/config":
 		maxObjectBytes := f.maxObjectBytes
 		if maxObjectBytes == 0 {
 			maxObjectBytes = 1 << 20
 		}
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
 			"acceleration_id": "edgeone-main", "enabled": true, "kind": "edgeone",
-			"signer_base_url": "https://signer.test/yuzu-blob",
-			"signer_token":    "signer-token", "lease_ttl_seconds": 600,
+			"backend_base_url": "https://backend.test/yuzu-blob",
+			"backend_token":    "backend-token", "lease_ttl_seconds": 600,
 			"upload_rate_bytes_per_second": 0, "max_object_bytes": maxObjectBytes,
+			"storage_budget_bytes":           850 << 20,
+			"storage_high_watermark_percent": 95, "storage_low_watermark_percent": 85,
 		})
-	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/distribution/leases":
+	case request.URL.Host == "backend.test" && request.URL.Path == "/yuzu-blob/inventory":
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
+			"objects": []map[string]any{{
+				"locator":    "media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/object",
+				"size_bytes": 64, "external_version": "etag-a",
+			}},
+			"cursor": "",
+		})
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/inventory":
+		var body struct {
+			Objects  []StorageInventoryObject `json:"objects"`
+			Complete bool                     `json:"complete"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		f.mu.Lock()
+		f.inventoryObjects += len(body.Objects)
+		f.inventoryComplete = body.Complete
+		f.mu.Unlock()
+		return jsonHTTPResponse(request, http.StatusNoContent, nil)
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/deletions/claim":
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
+			"deletion": map[string]any{
+				"id": "delete-1", "owner": "publisher-1",
+				"locator":    "media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/object",
+				"expires_at": time.Now().Add(10 * time.Minute).UnixMilli(),
+			},
+		})
+	case request.URL.Host == "backend.test" && request.URL.Path == "/yuzu-blob/delete":
+		var body struct {
+			Locators []string `json:"locators"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		f.mu.Lock()
+		f.deletedLocator = body.Locators[0]
+		f.mu.Unlock()
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"deleted": body.Locators})
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/deletions/delete-1/complete":
+		f.mu.Lock()
+		f.deletionCompleted = true
+		f.mu.Unlock()
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"ok": true})
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/leases":
 		return jsonHTTPResponse(request, http.StatusCreated, map[string]any{
 			"lease": map[string]any{
 				"id": "lease-1", "acceleration_id": "edgeone-main", "track_ref": "local:song",
 				"owner": "publisher-1", "expires_at": time.Now().Add(10 * time.Minute).UnixMilli(),
 				"created_at": time.Now().UnixMilli(),
 			},
-			"source_url": "/internal/v1/distribution/leases/lease-1/source",
+			"source_url": "/internal/v1/accelerations/leases/lease-1/source",
 		})
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/source"):
 		return &http.Response{
@@ -140,9 +249,13 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 		}, nil
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/progress"):
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"lease": map[string]any{"id": "lease-1"}})
-	case request.URL.Host == "signer.test" && strings.HasSuffix(request.URL.Path, "/health"):
+	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/reserve"):
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
+			"reservation": map[string]any{"already_present": false},
+		})
+	case request.URL.Host == "backend.test" && strings.HasSuffix(request.URL.Path, "/health"):
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"ok": true})
-	case request.URL.Host == "signer.test" && strings.HasSuffix(request.URL.Path, "/put-urls"):
+	case request.URL.Host == "backend.test" && strings.HasSuffix(request.URL.Path, "/put-urls"):
 		locator := "media/" + f.expectedVersion + "/object"
 		if f.expectedVersion == "" {
 			var body struct {
@@ -172,7 +285,7 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 			StatusCode: http.StatusOK, Header: http.Header{"ETag": []string{"etag-upload"}},
 			Body: io.NopCloser(strings.NewReader("")), Request: request,
 		}, nil
-	case request.URL.Host == "signer.test" && strings.HasSuffix(request.URL.Path, "/metadata"):
+	case request.URL.Host == "backend.test" && strings.HasSuffix(request.URL.Path, "/metadata"):
 		f.mu.Lock()
 		size := len(f.uploaded)
 		f.mu.Unlock()

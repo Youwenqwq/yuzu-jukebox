@@ -49,17 +49,19 @@ func TestDistributionInternalAPI(t *testing.T) {
 	_, err = st.CreateAcceleration(context.Background(), store.Acceleration{
 		ID: "edgeone-main", Name: "EdgeOne", Kind: "edgeone",
 		PublishOnCacheReady: true, ControlBaseURL: "https://control.test/yuzu-edge",
-		SignerBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		BackendBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
 		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
-	}, distribution.HashCredential("publisher-secret"), distribution.HashCredential("edge-secret"), "signer-secret")
+	}, distribution.HashCredential("publisher-secret"), distribution.HashCredential("delivery-secret"), "backend-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = st.UpdateAcceleration(context.Background(), "edgeone-main", store.AccelerationUpdate{
 		Name: "EdgeOne", Enabled: true, PublishOnCacheReady: true,
 		ControlBaseURL: "https://control.test/yuzu-edge",
-		SignerBaseURL:  "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		BackendBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
 		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
+		StorageBudgetBytes: 850 << 20, StorageHighWatermarkPercent: 95,
+		StorageLowWatermarkPercent: 85,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -72,12 +74,12 @@ func TestDistributionInternalAPI(t *testing.T) {
 	ticket := authm.IssueTicket("listener-1", ref)
 	introspectBody := map[string]any{"track_ref": ref, "ticket": ticket}
 	unauthorized := distributionRequest(t, handler, http.MethodPost,
-		"/internal/v1/distribution/introspect", "wrong", introspectBody)
+		"/internal/v1/accelerations/introspect", "wrong", introspectBody)
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized introspect = %d", unauthorized.Code)
 	}
 	introspect := distributionRequest(t, handler, http.MethodPost,
-		"/internal/v1/distribution/introspect", "edge-secret", introspectBody)
+		"/internal/v1/accelerations/introspect", "delivery-secret", introspectBody)
 	if introspect.Code != http.StatusOK {
 		t.Fatalf("introspect = %d: %s", introspect.Code, introspect.Body.String())
 	}
@@ -90,7 +92,7 @@ func TestDistributionInternalAPI(t *testing.T) {
 	}
 
 	claim := distributionRequest(t, handler, http.MethodPost,
-		"/internal/v1/distribution/leases", "publisher-secret",
+		"/internal/v1/accelerations/leases", "publisher-secret",
 		map[string]any{"owner": "publisher-1", "lease_seconds": 600})
 	if claim.Code != http.StatusCreated {
 		t.Fatalf("claim = %d: %s", claim.Code, claim.Body.String())
@@ -109,7 +111,7 @@ func TestDistributionInternalAPI(t *testing.T) {
 		t.Fatalf("claimed = %#v", claimed)
 	}
 	progress := distributionRequest(t, handler, http.MethodPatch,
-		"/internal/v1/distribution/leases/"+claimed.Lease.ID+"/progress",
+		"/internal/v1/accelerations/leases/"+claimed.Lease.ID+"/progress",
 		"publisher-secret", map[string]any{
 			"owner": "publisher-1", "phase": "uploading",
 			"source_bytes": len(content), "upload_bytes": 4,
@@ -137,8 +139,18 @@ func TestDistributionInternalAPI(t *testing.T) {
 		t.Fatalf("source = %d %q", source.Code, source.Body.String())
 	}
 
+	reserve := distributionRequest(t, handler, http.MethodPost,
+		"/internal/v1/accelerations/leases/"+claimed.Lease.ID+"/reserve",
+		"publisher-secret", map[string]any{
+			"owner": "publisher-1", "locator": "opaque/blob/object",
+			"size_bytes": len(content),
+		})
+	if reserve.Code != http.StatusOK {
+		t.Fatalf("reserve = %d: %s", reserve.Code, reserve.Body.String())
+	}
+
 	complete := distributionRequest(t, handler, http.MethodPost,
-		"/internal/v1/distribution/leases/"+claimed.Lease.ID+"/complete",
+		"/internal/v1/accelerations/leases/"+claimed.Lease.ID+"/complete",
 		"publisher-secret", map[string]any{
 			"owner": "publisher-1", "content_version": "sha256-value",
 			"locator": "opaque/blob/object", "layout": "object",
@@ -148,7 +160,7 @@ func TestDistributionInternalAPI(t *testing.T) {
 		t.Fatalf("complete = %d: %s", complete.Code, complete.Body.String())
 	}
 	ready := distributionRequest(t, handler, http.MethodPost,
-		"/internal/v1/distribution/introspect", "edge-secret", introspectBody)
+		"/internal/v1/accelerations/introspect", "delivery-secret", introspectBody)
 	var resolved struct {
 		Ready     bool `json:"ready"`
 		Candidate struct {

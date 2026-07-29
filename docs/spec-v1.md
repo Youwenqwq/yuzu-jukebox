@@ -750,31 +750,54 @@ actor resolve 与绑定码兑换使用 Integration token；绑定码签发使用
 ### 6.5 外部加速资源
 
 Acceleration 是由 `media_admin` 管理的持久机器资源，不从 `config.json` 读取。当前唯一
-`kind` 为 `edgeone`。资源创建时保持 disabled，并一次性返回 publisher、edge 与 signer
-三种 plaintext credential；后续查询只返回 credential-configured/pending 布尔值。
+`kind` 为 `edgeone`，但 Core 的资源、凭据、容量和生命周期合同使用供应商无关命名。
+资源创建时保持 disabled，并一次性返回 publisher、delivery 与 backend 三种 plaintext
+credential；后续查询只返回 credential-configured/pending 布尔值。
 
 | 方法与路径 | 合同 |
 |---|---|
 | `GET /api/v1/accelerations` | 列出资源，不含任何 token/hash |
 | `POST /api/v1/accelerations` | 创建 disabled 资源；HTTP 201 返回资源和三种一次性 token |
 | `GET /api/v1/accelerations/{id}` | 返回持久配置、健康状态与 credential flags |
-| `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy 或 enabled；启用前强制 readiness |
-| `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且无 lease/candidate 的资源 |
-| `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、累计与最近 24 小时指标 |
+| `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy、水位或 enabled；启用前强制 readiness |
+| `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且不再拥有媒体或进行中工作的资源 |
+| `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、累计与最近 24 小时指标 |
 | `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 pending/uploading/failed/ready 请求 |
 | `POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare` | 生成一次性 pending token |
 | `POST /api/v1/accelerations/{id}/credentials/{purpose}/activate` | 验证并切换 pending token |
 
-`purpose` 仅允许 `publisher|edge|signer`。pending publisher/edge token 在切换窗口内可认证；
-signer activate 前必须通过 Makers signer health。启用要求端点、三种 current credential、
-control/signer health 与 45 秒内 publisher heartbeat 均存在，否则返回
+创建/更新的供应商无关字段为 `control_base_url`、`backend_base_url`、
+`publish_on_cache_ready`、`lease_ttl_seconds`、`upload_rate_bytes_per_second`、
+`max_object_bytes`、`storage_budget_bytes`、`storage_high_watermark_percent` 与
+`storage_low_watermark_percent`。默认容量是 850 MiB，高/低水位是 95%/85%。
+
+`purpose` 仅允许 `publisher|delivery|backend`。pending publisher/delivery token
+在切换窗口内可认证；backend activate 前必须通过受保护的 backend health。启用要求端点、
+三种 current credential、control/backend health、正容量预算，以及 45 秒内带
+`storage.inventory` 和 `object.delete` capability 的 publisher heartbeat；否则返回
 409 `acceleration_not_ready` 并在 error 中给出 `problems`。
 
-内部 `/internal/v1/distribution/*` 路径仅接受 acceleration-scoped machine token。调用方
-不能在 body 中选择 acceleration ID；Server 必须从 token 解析资源。publisher config
-响应可向已认证 sidecar 返回解密后的 signer token、lease TTL、限速和对象上限。进度阶段
-只允许 `claimed→downloading→uploading→verifying→completing` 的非逆向转换，字节计数
-必须单调增加；合法进度更新对 lease 做受资源 TTL 上限约束的续租。
+内部 `/internal/v1/accelerations/*` 路径仅接受 acceleration-scoped machine token。
+调用方不能在 body 中选择 acceleration ID；Server 必须从 token 解析资源。publisher
+config 可向已认证 adapter 返回解密后的 backend token、lease TTL、限速、对象上限和容量
+水位。进度阶段只允许
+`claimed→downloading→uploading→verifying→completing` 的非逆向转换，字节计数必须单调
+增加；合法进度更新对 lease 做受资源 TTL 上限约束的续租。
+
+完整对象上传前，publisher 必须对 lease 调
+`POST /internal/v1/accelerations/leases/{id}/reserve`，提交 opaque `locator` 与
+`size_bytes`。Core 对 `(acceleration_id, locator)` 去重，并在同一事务中计算已记账对象与
+未过期 reservation；超过高水位返回 507 `acceleration_storage_full`，同时按 LRU 使旧
+candidate 失效并创建删除 job。adapter 通过
+`POST /internal/v1/accelerations/deletions/claim` 领取 job，调用供应商 API 删除后再
+complete；失败必须调用 fail 并给出有限 retry delay。
+
+adapter 必须周期性向 `POST /internal/v1/accelerations/inventory` 分页提交同一
+`snapshot_id`，最后一批置 `complete:true`。Core 以完整快照更新 observed bytes、
+orphan/missing 对象和 reconcile 时间；unknown locator 只作为 opaque orphan 记账，不会
+被 Core 直接解释成供应商 key。`status.storage` 同时返回 accounted/reserved/observed
+bytes、对象数、pending deletion、水位和 pressure。删除到低水位前，GC 可以使被选中的
+candidate 立即 unavailable；播放因此走既有源站 fallback，而不是继续引用待删对象。
 
 ## 7. 错误码
 
@@ -794,8 +817,12 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `idempotency_conflict` | 409 | 同一幂等 key 与操作被用于不同请求 body |
 | `request_in_progress` | 409 | 同一幂等请求尚未完成；Client 可稍后重试 |
 | `acceleration_not_ready` | 409 | 资源启用前的 endpoint/credential/health/publisher readiness 未满足 |
-| `credential_not_pending` | 409 | activation 没有可切换的 pending credential，或 signer health 验证失败 |
-| `acceleration_not_empty` | 409 | disabled acceleration 仍拥有 lease 或 ready candidate |
+| `credential_not_pending` | 409 | activation 没有可切换的 pending credential，或 backend health 验证失败 |
+| `acceleration_not_empty` | 409 | disabled acceleration 仍拥有媒体对象、lease、reservation 或删除工作 |
+| `acceleration_storage_full` | 507 | 新对象会越过资源高水位；Core 已按 policy 排队回收，publisher 应稍后重试 |
+| `acceleration_storage_unmanaged` | 409 | 资源缺少正数容量预算；启用 readiness 同样会拒绝 |
+| `acceleration_storage_reserved` | 409 | 同一 opaque locator 已由另一个 live lease 预留；publisher 应稍后重试 |
+| `deletion_invalid` | 409 | 删除 job 不存在、已过期、状态错误或不属于提交 owner |
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |
 | `internal` | 500 | 服务端内部错误 |

@@ -20,7 +20,7 @@ import (
 const distributionBodyLimit = 32 << 10
 
 func (s *Server) distributionIntrospect(w http.ResponseWriter, r *http.Request) {
-	acceleration, ok := s.authenticateAccelerationEdge(w, r)
+	acceleration, ok := s.authenticateAccelerationDelivery(w, r)
 	if !ok {
 		return
 	}
@@ -57,6 +57,9 @@ func (s *Server) distributionIntrospect(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "internal", "resolve distribution candidate")
 		return
 	}
+	if ready {
+		_ = s.st.TouchAccelerationObject(r.Context(), acceleration.ID, ref.String(), time.Now().UnixMilli())
+	}
 	writeDistributionJSON(w, http.StatusOK, map[string]any{
 		"valid": true, "enabled": true, "acceleration_id": acceleration.ID,
 		"track_ref": ref.String(), "ready": ready,
@@ -86,11 +89,14 @@ func (s *Server) distributionPublisherConfig(w http.ResponseWriter, r *http.Requ
 	}
 	writeDistributionJSON(w, http.StatusOK, map[string]any{
 		"acceleration_id": acceleration.ID, "enabled": acceleration.Enabled,
-		"kind": acceleration.Kind, "signer_base_url": acceleration.SignerBaseURL,
-		"signer_token":                 acceleration.SignerToken,
-		"lease_ttl_seconds":            acceleration.LeaseTTLSeconds,
-		"upload_rate_bytes_per_second": acceleration.UploadRateBytesPerSecond,
-		"max_object_bytes":             acceleration.MaxObjectBytes,
+		"kind": acceleration.Kind, "backend_base_url": acceleration.BackendBaseURL,
+		"backend_token":                  acceleration.BackendToken,
+		"lease_ttl_seconds":              acceleration.LeaseTTLSeconds,
+		"upload_rate_bytes_per_second":   acceleration.UploadRateBytesPerSecond,
+		"max_object_bytes":               acceleration.MaxObjectBytes,
+		"storage_budget_bytes":           acceleration.StorageBudgetBytes,
+		"storage_high_watermark_percent": acceleration.StorageHighWatermarkPercent,
+		"storage_low_watermark_percent":  acceleration.StorageLowWatermarkPercent,
 	})
 }
 
@@ -149,7 +155,7 @@ func (s *Server) distributionClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	writeDistributionJSON(w, http.StatusCreated, map[string]any{
 		"lease":      lease,
-		"source_url": fmt.Sprintf("/internal/v1/distribution/leases/%s/source", lease.ID),
+		"source_url": fmt.Sprintf("/internal/v1/accelerations/leases/%s/source", lease.ID),
 	})
 }
 
@@ -279,7 +285,7 @@ func (s *Server) distributionFail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) distributionEvent(w http.ResponseWriter, r *http.Request) {
-	acceleration, ok := s.authenticateAccelerationEdge(w, r)
+	acceleration, ok := s.authenticateAccelerationDelivery(w, r)
 	if !ok {
 		return
 	}
@@ -328,7 +334,7 @@ func (s *Server) distributionEvent(w http.ResponseWriter, r *http.Request) {
 
 func validFallbackReason(reason string) bool {
 	switch reason {
-	case "acceleration_disabled", "candidate_not_ready", "signer_unavailable",
+	case "acceleration_disabled", "candidate_not_ready", "backend_unavailable",
 		"blob_http_status", "blob_fetch_error", "control_unavailable":
 		return true
 	default:
@@ -361,8 +367,8 @@ func (s *Server) authenticateAccelerationPublisher(w http.ResponseWriter, r *htt
 	return s.authenticateAccelerationCredential(w, r, s.accelerationRegistry.ResolvePublisher)
 }
 
-func (s *Server) authenticateAccelerationEdge(w http.ResponseWriter, r *http.Request) (store.Acceleration, bool) {
-	return s.authenticateAccelerationCredential(w, r, s.accelerationRegistry.ResolveEdge)
+func (s *Server) authenticateAccelerationDelivery(w http.ResponseWriter, r *http.Request) (store.Acceleration, bool) {
+	return s.authenticateAccelerationCredential(w, r, s.accelerationRegistry.ResolveDelivery)
 }
 
 func (s *Server) authenticateAccelerationCredential(

@@ -26,7 +26,7 @@ EdgeOne production deployment。
    - 1 MiB 与 16 MiB 完整对象均已验证。
 2. Blob 凭据会注入 Cloud Function；当前远程 Edge Function 调试环境未获得 Blob 凭据。
 3. Cloud Function 可完成 Blob put/get/metadata/delete，并可签发官方预签名 PUT URL。
-4. Yuzu sidecar 可以直接 PUT 到 Blob，媒体字节无需经过 Cloud Function；签名绑定的
+4. Yuzu adapter 可以直接 PUT 到 Blob，媒体字节无需经过 Cloud Function；签名绑定的
    `Content-Type` 不匹配时正确返回 `403`。
 5. 4 × 256 KiB 和 16 × 1 MiB Blob 可顺序拼成一个普通文件；完整响应、跨 chunk
    Range、后缀 Range 与 `416` 均逐字节验证正确。
@@ -39,8 +39,8 @@ EdgeOne production deployment。
 9. Blob 域名自身存在边缘缓存，但不同请求的 `eo-cache-status` 在 MISS/HIT 间变化，不能依赖
    某一节点必然命中。MISS 也只会回 Blob/COS，不会回 Yuzu。
 10. 远端 production deployment 已验证完整链路：Edge Function 调用同项目 Cloud Function
-    signer，再从 Blob 拉取 16 MiB 对象；完整响应 SHA-256 一致，普通 Range、后缀 Range 和
-    越界 `416` 均正确。
+    control/backend，再从 Blob 拉取 16 MiB 对象；完整响应 SHA-256 一致，普通 Range、
+    后缀 Range 和越界 `416` 均正确。
 11. 预签名 PUT 可以附带未参与签名的 `Cache-Control: public, max-age=31536000, immutable`，
     Blob metadata 会正确保存该值。
 12. 生产 Cloud Function 同步响应上限已精确测得为 6 MiB：6 MiB 正常，6 MiB + 1 byte
@@ -48,7 +48,7 @@ EdgeOne production deployment。
 13. 生产 Edge Cache 可直接消费 Blob 的 16 MiB 流，并用稳定 synthetic key 缓存；后续
     Range 由 `cache.match` 自动返回正确 `206`。
 14. P1 正式 Makers 工程已完成 production 部署；Cloud control bridge 能读取远端环境变量，
-    signer health、64 KiB PUT、强一致 metadata、signed GET Range、delete 均再次验证通过。
+    backend health、64 KiB PUT、强一致 metadata、signed GET Range、delete 均再次验证通过。
 
 ### 尚未证实或存在风险
 
@@ -59,8 +59,8 @@ EdgeOne production deployment。
 - Cloud Function 的 6 MiB 响应限制已经确认；持续时间、并发和计费仍需按套餐确认。
 - 尚未使用真实 `<audio>`/MPV 做播放、seek 和断线续传测试；HTTP 字节与 Range 语义已验证。
 - Blob 单对象文档上限为 25 MB，不能假设所有 Bili/长音频都能作为单对象保存。
-- candidate 现以 `acceleration_id + track_ref` 持久保存，仍未实现内容变化探测与自动失效；
-  Provider 同一引用的音质或字节发生变化时，需要 P2 生命周期机制重新发布并清理旧对象。
+- candidate 现以 `acceleration_id + track_ref` 持久保存；容量、LRU、orphan/missing
+  reconciliation 与物理删除已实现，但 Provider 同一引用的内容变化仍不会主动触发重发。
 - EdgeOne CLI 1.6.16 的 `makers env set` 存在参数与异步等待缺陷，可能以状态 0 静默退出；
   production 应通过 Makers 控制台或已修复版本写变量，并在部署日志确认变量已被拉取。
 
@@ -79,8 +79,8 @@ Client ── 主域名 /stream/v1 ──> EdgeOne 站点级 Edge Function
                                       ├─ 媒体字节：Range GET ───────────────────> EdgeOne Blob/COS
                                       └─ fetch(event.request) ──────────────────> 站点标准回源
 
-yuzu-server cache ──localhost/read-only source──> yuzu-edgeone sidecar
-yuzu-edgeone sidecar ──Cloud PUT signer ──presigned PUT──> EdgeOne Blob
+yuzu-server cache ──localhost/read-only source──> yuzu-edgeone adapter
+yuzu-edgeone adapter ──backend PUT URL ──presigned PUT──> EdgeOne Blob
 ```
 
 模块职责：
@@ -102,8 +102,8 @@ yuzu-edgeone sidecar ──Cloud PUT signer ──presigned PUT──> EdgeOne B
   - 在 Yuzu 主域名上通过 `/stream/v1/*` URL path 触发规则接管请求；
   - 使用代码顶部的 Makers control absolute URL introspect ticket；
   - ready 时从 Blob 流式响应；
-  - disabled、未 ready、control/signer/Blob 故障时通过 `fetch(event.request)` 走站点标准回源；
-  - 不接触 Provider，也不持有 Core、Signer 或 EdgeOne 长期凭据。
+  - disabled、未 ready、control/backend/Blob 故障时通过 `fetch(event.request)` 走站点标准回源；
+  - 不接触 Provider，也不持有 Core、backend 或 EdgeOne 长期凭据。
 
 ## 对象布局
 
@@ -157,7 +157,7 @@ manifest 至少包含：
 
 - 当前曲目没有 ready candidate：立即走现有直出，同时后台发布。
 - 下一曲已由 Room 预取：本地 cache 完成后优先上传，争取在切歌前 ready。
-- sidecar P1 默认固定限速 1.5 Mbps；根据当前直出连接数动态降低或暂停留待 P3。
+- adapter 当前默认固定限速 1.5 Mbps；根据当前直出连接数动态降低或暂停留待 P3。
 - 同一内容只允许一个 publish lease；其他任务等待 candidate，避免重复上传。
 - 发布失败不影响播放，只记录状态并继续走源站。
 
@@ -178,11 +178,11 @@ manifest 至少包含：
 
 ## 安全要求
 
-- signer 只允许固定 store/prefix，禁止调用者提供任意 COS key、域名或方法。
-- sidecar、Edge Function 与 Cloud Function 间使用独立机器凭据或请求签名。
+- backend 只允许固定 store/prefix，禁止调用者提供任意 COS key、域名或方法。
+- publisher adapter、Edge Function 与 Cloud Function 间使用独立机器凭据。
 - PUT/GET URL 短时有效，禁止写日志；GET TTL 应与 stream ticket 风险窗口匹配。
 - Edge Function 必须先 introspect ticket，再获取 Blob URL。
-- GET signer 放在独立适配层，启动时做 SDK 兼容检查；失败时自动切回 Cloud proxy/源站。
+- GET signing 放在独立适配层，启动时做 SDK 兼容检查；失败时自动切回源站。
 - candidate 必须携带不可变内容版本，防止旧 URL/旧缓存映射到新媒体。
 
 ## 实现 Todo
@@ -201,32 +201,40 @@ manifest 至少包含：
 
 ### P1：完整对象 MVP（已完成）
 
-- [x] 定义通用 distribution lease/candidate/introspection 数据模型与内部 API。
-- [x] 实现 `yuzu-edgeone` sidecar 骨架、配置、鉴权、限速器和本地状态库。
-- [x] Cloud Function 实现受保护的批量 PUT signer。
-- [x] sidecar 对不超过 23 MiB 的完整缓存文件执行 PUT、校验 metadata、提交 ready candidate。
+- [x] 定义通用 acceleration lease/candidate/introspection 数据模型与内部 API。
+- [x] 实现 `yuzu-edgeone` adapter 骨架、配置、鉴权、限速器和本地状态库。
+- [x] Cloud Function 实现受保护的批量 PUT URL。
+- [x] adapter 对不超过 23 MiB 的完整缓存文件执行 PUT、校验 metadata、提交 ready candidate。
 - [x] Edge Function 保持 `/stream/v1`，完成 ticket introspection、Blob Range 代理和源站回退。
-- [x] GET signer 提供 SDK 兼容检查、120 秒 TTL，并在不可用时回退现有源站。
+- [x] GET signing 提供 SDK 兼容检查、120 秒 TTL，并在不可用时回退现有源站。
 - [x] 增加发布成功率、上传字节、回退次数、ready 延迟、Blob 响应时间指标。
 
 ### P1 生产化：托管资源、观测与主域名接入（已实现）
 
 - [x] acceleration 改为 `media_admin` 可创建、停用和管理的持久资源，移除 Server JSON 配置。
-- [x] publisher/edge/signer 使用独立凭据；出站 signer secret 经 `secret_key` AES-GCM 加密。
-- [x] sidecar 从 Core 读取 signer URL、token、限速、对象上限和 lease policy。
+- [x] publisher/delivery/backend 使用独立凭据；出站 backend secret 经 `secret_key` AES-GCM 加密。
+- [x] adapter 从 Core 读取 backend URL、token、限速、对象上限和 lease policy。
 - [x] 增加 publisher heartbeat、下载/上传字节、phase、错误、attempt history 与有界续租。
 - [x] 增加 status/requests 管理 API、健康探测、fallback 原因和最近 24 小时指标。
 - [x] 实现 staged credential prepare/activate。
 - [x] 公开 stream 函数迁移为可直接粘贴的站点级 Edge Function，Makers 只保留控制面。
 - [ ] 在真实主域名 Dashboard 部署函数与触发规则后，完成 `<audio>`/MPV 端到端回归。
 
-### P2：分块与生命周期
+### P2A：完整对象生命周期与容量治理（已完成）
 
-- [ ] 实现 1–2 MiB byte-exact chunks、manifest、批量 GET signer 和顺序 `pipeTo`。
+- [x] Core 使用供应商无关的 acceleration/backend/delivery 合同；EdgeOne key 对 Core 保持 opaque。
+- [x] 上传前按 lease 原子预留容量；同 content-addressed locator 只记账一次。
+- [x] 持久保存 object/refcount/access time、reservation、inventory snapshot、deletion job 与 reconcile status。
+- [x] adapter 周期性执行 Blob 强一致 inventory，报告 observed bytes、orphan 与 missing 对象。
+- [x] 高水位触发 LRU candidate 失效和删除 job，回收到低水位；删除失败有租约与 retry。
+- [x] readiness 要求容量预算和 `storage.inventory`/`object.delete` capability；管理 status 暴露容量压力。
+- [x] adapter 重启会释放持久化的 live lease；同 locator 预留串行化，重复提交与上传中断通过 ready/orphan reconciliation 收敛。
+
+### P2B：分块与内容变化
+
+- [ ] 实现 1–2 MiB byte-exact chunks、manifest、批量 GET signing 和顺序 `pipeTo`。
 - [ ] 对缺块、manifest 不一致、对象被回收返回可观测错误并回退源站。
-- [ ] 实现 candidate 引用计数/租约、TTL/LRU 回收和孤儿对象扫描。
 - [ ] 检测同一 `track_ref` 的内容版本变化，原子切换 candidate 并回收旧内容对象。
-- [ ] 对 sidecar 重启、重复提交、上传中断做幂等恢复。
 - [ ] 评估渐进发布，只有连续前缀与请求 Range 均已 ready 时才走 Blob。
 
 ### P3：可选优化
@@ -238,7 +246,7 @@ manifest 至少包含：
 ## Go/No-Go
 
 核心 Blob Go/No-Go 已通过：远端 Edge Function 可以稳定 fetch Cloud signer 与 Blob signed GET，
-并传输 16 MiB 长响应。P1 与生产化 Server/sidecar/函数代码已实现；在面向真实用户启用前，
+并传输 16 MiB 长响应。P1、生产化和完整对象容量生命周期代码已实现；在面向真实用户启用前，
 仍需把站点函数粘贴到主域名 Dashboard、配置 `/stream/v1/*` 触发规则，并补
 `<audio>`/MPV 的播放、seek、断线续传测试。
 
@@ -247,8 +255,8 @@ Cloud Function 官方 SDK 拼接不能作为整轨 fallback，因为响应超过
 
 ## 部署入口
 
-- acceleration CRUD、Core/Makers 凭据、sidecar bootstrap、站点函数粘贴与触发规则见
+- acceleration CRUD、Core/Makers 凭据、adapter bootstrap、站点函数粘贴与触发规则见
   [`deploy/edgeone/README.md`](../deploy/edgeone/README.md)。
-- sidecar 最小示例配置见 [`edgeone.example.json`](../edgeone.example.json)。
+- adapter 最小示例配置见 [`edgeone.example.json`](../edgeone.example.json)。
 - 站点函数代码见 [`deploy/edgeone-site/stream.js`](../deploy/edgeone-site/stream.js)；
   粘贴前只需修改顶部非秘密 `CONTROL_ORIGIN` 常量。

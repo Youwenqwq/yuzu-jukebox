@@ -214,8 +214,8 @@ func (s *Service) Metrics24Hours(ctx context.Context, accelerationID string) (ma
 func NewCredential(purpose string) (string, []byte, error) {
 	prefix := map[string]string{
 		"publisher": "yza_pub_",
-		"edge":      "yza_edge_",
-		"signer":    "yza_signer_",
+		"delivery":  "yza_delivery_",
+		"backend":   "yza_backend_",
 	}[purpose]
 	if prefix == "" {
 		return "", nil, fmt.Errorf("unknown acceleration credential purpose %q", purpose)

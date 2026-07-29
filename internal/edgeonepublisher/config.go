@@ -27,14 +27,17 @@ type Config struct {
 }
 
 type ManagedConfig struct {
-	AccelerationID           string `json:"acceleration_id"`
-	Enabled                  bool   `json:"enabled"`
-	Kind                     string `json:"kind"`
-	SignerBaseURL            string `json:"signer_base_url"`
-	SignerToken              string `json:"signer_token"`
-	LeaseTTLSeconds          int    `json:"lease_ttl_seconds"`
-	UploadRateBytesPerSecond int64  `json:"upload_rate_bytes_per_second"`
-	MaxObjectBytes           int64  `json:"max_object_bytes"`
+	AccelerationID              string `json:"acceleration_id"`
+	Enabled                     bool   `json:"enabled"`
+	Kind                        string `json:"kind"`
+	BackendBaseURL              string `json:"backend_base_url"`
+	BackendToken                string `json:"backend_token"`
+	LeaseTTLSeconds             int    `json:"lease_ttl_seconds"`
+	UploadRateBytesPerSecond    int64  `json:"upload_rate_bytes_per_second"`
+	MaxObjectBytes              int64  `json:"max_object_bytes"`
+	StorageBudgetBytes          int64  `json:"storage_budget_bytes"`
+	StorageHighWatermarkPercent int    `json:"storage_high_watermark_percent"`
+	StorageLowWatermarkPercent  int    `json:"storage_low_watermark_percent"`
 }
 
 func DefaultConfig() Config {
@@ -91,14 +94,17 @@ func (c Config) Validate() error {
 }
 
 func (c ManagedConfig) Validate() error {
-	if c.AccelerationID == "" || c.Kind != "edgeone" || c.SignerToken == "" {
+	if c.AccelerationID == "" || c.Kind != "edgeone" || c.BackendToken == "" {
 		return errors.New("managed acceleration configuration is incomplete")
 	}
-	parsed, err := url.Parse(c.SignerBaseURL)
+	parsed, err := url.Parse(c.BackendBaseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return errors.New("managed signer_base_url must be an absolute URL")
+		return errors.New("managed backend_base_url must be an absolute URL")
 	}
-	if c.LeaseTTLSeconds <= 0 || c.UploadRateBytesPerSecond < 0 || c.MaxObjectBytes <= 0 {
+	if c.LeaseTTLSeconds <= 0 || c.UploadRateBytesPerSecond < 0 || c.MaxObjectBytes <= 0 ||
+		c.StorageBudgetBytes <= 0 || c.StorageLowWatermarkPercent <= 0 ||
+		c.StorageHighWatermarkPercent > 100 ||
+		c.StorageLowWatermarkPercent >= c.StorageHighWatermarkPercent {
 		return errors.New("managed acceleration limits are invalid")
 	}
 	return nil

@@ -24,68 +24,80 @@ var (
 )
 
 type accelerationView struct {
-	ID                       string `json:"id"`
-	Name                     string `json:"name"`
-	Kind                     string `json:"kind"`
-	Enabled                  bool   `json:"enabled"`
-	PublishOnCacheReady      bool   `json:"publish_on_cache_ready"`
-	ControlBaseURL           string `json:"control_base_url"`
-	SignerBaseURL            string `json:"signer_base_url"`
-	LeaseTTLSeconds          int    `json:"lease_ttl_seconds"`
-	UploadRateBytesPerSecond int64  `json:"upload_rate_bytes_per_second"`
-	MaxObjectBytes           int64  `json:"max_object_bytes"`
-	PublisherConfigured      bool   `json:"publisher_credential_configured"`
-	EdgeConfigured           bool   `json:"edge_credential_configured"`
-	SignerConfigured         bool   `json:"signer_credential_configured"`
-	PublisherPending         bool   `json:"publisher_credential_pending"`
-	EdgePending              bool   `json:"edge_credential_pending"`
-	SignerPending            bool   `json:"signer_credential_pending"`
-	ControlHealthy           *bool  `json:"control_healthy,omitempty"`
-	SignerHealthy            *bool  `json:"signer_healthy,omitempty"`
-	HealthError              string `json:"health_error,omitempty"`
-	LastHealthAt             *int64 `json:"last_health_at,omitempty"`
-	CreatedAt                int64  `json:"created_at"`
-	UpdatedAt                int64  `json:"updated_at"`
+	ID                          string `json:"id"`
+	Name                        string `json:"name"`
+	Kind                        string `json:"kind"`
+	Enabled                     bool   `json:"enabled"`
+	PublishOnCacheReady         bool   `json:"publish_on_cache_ready"`
+	ControlBaseURL              string `json:"control_base_url"`
+	BackendBaseURL              string `json:"backend_base_url"`
+	LeaseTTLSeconds             int    `json:"lease_ttl_seconds"`
+	UploadRateBytesPerSecond    int64  `json:"upload_rate_bytes_per_second"`
+	MaxObjectBytes              int64  `json:"max_object_bytes"`
+	StorageBudgetBytes          int64  `json:"storage_budget_bytes"`
+	StorageHighWatermarkPercent int    `json:"storage_high_watermark_percent"`
+	StorageLowWatermarkPercent  int    `json:"storage_low_watermark_percent"`
+	PublisherConfigured         bool   `json:"publisher_credential_configured"`
+	DeliveryConfigured          bool   `json:"delivery_credential_configured"`
+	BackendConfigured           bool   `json:"backend_credential_configured"`
+	PublisherPending            bool   `json:"publisher_credential_pending"`
+	DeliveryPending             bool   `json:"delivery_credential_pending"`
+	BackendPending              bool   `json:"backend_credential_pending"`
+	ControlHealthy              *bool  `json:"control_healthy,omitempty"`
+	BackendHealthy              *bool  `json:"backend_healthy,omitempty"`
+	HealthError                 string `json:"health_error,omitempty"`
+	LastHealthAt                *int64 `json:"last_health_at,omitempty"`
+	CreatedAt                   int64  `json:"created_at"`
+	UpdatedAt                   int64  `json:"updated_at"`
 }
 
 type createAccelerationRequest struct {
-	ID                       string `json:"id"`
-	Name                     string `json:"name"`
-	Kind                     string `json:"kind"`
-	ControlBaseURL           string `json:"control_base_url"`
-	SignerBaseURL            string `json:"signer_base_url"`
-	PublishOnCacheReady      *bool  `json:"publish_on_cache_ready"`
-	LeaseTTLSeconds          int    `json:"lease_ttl_seconds"`
-	UploadRateBytesPerSecond *int64 `json:"upload_rate_bytes_per_second"`
-	MaxObjectBytes           int64  `json:"max_object_bytes"`
+	ID                          string `json:"id"`
+	Name                        string `json:"name"`
+	Kind                        string `json:"kind"`
+	ControlBaseURL              string `json:"control_base_url"`
+	BackendBaseURL              string `json:"backend_base_url"`
+	PublishOnCacheReady         *bool  `json:"publish_on_cache_ready"`
+	LeaseTTLSeconds             int    `json:"lease_ttl_seconds"`
+	UploadRateBytesPerSecond    *int64 `json:"upload_rate_bytes_per_second"`
+	MaxObjectBytes              int64  `json:"max_object_bytes"`
+	StorageBudgetBytes          int64  `json:"storage_budget_bytes"`
+	StorageHighWatermarkPercent int    `json:"storage_high_watermark_percent"`
+	StorageLowWatermarkPercent  int    `json:"storage_low_watermark_percent"`
 }
 
 type updateAccelerationRequest struct {
-	Name                     *string `json:"name"`
-	Enabled                  *bool   `json:"enabled"`
-	PublishOnCacheReady      *bool   `json:"publish_on_cache_ready"`
-	ControlBaseURL           *string `json:"control_base_url"`
-	SignerBaseURL            *string `json:"signer_base_url"`
-	LeaseTTLSeconds          *int    `json:"lease_ttl_seconds"`
-	UploadRateBytesPerSecond *int64  `json:"upload_rate_bytes_per_second"`
-	MaxObjectBytes           *int64  `json:"max_object_bytes"`
+	Name                        *string `json:"name"`
+	Enabled                     *bool   `json:"enabled"`
+	PublishOnCacheReady         *bool   `json:"publish_on_cache_ready"`
+	ControlBaseURL              *string `json:"control_base_url"`
+	BackendBaseURL              *string `json:"backend_base_url"`
+	LeaseTTLSeconds             *int    `json:"lease_ttl_seconds"`
+	UploadRateBytesPerSecond    *int64  `json:"upload_rate_bytes_per_second"`
+	MaxObjectBytes              *int64  `json:"max_object_bytes"`
+	StorageBudgetBytes          *int64  `json:"storage_budget_bytes"`
+	StorageHighWatermarkPercent *int    `json:"storage_high_watermark_percent"`
+	StorageLowWatermarkPercent  *int    `json:"storage_low_watermark_percent"`
 }
 
 func accelerationResponse(acceleration store.Acceleration) accelerationView {
 	return accelerationView{
 		ID: acceleration.ID, Name: acceleration.Name, Kind: acceleration.Kind,
 		Enabled: acceleration.Enabled, PublishOnCacheReady: acceleration.PublishOnCacheReady,
-		ControlBaseURL: acceleration.ControlBaseURL, SignerBaseURL: acceleration.SignerBaseURL,
-		LeaseTTLSeconds:          acceleration.LeaseTTLSeconds,
-		UploadRateBytesPerSecond: acceleration.UploadRateBytesPerSecond,
-		MaxObjectBytes:           acceleration.MaxObjectBytes,
-		PublisherConfigured:      len(acceleration.PublisherTokenHash) != 0,
-		EdgeConfigured:           len(acceleration.EdgeTokenHash) != 0,
-		SignerConfigured:         acceleration.SignerToken != "",
-		PublisherPending:         len(acceleration.PublisherPendingTokenHash) != 0,
-		EdgePending:              len(acceleration.EdgePendingTokenHash) != 0,
-		SignerPending:            acceleration.SignerPendingToken != "",
-		ControlHealthy:           acceleration.ControlHealthy, SignerHealthy: acceleration.SignerHealthy,
+		ControlBaseURL: acceleration.ControlBaseURL, BackendBaseURL: acceleration.BackendBaseURL,
+		LeaseTTLSeconds:             acceleration.LeaseTTLSeconds,
+		UploadRateBytesPerSecond:    acceleration.UploadRateBytesPerSecond,
+		MaxObjectBytes:              acceleration.MaxObjectBytes,
+		StorageBudgetBytes:          acceleration.StorageBudgetBytes,
+		StorageHighWatermarkPercent: acceleration.StorageHighWatermarkPercent,
+		StorageLowWatermarkPercent:  acceleration.StorageLowWatermarkPercent,
+		PublisherConfigured:         len(acceleration.PublisherTokenHash) != 0,
+		DeliveryConfigured:          len(acceleration.DeliveryTokenHash) != 0,
+		BackendConfigured:           acceleration.BackendToken != "",
+		PublisherPending:            len(acceleration.PublisherPendingTokenHash) != 0,
+		DeliveryPending:             len(acceleration.DeliveryPendingTokenHash) != 0,
+		BackendPending:              acceleration.BackendPendingToken != "",
+		ControlHealthy:              acceleration.ControlHealthy, BackendHealthy: acceleration.BackendHealthy,
 		HealthError: acceleration.HealthError, LastHealthAt: acceleration.LastHealthAt,
 		CreatedAt: acceleration.CreatedAt, UpdatedAt: acceleration.UpdatedAt,
 	}
@@ -143,7 +155,7 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration id, name, or kind")
 		return
 	}
-	controlURL, signerURL, err := validateAccelerationURLs(body.ControlBaseURL, body.SignerBaseURL)
+	controlURL, backendURL, err := validateAccelerationURLs(body.ControlBaseURL, body.BackendBaseURL)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -162,7 +174,19 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 	if body.MaxObjectBytes == 0 {
 		body.MaxObjectBytes = 23 << 20
 	}
-	if body.LeaseTTLSeconds <= 0 || uploadRate < 0 || body.MaxObjectBytes <= 0 {
+	if body.StorageBudgetBytes == 0 {
+		body.StorageBudgetBytes = 850 << 20
+	}
+	if body.StorageHighWatermarkPercent == 0 {
+		body.StorageHighWatermarkPercent = 95
+	}
+	if body.StorageLowWatermarkPercent == 0 {
+		body.StorageLowWatermarkPercent = 85
+	}
+	if body.LeaseTTLSeconds <= 0 || uploadRate < 0 || body.MaxObjectBytes <= 0 ||
+		body.StorageBudgetBytes <= 0 || body.StorageLowWatermarkPercent <= 0 ||
+		body.StorageHighWatermarkPercent > 100 ||
+		body.StorageLowWatermarkPercent >= body.StorageHighWatermarkPercent {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration limits")
 		return
 	}
@@ -171,22 +195,25 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to create publisher credential")
 		return
 	}
-	edgeToken, edgeHash, err := distribution.NewCredential("edge")
+	deliveryToken, deliveryHash, err := distribution.NewCredential("delivery")
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to create edge credential")
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to create delivery credential")
 		return
 	}
-	signerToken, _, err := distribution.NewCredential("signer")
+	backendToken, _, err := distribution.NewCredential("backend")
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to create signer credential")
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to create backend credential")
 		return
 	}
 	acceleration, err := s.st.CreateAcceleration(r.Context(), store.Acceleration{
 		ID: body.ID, Name: body.Name, Kind: body.Kind,
 		PublishOnCacheReady: publishOnReady, ControlBaseURL: controlURL,
-		SignerBaseURL: signerURL, LeaseTTLSeconds: body.LeaseTTLSeconds,
+		BackendBaseURL: backendURL, LeaseTTLSeconds: body.LeaseTTLSeconds,
 		UploadRateBytesPerSecond: uploadRate, MaxObjectBytes: body.MaxObjectBytes,
-	}, publisherHash, edgeHash, signerToken)
+		StorageBudgetBytes:          body.StorageBudgetBytes,
+		StorageHighWatermarkPercent: body.StorageHighWatermarkPercent,
+		StorageLowWatermarkPercent:  body.StorageLowWatermarkPercent,
+	}, publisherHash, deliveryHash, backendToken)
 	if err != nil {
 		writeErr(w, http.StatusConflict, "conflict", "acceleration already exists")
 		return
@@ -198,8 +225,8 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 		"acceleration": accelerationResponse(acceleration),
 		"credentials": map[string]string{
 			"publisher_token": publisherToken,
-			"edge_token":      edgeToken,
-			"signer_token":    signerToken,
+			"delivery_token":  deliveryToken,
+			"backend_token":   backendToken,
 		},
 	})
 }
@@ -226,10 +253,13 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	update := store.AccelerationUpdate{
 		Name: current.Name, Enabled: current.Enabled,
 		PublishOnCacheReady: current.PublishOnCacheReady,
-		ControlBaseURL:      current.ControlBaseURL, SignerBaseURL: current.SignerBaseURL,
-		LeaseTTLSeconds:          current.LeaseTTLSeconds,
-		UploadRateBytesPerSecond: current.UploadRateBytesPerSecond,
-		MaxObjectBytes:           current.MaxObjectBytes,
+		ControlBaseURL:      current.ControlBaseURL, BackendBaseURL: current.BackendBaseURL,
+		LeaseTTLSeconds:             current.LeaseTTLSeconds,
+		UploadRateBytesPerSecond:    current.UploadRateBytesPerSecond,
+		MaxObjectBytes:              current.MaxObjectBytes,
+		StorageBudgetBytes:          current.StorageBudgetBytes,
+		StorageHighWatermarkPercent: current.StorageHighWatermarkPercent,
+		StorageLowWatermarkPercent:  current.StorageLowWatermarkPercent,
 	}
 	if body.Name != nil {
 		update.Name = strings.TrimSpace(*body.Name)
@@ -240,8 +270,8 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	if body.ControlBaseURL != nil {
 		update.ControlBaseURL = strings.TrimSpace(*body.ControlBaseURL)
 	}
-	if body.SignerBaseURL != nil {
-		update.SignerBaseURL = strings.TrimSpace(*body.SignerBaseURL)
+	if body.BackendBaseURL != nil {
+		update.BackendBaseURL = strings.TrimSpace(*body.BackendBaseURL)
 	}
 	if body.LeaseTTLSeconds != nil {
 		update.LeaseTTLSeconds = *body.LeaseTTLSeconds
@@ -252,37 +282,53 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	if body.MaxObjectBytes != nil {
 		update.MaxObjectBytes = *body.MaxObjectBytes
 	}
+	if body.StorageBudgetBytes != nil {
+		update.StorageBudgetBytes = *body.StorageBudgetBytes
+	}
+	if body.StorageHighWatermarkPercent != nil {
+		update.StorageHighWatermarkPercent = *body.StorageHighWatermarkPercent
+	}
+	if body.StorageLowWatermarkPercent != nil {
+		update.StorageLowWatermarkPercent = *body.StorageLowWatermarkPercent
+	}
 	if body.Enabled != nil {
 		update.Enabled = *body.Enabled
 	}
 	if update.Name == "" || len(update.Name) > 100 || update.LeaseTTLSeconds <= 0 ||
-		update.UploadRateBytesPerSecond < 0 || update.MaxObjectBytes <= 0 {
+		update.UploadRateBytesPerSecond < 0 || update.MaxObjectBytes <= 0 ||
+		update.StorageBudgetBytes <= 0 || update.StorageLowWatermarkPercent <= 0 ||
+		update.StorageHighWatermarkPercent > 100 ||
+		update.StorageLowWatermarkPercent >= update.StorageHighWatermarkPercent {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration configuration")
 		return
 	}
-	if update.ControlBaseURL, update.SignerBaseURL, err = validateAccelerationURLs(update.ControlBaseURL, update.SignerBaseURL); err != nil {
+	if update.ControlBaseURL, update.BackendBaseURL, err = validateAccelerationURLs(update.ControlBaseURL, update.BackendBaseURL); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	var healthChecked bool
-	var controlOK, signerOK bool
+	var controlOK, backendOK bool
 	var healthDetail string
-	var healthCheckedAt int64
 	if !current.Enabled && update.Enabled {
 		current.Name = update.Name
 		current.PublishOnCacheReady = update.PublishOnCacheReady
 		current.ControlBaseURL = update.ControlBaseURL
-		current.SignerBaseURL = update.SignerBaseURL
+		current.BackendBaseURL = update.BackendBaseURL
 		current.LeaseTTLSeconds = update.LeaseTTLSeconds
 		current.UploadRateBytesPerSecond = update.UploadRateBytesPerSecond
 		current.MaxObjectBytes = update.MaxObjectBytes
-		controlOK, signerOK, healthDetail = distribution.CheckHealth(
-			r.Context(), accelerationHealthClient, current, current.SignerToken,
+		current.StorageBudgetBytes = update.StorageBudgetBytes
+		current.StorageHighWatermarkPercent = update.StorageHighWatermarkPercent
+		current.StorageLowWatermarkPercent = update.StorageLowWatermarkPercent
+		controlOK, backendOK, healthDetail = distribution.CheckHealth(
+			r.Context(), accelerationHealthClient, current, current.BackendToken,
 		)
-		healthChecked = true
-		healthCheckedAt = time.Now().UnixMilli()
+		update.HealthChecked = true
+		update.ControlHealthy = controlOK
+		update.BackendHealthy = backendOK
+		update.HealthError = healthDetail
+		update.HealthCheckedAt = time.Now().UnixMilli()
 		current.ControlHealthy = &controlOK
-		current.SignerHealthy = &signerOK
+		current.BackendHealthy = &backendOK
 		current.HealthError = healthDetail
 		ready, problems, readyErr := s.st.AccelerationReadyFor(r.Context(), current, time.Now().Add(-45*time.Second).UnixMilli())
 		if readyErr != nil {
@@ -300,18 +346,6 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to update acceleration")
 		return
-	}
-	if healthChecked {
-		if err := s.st.UpdateAccelerationHealth(
-			r.Context(), updated.ID, controlOK, signerOK, healthDetail, healthCheckedAt,
-		); err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal", "failed to persist acceleration health")
-			return
-		}
-		updated.ControlHealthy = &controlOK
-		updated.SignerHealthy = &signerOK
-		updated.HealthError = healthDetail
-		updated.LastHealthAt = &healthCheckedAt
 	}
 	action := "acceleration.update"
 	if current.Enabled != updated.Enabled {
@@ -337,7 +371,7 @@ func (s *Server) deleteAcceleration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "acceleration not found")
 		return
 	case errors.Is(err, store.ErrAccelerationNotEmpty):
-		writeErr(w, http.StatusConflict, "acceleration_not_empty", "acceleration still owns leases or candidates")
+		writeErr(w, http.StatusConflict, "acceleration_not_empty", "acceleration still owns media or active work")
 		return
 	case err != nil:
 		writeErr(w, http.StatusConflict, "conflict", err.Error())
@@ -378,7 +412,7 @@ func (s *Server) activateAccelerationCredential(w http.ResponseWriter, r *http.R
 	}
 	id, purpose := r.PathValue("id"), r.PathValue("purpose")
 	switch purpose {
-	case "publisher", "edge", "signer":
+	case "publisher", "delivery", "backend":
 	default:
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid credential purpose")
 		return
@@ -392,13 +426,13 @@ func (s *Server) activateAccelerationCredential(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load acceleration")
 		return
 	}
-	if purpose == "signer" {
-		if current.SignerPendingToken == "" {
-			writeErr(w, http.StatusConflict, "credential_not_pending", "signer credential is not pending")
+	if purpose == "backend" {
+		if current.BackendPendingToken == "" {
+			writeErr(w, http.StatusConflict, "credential_not_pending", "backend credential is not pending")
 			return
 		}
-		_, signerOK, detail := distribution.CheckHealth(r.Context(), accelerationHealthClient, current, current.SignerPendingToken)
-		if !signerOK {
+		_, backendOK, detail := distribution.CheckHealth(r.Context(), accelerationHealthClient, current, current.BackendPendingToken)
+		if !backendOK {
 			writeErr(w, http.StatusConflict, "credential_not_ready", detail)
 			return
 		}
@@ -450,6 +484,11 @@ func (s *Server) accelerationStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load active uploads")
 		return
 	}
+	storageStatus, err := s.st.AccelerationStorageStatus(r.Context(), id, time.Now().UnixMilli())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load acceleration storage status")
+		return
+	}
 	now := time.Now().UnixMilli()
 	publisherViews := make([]map[string]any, 0, len(publishers))
 	for _, publisher := range publishers {
@@ -465,7 +504,7 @@ func (s *Server) accelerationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"acceleration": accelerationResponse(acceleration), "summary": summary,
-		"publishers": publisherViews, "active": attempts,
+		"storage": storageStatus, "publishers": publisherViews, "active": attempts,
 		"counters": metrics, "last_24_hours": rolling,
 	})
 }
@@ -484,16 +523,16 @@ func (s *Server) accelerationRequests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"requests": rows})
 }
 
-func validateAccelerationURLs(controlRaw, signerRaw string) (string, string, error) {
+func validateAccelerationURLs(controlRaw, backendRaw string) (string, string, error) {
 	control, err := validateAccelerationURL(controlRaw)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid control_base_url: %w", err)
 	}
-	signer, err := validateAccelerationURL(signerRaw)
+	backend, err := validateAccelerationURL(backendRaw)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid signer_base_url: %w", err)
+		return "", "", fmt.Errorf("invalid backend_base_url: %w", err)
 	}
-	return control, signer, nil
+	return control, backend, nil
 }
 
 func validateAccelerationURL(raw string) (string, error) {

@@ -93,6 +93,31 @@ func (s *State) Put(ctx context.Context, state UploadState) error {
 	return err
 }
 
+func (s *State) List(ctx context.Context) ([]UploadState, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT lease_id, track_ref, owner, expires_at,
+		status, temp_path, content_version, locator, size_bytes, content_type,
+		last_error, updated_at FROM uploads ORDER BY updated_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var states []UploadState
+	for rows.Next() {
+		var state UploadState
+		if err := rows.Scan(&state.LeaseID, &state.TrackRef, &state.Owner,
+			&state.ExpiresAt, &state.Status, &state.TempPath,
+			&state.ContentVersion, &state.Locator, &state.SizeBytes,
+			&state.ContentType, &state.LastError, &state.UpdatedAt); err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return states, nil
+}
+
 func (s *State) Delete(ctx context.Context, leaseID string) error {
 	var tempPath string
 	err := s.db.QueryRowContext(ctx, `SELECT temp_path FROM uploads WHERE lease_id = ?`, leaseID).Scan(&tempPath)

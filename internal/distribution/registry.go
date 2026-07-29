@@ -27,11 +27,11 @@ func (r *Registry) ResolvePublisher(ctx context.Context, token string) (store.Ac
 	return acceleration, nil
 }
 
-func (r *Registry) ResolveEdge(ctx context.Context, token string) (store.Acceleration, error) {
+func (r *Registry) ResolveDelivery(ctx context.Context, token string) (store.Acceleration, error) {
 	if r == nil || r.st == nil || token == "" {
 		return store.Acceleration{}, ErrInvalidCredential
 	}
-	acceleration, err := r.st.ResolveAccelerationEdgeToken(ctx, HashCredential(token))
+	acceleration, err := r.st.ResolveAccelerationDeliveryToken(ctx, HashCredential(token))
 	if err != nil {
 		return store.Acceleration{}, ErrInvalidCredential
 	}

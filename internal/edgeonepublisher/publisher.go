@@ -40,13 +40,17 @@ func newPublisher(cfg Config, state *State, client *http.Client) *Publisher {
 	}
 	publisher.heartbeat = PublisherHeartbeat{
 		Owner: cfg.Owner, Version: buildVersion(), State: "idle",
-		Capabilities: []string{"object"},
+		Capabilities: []string{"object.publish", "storage.inventory", "object.delete"},
 	}
 	return publisher
 }
 
 func (p *Publisher) Run(ctx context.Context) error {
+	if err := p.recoverInterrupted(ctx); err != nil {
+		return err
+	}
 	go p.runHeartbeats(ctx)
+	go p.runStorageLifecycle(ctx)
 	ticker := time.NewTicker(time.Duration(p.cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
 	for {
@@ -62,6 +66,29 @@ func (p *Publisher) Run(ctx context.Context) error {
 	}
 }
 
+func (p *Publisher) recoverInterrupted(ctx context.Context) error {
+	states, err := p.state.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list interrupted uploads: %w", err)
+	}
+	for _, state := range states {
+		lease := Lease{
+			ID: state.LeaseID, TrackRef: state.TrackRef, Owner: state.Owner,
+			ExpiresAt: state.ExpiresAt,
+		}
+		restartErr := fmt.Errorf("adapter restarted during %s", state.Status)
+		err := p.core.Fail(ctx, lease, restartErr, 0)
+		if err != nil && !errors.Is(err, ErrLeaseInactive) {
+			return fmt.Errorf("release interrupted lease %s: %w", state.LeaseID, err)
+		}
+		if err := p.state.Delete(ctx, state.LeaseID); err != nil {
+			return fmt.Errorf("clean interrupted upload %s: %w", state.LeaseID, err)
+		}
+		log.Printf("[edgeone] recovered interrupted lease %s (%s)", state.LeaseID, state.Status)
+	}
+	return nil
+}
+
 func (p *Publisher) runHeartbeats(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -71,6 +98,30 @@ func (p *Publisher) runHeartbeats(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+func (p *Publisher) runStorageLifecycle(ctx context.Context) {
+	reconcileTicker := time.NewTicker(6 * time.Hour)
+	deleteTicker := time.NewTicker(5 * time.Second)
+	defer reconcileTicker.Stop()
+	defer deleteTicker.Stop()
+	if err := p.ReconcileStorage(ctx); err != nil && ctx.Err() == nil {
+		log.Printf("[edgeone] inventory: %v", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-reconcileTicker.C:
+			if err := p.ReconcileStorage(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("[edgeone] inventory: %v", err)
+			}
+		case <-deleteTicker.C:
+			if err := p.DeleteOnce(ctx); err != nil && !errors.Is(err, ErrNoWork) && ctx.Err() == nil {
+				log.Printf("[edgeone] delete: %v", err)
+			}
 		}
 	}
 }
@@ -107,8 +158,8 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		p.setHeartbeat("idle", Lease{}, true, "")
 		return ErrNoWork
 	}
-	signer := NewSignerClient(managed.SignerBaseURL, managed.SignerToken, p.client)
-	if err := signer.Health(ctx); err != nil {
+	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
+	if err := backend.Health(ctx); err != nil {
 		p.setHeartbeat("degraded", Lease{}, false, err.Error())
 		return err
 	}
@@ -129,7 +180,7 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 	}
 
 	reporter := newProgressReporter(p.core, lease)
-	candidate, err := p.publish(ctx, managed, signer, lease, &state, reporter)
+	candidate, err := p.publish(ctx, managed, backend, lease, &state, reporter)
 	if err != nil {
 		retry := retryDelay(err)
 		return p.fail(ctx, lease, state, err, retry)
@@ -146,10 +197,71 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 	return nil
 }
 
+func (p *Publisher) ReconcileStorage(ctx context.Context) error {
+	managed, err := p.core.ManagedConfig(ctx)
+	if err != nil {
+		return err
+	}
+	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
+	observedAt := time.Now().UnixMilli()
+	snapshotID := fmt.Sprintf("%s-%d", p.cfg.Owner, observedAt)
+	cursor := ""
+	for {
+		objects, nextCursor, err := backend.Inventory(ctx, cursor)
+		if err != nil {
+			return err
+		}
+		if len(objects) == 0 {
+			if err := p.core.Inventory(ctx, p.cfg.Owner, snapshotID, observedAt, nil,
+				nextCursor == ""); err != nil {
+				return err
+			}
+		}
+		for start := 0; start < len(objects); start += 200 {
+			end := min(start+200, len(objects))
+			complete := nextCursor == "" && end == len(objects)
+			if err := p.core.Inventory(ctx, p.cfg.Owner, snapshotID, observedAt,
+				objects[start:end], complete); err != nil {
+				return err
+			}
+		}
+		if nextCursor == "" {
+			return nil
+		}
+		if nextCursor == cursor {
+			return errors.New("backend inventory cursor did not advance")
+		}
+		cursor = nextCursor
+	}
+}
+
+func (p *Publisher) DeleteOnce(ctx context.Context) error {
+	managed, err := p.core.ManagedConfig(ctx)
+	if err != nil {
+		return err
+	}
+	deletion, err := p.core.ClaimDeletion(ctx, p.cfg.Owner, 600)
+	if err != nil {
+		return err
+	}
+	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
+	if err := backend.Delete(ctx, deletion.Locator); err != nil {
+		reportErr := p.core.FailDeletion(ctx, deletion, err, time.Minute)
+		if reportErr != nil {
+			return fmt.Errorf("%v; report deletion failure: %w", err, reportErr)
+		}
+		return err
+	}
+	if err := p.core.CompleteDeletion(ctx, deletion); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p *Publisher) publish(
 	ctx context.Context,
 	managed ManagedConfig,
-	signer *SignerClient,
+	backend *BackendClient,
 	lease Lease,
 	state *UploadState,
 	reporter *progressReporter,
@@ -167,8 +279,25 @@ func (p *Publisher) publish(
 	if err := p.state.Put(ctx, *state); err != nil {
 		return Candidate{}, err
 	}
+	reservation, err := p.core.Reserve(ctx, lease, state.Locator, size)
+	if err != nil {
+		return Candidate{}, fmt.Errorf("reserve storage: %w", err)
+	}
+	if reservation.AlreadyPresent {
+		metadata, err := backend.Metadata(ctx, state.Locator)
+		if err != nil {
+			return Candidate{}, fmt.Errorf("verify existing object: %w", err)
+		}
+		if err := verifyMetadata(metadata, state.Locator, size, contentType); err != nil {
+			return Candidate{}, err
+		}
+		return Candidate{
+			ContentVersion: contentVersion, Locator: state.Locator, Layout: "object",
+			SizeBytes: size, ContentType: contentType, ETag: metadata.ETag,
+		}, nil
+	}
 
-	signed, err := signer.SignPUT(ctx, state.Locator, contentType)
+	signed, err := backend.SignPUT(ctx, state.Locator, contentType)
 	if err != nil {
 		return Candidate{}, fmt.Errorf("sign PUT: %w", err)
 	}
@@ -183,7 +312,7 @@ func (p *Publisher) publish(
 		return Candidate{}, err
 	}
 	_ = reporter.report(ctx, "verifying", true)
-	metadata, err := signer.Metadata(ctx, state.Locator)
+	metadata, err := backend.Metadata(ctx, state.Locator)
 	if err != nil {
 		return Candidate{}, fmt.Errorf("verify metadata: %w", err)
 	}

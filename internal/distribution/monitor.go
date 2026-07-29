@@ -44,8 +44,8 @@ func (m *HealthMonitor) checkAll(ctx context.Context) {
 		return
 	}
 	for _, acceleration := range accelerations {
-		controlOK, signerOK, detail := CheckHealth(ctx, m.client, acceleration, acceleration.SignerToken)
-		_ = m.st.UpdateAccelerationHealth(ctx, acceleration.ID, controlOK, signerOK,
+		controlOK, backendOK, detail := CheckHealth(ctx, m.client, acceleration, acceleration.BackendToken)
+		_ = m.st.UpdateAccelerationHealth(ctx, acceleration.ID, controlOK, backendOK,
 			detail, m.now().UnixMilli())
 	}
 }
@@ -54,18 +54,18 @@ func CheckHealth(
 	ctx context.Context,
 	client *http.Client,
 	acceleration store.Acceleration,
-	signerToken string,
+	backendToken string,
 ) (bool, bool, string) {
 	controlOK, controlDetail := probeHealth(ctx, client, acceleration.ControlBaseURL+"/health", "")
-	signerOK, signerDetail := probeHealth(ctx, client, acceleration.SignerBaseURL+"/health", signerToken)
+	backendOK, backendDetail := probeHealth(ctx, client, acceleration.BackendBaseURL+"/health", backendToken)
 	details := make([]string, 0, 2)
 	if !controlOK {
 		details = append(details, "control: "+controlDetail)
 	}
-	if !signerOK {
-		details = append(details, "signer: "+signerDetail)
+	if !backendOK {
+		details = append(details, "backend: "+backendDetail)
 	}
-	return controlOK, signerOK, strings.Join(details, "; ")
+	return controlOK, backendOK, strings.Join(details, "; ")
 }
 
 func probeHealth(ctx context.Context, client *http.Client, endpoint, token string) (bool, string) {

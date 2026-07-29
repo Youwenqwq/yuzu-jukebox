@@ -185,7 +185,7 @@ function validFallbackReason(value) {
   return [
     "acceleration_disabled",
     "candidate_not_ready",
-    "signer_unavailable",
+    "backend_unavailable",
   ].includes(value);
 }
 

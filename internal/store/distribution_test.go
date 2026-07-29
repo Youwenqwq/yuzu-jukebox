@@ -51,7 +51,11 @@ func TestDistributionLeaseLifecycle(t *testing.T) {
 	if err := st.CompleteDistribution(ctx, lease.ID, "wrong-owner", candidate, now+4); !errors.Is(err, ErrDistributionLeaseInvalid) {
 		t.Fatalf("wrong owner error = %v", err)
 	}
-	if err := st.CompleteDistribution(ctx, lease.ID, lease.Owner, candidate, now+5); err != nil {
+	if _, err := st.ReserveAccelerationStorage(ctx, lease.ID, lease.Owner,
+		candidate.Locator, candidate.SizeBytes, now+5); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteDistribution(ctx, lease.ID, lease.Owner, candidate, now+6); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.GetDistributionCandidate(ctx, "edgeone", "local:song")
@@ -119,7 +123,7 @@ func createDistributionTestAcceleration(t *testing.T, st *Store) {
 	_, err := st.CreateAcceleration(context.Background(), Acceleration{
 		ID: "edgeone", Name: "EdgeOne", Kind: "edgeone",
 		PublishOnCacheReady: true, ControlBaseURL: "https://control.test/yuzu-edge",
-		SignerBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		BackendBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
 		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
 	}, publisherHash, edgeHash, "signer-token")
 	if err != nil {
