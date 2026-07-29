@@ -59,8 +59,8 @@ EdgeOne production deployment。
 - Cloud Function 的 6 MiB 响应限制已经确认；持续时间、并发和计费仍需按套餐确认。
 - 尚未使用真实 `<audio>`/MPV 做播放、seek 和断线续传测试；HTTP 字节与 Range 语义已验证。
 - Blob 单对象文档上限为 25 MB，不能假设所有 Bili/长音频都能作为单对象保存。
-- P1 candidate 以 `backend + track_ref` 持久保存，尚未实现内容变化探测与自动失效；Provider
-  同一引用的音质或字节发生变化时，需要 P2 生命周期机制重新发布并清理旧对象。
+- candidate 现以 `acceleration_id + track_ref` 持久保存，仍未实现内容变化探测与自动失效；
+  Provider 同一引用的音质或字节发生变化时，需要 P2 生命周期机制重新发布并清理旧对象。
 - EdgeOne CLI 1.6.16 的 `makers env set` 存在参数与异步等待缺陷，可能以状态 0 静默退出；
   production 应通过 Makers 控制台或已修复版本写变量，并在部署日志确认变量已被拉取。
 
@@ -71,13 +71,13 @@ EdgeOne production deployment。
 Client ── /stream/v1 ──> yuzu-server
 
 公网（可选）：
-Client ── /stream/v1 ──> Edge Function
-                              │
-                              ├─ 同项目 Cloud control bridge
-                              │      ├─ ticket/candidate introspection ──> yuzu-server
-                              │      └─ 短期 Blob GET 签发
-                              ├─ 媒体字节：Range GET ───────────────────> EdgeOne Blob/COS
-                              └─ 未就绪/Blob 故障回退 ─────────────────> 现有 /stream/v1
+Client ── 主域名 /stream/v1 ──> EdgeOne 站点级 Edge Function
+                                      │
+                                      ├─ Makers Cloud control bridge
+                                      │      ├─ ticket/candidate introspection ──> yuzu-server
+                                      │      └─ 短期 Blob GET 签发
+                                      ├─ 媒体字节：Range GET ───────────────────> EdgeOne Blob/COS
+                                      └─ fetch(event.request) ──────────────────> 站点标准回源
 
 yuzu-server cache ──localhost/read-only source──> yuzu-edgeone sidecar
 yuzu-edgeone sidecar ──Cloud PUT signer ──presigned PUT──> EdgeOne Blob
@@ -87,23 +87,23 @@ yuzu-edgeone sidecar ──Cloud PUT signer ──presigned PUT──> EdgeOne B
 
 - `yuzu-server`
   - 继续负责 Provider 拉取、本地 cache、现有 stream ticket 和直出回退；
-  - 只增加通用 distribution lease/candidate/ticket introspection；
+  - 持久管理 acceleration、机器凭据、lease/candidate、publisher heartbeat 和上传进度；
   - candidate 的 locator 对 Core 是不透明字符串，不理解 Blob key。
 - `yuzu-edgeone`
-  - 独立可选进程；读取本地缓存或 localhost source；
+  - 独立可选进程；使用最小 bootstrap credential 从 Core 读取托管配置；
   - 独占租约、限速上传、失败重试、metadata 校验和 candidate 提交；
-  - 保存 EdgeOne 资源映射，不把供应商细节写进 Core。
+  - 上报存活、下载/上传进度和错误，不把 EdgeOne SDK 写进 Core。
 - Cloud Function
   - `yuzu-edge` 作为同项目控制桥，持有 Core origin/token 并保持 ticket 校验语义；
   - `yuzu-blob` 受独立 token 保护，批量签发 PUT URL、校验 metadata 和执行限定删除；
   - 隔离封装实验性短期 GET signer；
   - 官方 SDK 读取只可作为不超过 6 MiB 的小 Range fallback，不能代理完整媒体。
-- Edge Function
-  - 保持公开 `/stream/v1`；
-  - 每次请求经 Cloud control bridge 向 Core introspect ticket，保持当前切歌立即失效语义；
-  - ready 时从 Blob 流式响应，未 ready 时回退现有源站；
-  - 源站回退使用独立 origin 地址，不能再次请求公开 EdgeOne 域名造成递归；
-  - 不接触 Provider，也不持有 EdgeOne 长期凭据。
+- EdgeOne 站点级 Edge Function
+  - 在 Yuzu 主域名上通过 `/stream/v1/*` URL path 触发规则接管请求；
+  - 使用代码顶部的 Makers control absolute URL introspect ticket；
+  - ready 时从 Blob 流式响应；
+  - disabled、未 ready、control/signer/Blob 故障时通过 `fetch(event.request)` 走站点标准回源；
+  - 不接触 Provider，也不持有 Core、Signer 或 EdgeOne 长期凭据。
 
 ## 对象布局
 
@@ -209,6 +209,17 @@ manifest 至少包含：
 - [x] GET signer 提供 SDK 兼容检查、120 秒 TTL，并在不可用时回退现有源站。
 - [x] 增加发布成功率、上传字节、回退次数、ready 延迟、Blob 响应时间指标。
 
+### P1 生产化：托管资源、观测与主域名接入（已实现）
+
+- [x] acceleration 改为 `media_admin` 可创建、停用和管理的持久资源，移除 Server JSON 配置。
+- [x] publisher/edge/signer 使用独立凭据；出站 signer secret 经 `secret_key` AES-GCM 加密。
+- [x] sidecar 从 Core 读取 signer URL、token、限速、对象上限和 lease policy。
+- [x] 增加 publisher heartbeat、下载/上传字节、phase、错误、attempt history 与有界续租。
+- [x] 增加 status/requests 管理 API、健康探测、fallback 原因和最近 24 小时指标。
+- [x] 实现 staged credential prepare/activate。
+- [x] 公开 stream 函数迁移为可直接粘贴的站点级 Edge Function，Makers 只保留控制面。
+- [ ] 在真实主域名 Dashboard 部署函数与触发规则后，完成 `<audio>`/MPV 端到端回归。
+
 ### P2：分块与生命周期
 
 - [ ] 实现 1–2 MiB byte-exact chunks、manifest、批量 GET signer 和顺序 `pipeTo`。
@@ -226,17 +237,18 @@ manifest 至少包含：
 
 ## Go/No-Go
 
-核心 Go/No-Go 已通过：远端 Edge Function 可以稳定 fetch Cloud signer 与 Blob signed GET，
-并传输 16 MiB 长响应。P1 已实现并完成独立 production signer 回归；在面向真实用户启用前，
-仍需接入一个 EdgeOne 可访问的真实 Yuzu origin，补 `<audio>`/MPV 的播放、seek、断线续传测试。
+核心 Blob Go/No-Go 已通过：远端 Edge Function 可以稳定 fetch Cloud signer 与 Blob signed GET，
+并传输 16 MiB 长响应。P1 与生产化 Server/sidecar/函数代码已实现；在面向真实用户启用前，
+仍需把站点函数粘贴到主域名 Dashboard、配置 `/stream/v1/*` 触发规则，并补
+`<audio>`/MPV 的播放、seek、断线续传测试。
 
 Cloud Function 官方 SDK 拼接不能作为整轨 fallback，因为响应超过 6 MiB 会被平台返回
 `413`。整轨 fallback 必须回现有 Yuzu 源站，或继续走 Edge Function → signed Blob GET。
 
-## P1 部署入口
+## 部署入口
 
-- Core 与 sidecar 配置、Makers 环境变量和健康检查见
+- acceleration CRUD、Core/Makers 凭据、sidecar bootstrap、站点函数粘贴与触发规则见
   [`deploy/edgeone/README.md`](../deploy/edgeone/README.md)。
-- sidecar 示例配置见 [`edgeone.example.json`](../edgeone.example.json)。
-- 公网必须在 EdgeOne 层把同一外部主机的 `/stream/v1/*` 路由到 Makers 工程；其余 REST/WS
-  仍到 Core。若让源站反向代理 Blob 响应，媒体字节仍会经过 3 Mbps 服务器，优化将失效。
+- sidecar 最小示例配置见 [`edgeone.example.json`](../edgeone.example.json)。
+- 站点函数代码见 [`deploy/edgeone-site/stream.js`](../deploy/edgeone-site/stream.js)；
+  粘贴前只需修改顶部非秘密 `CONTROL_ORIGIN` 常量。

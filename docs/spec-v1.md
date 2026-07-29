@@ -747,6 +747,35 @@ actor resolve 与绑定码兑换使用 Integration token；绑定码签发使用
 - DELETE scope/subject 的 body 值必须匹配当前记录；grant 的 `room_id/principal_id` 必须与路径一致。任何不匹配返回 409 `conflict`，不存在的绑定/链接/grant 返回 404 `not_found`。
 - grant 当前唯一支持的 capability 是字面量 `"controller"`；其它值返回 400 `bad_request`。
 
+### 6.5 外部加速资源
+
+Acceleration 是由 `media_admin` 管理的持久机器资源，不从 `config.json` 读取。当前唯一
+`kind` 为 `edgeone`。资源创建时保持 disabled，并一次性返回 publisher、edge 与 signer
+三种 plaintext credential；后续查询只返回 credential-configured/pending 布尔值。
+
+| 方法与路径 | 合同 |
+|---|---|
+| `GET /api/v1/accelerations` | 列出资源，不含任何 token/hash |
+| `POST /api/v1/accelerations` | 创建 disabled 资源；HTTP 201 返回资源和三种一次性 token |
+| `GET /api/v1/accelerations/{id}` | 返回持久配置、健康状态与 credential flags |
+| `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy 或 enabled；启用前强制 readiness |
+| `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且无 lease/candidate 的资源 |
+| `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、累计与最近 24 小时指标 |
+| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 pending/uploading/failed/ready 请求 |
+| `POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare` | 生成一次性 pending token |
+| `POST /api/v1/accelerations/{id}/credentials/{purpose}/activate` | 验证并切换 pending token |
+
+`purpose` 仅允许 `publisher|edge|signer`。pending publisher/edge token 在切换窗口内可认证；
+signer activate 前必须通过 Makers signer health。启用要求端点、三种 current credential、
+control/signer health 与 45 秒内 publisher heartbeat 均存在，否则返回
+409 `acceleration_not_ready` 并在 error 中给出 `problems`。
+
+内部 `/internal/v1/distribution/*` 路径仅接受 acceleration-scoped machine token。调用方
+不能在 body 中选择 acceleration ID；Server 必须从 token 解析资源。publisher config
+响应可向已认证 sidecar 返回解密后的 signer token、lease TTL、限速和对象上限。进度阶段
+只允许 `claimed→downloading→uploading→verifying→completing` 的非逆向转换，字节计数
+必须单调增加；合法进度更新对 lease 做受资源 TTL 上限约束的续租。
+
 ## 7. 错误码
 
 WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；REST 使用 6.1 的 `{"error":{"code","message"}}`。`message` 面向诊断，可变；Client MUST 按 `code` 分支。
@@ -764,6 +793,9 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `conflict` | 409 | REST 当前状态冲突、重复资源、请求与已有绑定不匹配 |
 | `idempotency_conflict` | 409 | 同一幂等 key 与操作被用于不同请求 body |
 | `request_in_progress` | 409 | 同一幂等请求尚未完成；Client 可稍后重试 |
+| `acceleration_not_ready` | 409 | 资源启用前的 endpoint/credential/health/publisher readiness 未满足 |
+| `credential_not_pending` | 409 | activation 没有可切换的 pending credential，或 signer health 验证失败 |
+| `acceleration_not_empty` | 409 | disabled acceleration 仍拥有 lease 或 ready candidate |
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |
 | `internal` | 500 | 服务端内部错误 |

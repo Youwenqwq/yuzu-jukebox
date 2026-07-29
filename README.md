@@ -47,7 +47,8 @@ go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone  # 公网低带宽部署可选
 ```
 
 公网源站带宽较小时，可选用 EdgeOne Blob + Functions 旁路分发缓存文件；局域网部署无需启用。
-参见 [EdgeOne 旁路分发设计与部署](docs/edgeone-distribution.md)。
+外部加速通过 `media_admin` API 持久管理，不写入 `config.json`。参见
+[EdgeOne 旁路分发设计与部署](docs/edgeone-distribution.md)。
 
 `config.json` 示例：
 

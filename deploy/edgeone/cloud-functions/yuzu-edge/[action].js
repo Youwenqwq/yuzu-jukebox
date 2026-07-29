@@ -55,17 +55,19 @@ async function introspect(request) {
     return copyCoreError(response);
   }
   const value = await response.json();
-  const originURL = new URL(
-    `/stream/v1/${encodeURIComponent(trackRef)}?ticket=${encodeURIComponent(ticket)}`,
-    origin,
-  );
   const result = {
     valid: true,
+    enabled: value?.enabled !== false,
+    acceleration_id: value?.acceleration_id || "",
     track_ref: trackRef,
     ready: false,
     candidate: null,
     signed_url: null,
-    origin_url: originURL.toString(),
+    fallback_reason:
+      value?.fallback_reason ||
+      (value?.enabled === false
+        ? "acceleration_disabled"
+        : "candidate_not_ready"),
   };
   const candidate = value?.candidate;
   if (
@@ -90,8 +92,10 @@ async function introspect(request) {
         etag: candidate.etag || "",
       };
       result.signed_url = signed.url;
+      result.fallback_reason = "";
     } catch (cause) {
       console.warn("GET signer unavailable", cause?.message || cause);
+      result.fallback_reason = "signer_unavailable";
     }
   }
   return json(result);
@@ -110,6 +114,7 @@ async function event(request) {
         track_ref: trackRef,
         ticket,
         kind: body?.kind,
+        reason: body?.reason || "",
         duration_ms: boundedInt(body?.duration_ms, 0, 60 * 60 * 1000, 0),
         bytes: boundedInt(body?.bytes, 0, Number.MAX_SAFE_INTEGER, 0),
       }),
