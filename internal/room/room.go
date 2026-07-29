@@ -27,6 +27,28 @@ type ClientConn interface {
 	Identity() auth.Identity
 	// Send 非阻塞；客户端发送缓冲满时由实现方断开。
 	Send(msg any)
+	// Interests 声明本连接要订阅的房间状态流。
+	// 普通 Client / Integration 会话应返回 InterestAll；
+	// Headless Player 只返回 InterestPlayback。
+	Interests() RoomInterest
+}
+
+// RoomInterest 是房间状态广播的订阅位集。
+type RoomInterest uint8
+
+const (
+	InterestPlayback RoomInterest = 1 << iota
+	InterestQueue
+	InterestRadio
+	InterestListeners
+
+	// InterestAll 是普通会话的默认订阅：完整房间状态。
+	InterestAll = InterestPlayback | InterestQueue | InterestRadio | InterestListeners
+)
+
+// Has 报告 interest 是否包含 flag 中的全部位。
+func (i RoomInterest) Has(flag RoomInterest) bool {
+	return i&flag == flag
 }
 
 // QueueEntry 队列条目。StreamURL 仅在下发给具体客户端时填充（按身份签发票据）。
@@ -389,8 +411,13 @@ func (r *Room) Run(ctx context.Context) {
 		_ = r.st.ReplaceQueue(ctx, r.ID, rows)
 	}
 
-	broadcast := func(build func(c ClientConn) any) {
+	// broadcast 只推送给声明了对应 interest 的连接。
+	// 新状态流必须选明确 interest，避免默认打到所有连接。
+	broadcast := func(interest RoomInterest, build func(c ClientConn) any) {
 		for _, c := range clients {
+			if !c.Interests().Has(interest) {
+				continue
+			}
 			c.Send(build(c))
 		}
 	}
@@ -432,6 +459,9 @@ func (r *Room) Run(ctx context.Context) {
 	listenersSnapshot := func() []ListenerSnapshot {
 		listeners := make([]ListenerSnapshot, 0, len(clients))
 		for _, c := range clients {
+			if !c.Interests().Has(InterestListeners) {
+				continue
+			}
 			id := c.Identity()
 			listeners = append(listeners, ListenerSnapshot{ID: id.ID, Name: id.Name})
 		}
@@ -479,7 +509,7 @@ func (r *Room) Run(ctx context.Context) {
 	// stopRadio 退出电台并广播
 	stopRadio := func() {
 		radio = nil
-		broadcast(func(ClientConn) any { return radioMsg() })
+		broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
 	}
 
 	// refill 电台补充：从源取一批曲目追加到队列。
@@ -505,7 +535,7 @@ func (r *Room) Run(ctx context.Context) {
 		}
 		if len(tracks) > 0 {
 			persistQueue()
-			broadcast(func(ClientConn) any { return queueMsg() })
+			broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
 		}
 		if exhausted {
 			stopRadio()
@@ -561,7 +591,7 @@ func (r *Room) Run(ctx context.Context) {
 					timer.Stop()
 					timer = nil
 				}
-				broadcast(playbackMsg)
+				broadcast(InterestPlayback, playbackMsg)
 				return
 			}
 			next := queue[0]
@@ -591,8 +621,8 @@ func (r *Room) Run(ctx context.Context) {
 			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
 		}
 		scheduleEnd()
-		broadcast(playbackMsg)
-		broadcast(func(ClientConn) any { return queueMsg() })
+		broadcast(InterestPlayback, playbackMsg)
+		broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
 	}
 
 	// 启动即恢复：重启后播放状态丢失但队列仍在，自动续播队首。
@@ -609,15 +639,28 @@ func (r *Room) Run(ctx context.Context) {
 			switch a.kind {
 			case actJoin:
 				clients[a.client.ID()] = a.client
-				// 给新成员发全量快照：playback（含其专属票据）、队列、听众、电台
-				a.client.Send(playbackMsg(a.client))
-				a.client.Send(queueMsg())
-				a.client.Send(radioMsg())
-				broadcast(func(ClientConn) any { return listenersMsg() })
+				// 按连接声明的 interest 推入房快照。
+				// Headless Player 通常只订 InterestPlayback（含专属 stream ticket）。
+				interest := a.client.Interests()
+				if interest.Has(InterestPlayback) {
+					a.client.Send(playbackMsg(a.client))
+				}
+				if interest.Has(InterestQueue) {
+					a.client.Send(queueMsg())
+				}
+				if interest.Has(InterestRadio) {
+					a.client.Send(radioMsg())
+				}
+				if interest.Has(InterestListeners) {
+					broadcast(InterestListeners, func(ClientConn) any { return listenersMsg() })
+				}
 
 			case actLeave:
+				wasListener := a.client.Interests().Has(InterestListeners)
 				delete(clients, a.client.ID())
-				broadcast(func(ClientConn) any { return listenersMsg() })
+				if wasListener {
+					broadcast(InterestListeners, func(ClientConn) any { return listenersMsg() })
+				}
 
 			case actAdd:
 				entries := a.entries
@@ -652,7 +695,7 @@ func (r *Room) Run(ctx context.Context) {
 				if playback == nil || playback.Current == nil {
 					advance("") // 空闲时自动开播（内部会广播 queue + playback）
 				} else {
-					broadcast(func(ClientConn) any { return queueMsg() })
+					broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
 					if wasEmpty {
 						// 追加前队列为空：新条目即队首候补，预热缓存
 						go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
@@ -678,7 +721,7 @@ func (r *Room) Run(ctx context.Context) {
 				}
 				queue = append(queue[:idx], queue[idx+1:]...)
 				persistQueue()
-				broadcast(func(ClientConn) any { return queueMsg() })
+				broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
 				a.result <- nil
 
 			case actMove:
@@ -701,7 +744,7 @@ func (r *Room) Run(ctx context.Context) {
 					break
 				}
 				persistQueue()
-				broadcast(func(ClientConn) any { return queueMsg() })
+				broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
 				a.result <- nil
 
 			case actPause:
@@ -716,7 +759,7 @@ func (r *Room) Run(ctx context.Context) {
 					timer.Stop()
 					timer = nil
 				}
-				broadcast(playbackMsg)
+				broadcast(InterestPlayback, playbackMsg)
 				a.result <- nil
 
 			case actResume:
@@ -727,7 +770,7 @@ func (r *Room) Run(ctx context.Context) {
 				playback.Playing = true
 				playback.UpdatedAt = now
 				scheduleEnd()
-				broadcast(playbackMsg)
+				broadcast(InterestPlayback, playbackMsg)
 				a.result <- nil
 
 			case actSeek:
@@ -745,7 +788,7 @@ func (r *Room) Run(ctx context.Context) {
 				playback.PositionMs = p
 				playback.UpdatedAt = now
 				scheduleEnd()
-				broadcast(playbackMsg)
+				broadcast(InterestPlayback, playbackMsg)
 				a.result <- nil
 
 			case actSkip:
@@ -767,7 +810,7 @@ func (r *Room) Run(ctx context.Context) {
 					break
 				}
 				radio = &radioState{src: src, spec: a.source, shuffle: a.shuffle, once: a.once}
-				broadcast(func(ClientConn) any { return radioMsg() })
+				broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
 				if playback == nil || playback.Current == nil {
 					advance("") // 空闲时电台立即开播
 				} else if len(queue) < 3 {
@@ -780,7 +823,13 @@ func (r *Room) Run(ctx context.Context) {
 				a.result <- nil
 
 			case actDirectorySnapshot:
-				snapshot := DirectorySnapshot{ListenerCount: len(clients)}
+				listenerCount := 0
+				for _, c := range clients {
+					if c.Interests().Has(InterestListeners) {
+						listenerCount++
+					}
+				}
+				snapshot := DirectorySnapshot{ListenerCount: listenerCount}
 				if playback != nil && playback.Current != nil {
 					cur := playback.Current
 					coverURL := cur.CoverURL

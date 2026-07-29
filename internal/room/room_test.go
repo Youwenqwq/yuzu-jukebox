@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -149,13 +150,20 @@ func TestAddBatchAtomicQuota(t *testing.T) {
 }
 
 type recordingClient struct {
-	id       auth.Identity
-	messages chan any
+	id        auth.Identity
+	messages  chan any
+	interests RoomInterest // 0 = 默认 InterestAll
 }
 
 func (c *recordingClient) ID() string              { return c.id.ID }
 func (c *recordingClient) Identity() auth.Identity { return c.id }
 func (c *recordingClient) Send(msg any)            { c.messages <- msg }
+func (c *recordingClient) Interests() RoomInterest {
+	if c.interests == 0 {
+		return InterestAll
+	}
+	return c.interests
+}
 
 func TestAddSnapshotsRequesterName(t *testing.T) {
 	r, st := newTestRoom(t, "")
@@ -251,4 +259,147 @@ func TestSnapshotIsReadOnlyAndDoesNotJoin(t *testing.T) {
 	if len(again.Listeners) != 0 {
 		t.Fatalf("second snapshot listeners = %#v, want no implicit listener", again.Listeners)
 	}
+}
+
+// TestPlayerPlaneReceivesOnlyPlayback ensures headless players only get
+// playback.changed. Full queue snapshots are UI state and can exceed the
+// default WebSocket frame limit when the queue is long.
+func TestPlayerPlaneReceivesOnlyPlayback(t *testing.T) {
+	r, _ := newTestRoom(t, "")
+	dj := auth.Identity{
+		ID: "u_dj", Name: "DJ", Kind: "guest",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+	if err := r.AddFor(dj, mkEntry("local:playing", dj.ID)); err != nil {
+		t.Fatal(err)
+	}
+	batch := make([]QueueEntry, 0, 120)
+	for i := range 120 {
+		batch = append(batch, mkEntry("local:queued-"+strconv.Itoa(i), dj.ID))
+	}
+	if err := r.AddBatchFor(dj, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	player := &recordingClient{
+		id: auth.Identity{
+			ID: "pl_speaker", Name: "Speaker", Kind: "player", PlayerID: "speaker-1",
+		},
+		messages:  make(chan any, 8),
+		interests: InterestPlayback,
+	}
+	r.Join(player)
+
+	msg := waitMsg(t, player.messages, time.Second)
+	if typ := msgType(t, msg); typ != "playback.changed" {
+		t.Fatalf("player first message = %s, want playback.changed", typ)
+	}
+	select {
+	case extra := <-player.messages:
+		t.Fatalf("player received unexpected extra message: %s", msgType(t, extra))
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	listener := &recordingClient{id: dj, messages: make(chan any, 16)}
+	r.Join(listener)
+	got := map[string]bool{}
+	deadline := time.Now().Add(time.Second)
+	for len(got) < 4 && time.Now().Before(deadline) {
+		select {
+		case m := <-listener.messages:
+			got[msgType(t, m)] = true
+		case <-time.After(time.Until(deadline)):
+		}
+	}
+	for _, want := range []string{"playback.changed", "queue.changed", "radio.changed", "listeners.changed"} {
+		if !got[want] {
+			t.Fatalf("listener missing %s; got %v", want, got)
+		}
+	}
+
+	// listeners.changed must not list the headless player.
+	second := &recordingClient{
+		id: auth.Identity{
+			ID: "u_second", Name: "Second", Kind: "guest",
+			Roles: []string{auth.RoleListener},
+		},
+		messages: make(chan any, 8),
+	}
+	r.Join(second)
+	var listenersMsg any
+	for {
+		m := waitMsg(t, second.messages, time.Second)
+		if msgType(t, m) != "listeners.changed" {
+			continue
+		}
+		listenersMsg = m
+		break
+	}
+	raw, err := json.Marshal(listenersMsg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data struct {
+			Listeners []ListenerSnapshot `json:"listeners"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range envelope.Data.Listeners {
+		if l.ID == player.id.ID || l.Name == player.id.Name {
+			t.Fatalf("listeners included player: %#v", envelope.Data.Listeners)
+		}
+	}
+
+	if err := r.AddFor(dj, mkEntry("local:extra", dj.ID)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case extra := <-player.messages:
+		t.Fatalf("player received queue fanout: %s", msgType(t, extra))
+	case <-time.After(100 * time.Millisecond):
+	}
+	queueSeen := false
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case m := <-listener.messages:
+			if msgType(t, m) == "queue.changed" {
+				queueSeen = true
+				deadline = time.Time{}
+			}
+		case <-time.After(time.Until(deadline)):
+		}
+	}
+	if !queueSeen {
+		t.Fatal("listener did not receive queue.changed after add")
+	}
+}
+
+func waitMsg(t *testing.T, ch <-chan any, timeout time.Duration) any {
+	t.Helper()
+	select {
+	case msg := <-ch:
+		return msg
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for room message")
+		return nil
+	}
+}
+
+func msgType(t *testing.T, msg any) string {
+	t.Helper()
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Type
 }

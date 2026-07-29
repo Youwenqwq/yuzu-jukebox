@@ -22,6 +22,9 @@ type directoryClient struct{ identity auth.Identity }
 func (c *directoryClient) ID() string              { return c.identity.ID }
 func (c *directoryClient) Identity() auth.Identity { return c.identity }
 func (c *directoryClient) Send(any)                {}
+func (c *directoryClient) Interests() room.RoomInterest {
+	return room.InterestAll
+}
 
 type roomsResponse struct {
 	Rooms []struct {

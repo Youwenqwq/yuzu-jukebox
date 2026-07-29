@@ -103,6 +103,16 @@ func (c *client) Identity() auth.Identity {
 	return *c.identity
 }
 
+// Interests 实现 room.ClientConn。
+// 普通 Client / Integration 默认 InterestAll；
+// Player-key 会话只订阅 playback，避免长队列撑爆 WS 帧。
+func (c *client) Interests() room.RoomInterest {
+	if c.identity != nil && (c.identity.PlayerID != "" || c.identity.Kind == "player") {
+		return room.InterestPlayback
+	}
+	return room.InterestAll
+}
+
 // Send 实现 room.ClientConn：非阻塞；缓冲满则断开慢客户端。
 func (c *client) Send(msg any) {
 	select {
