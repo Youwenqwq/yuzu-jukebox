@@ -11,25 +11,30 @@ import (
 
 const (
 	defaultPollSeconds     = 2
-	defaultLeaseSeconds    = 600
-	defaultUploadRateBPS   = 187_500 // 1.5 Mbps
-	defaultMaxObjectBytes  = 23 << 20
 	defaultHTTPTimeoutSecs = 600
 )
 
+// Config contains only local bootstrap state. Acceleration endpoints and
+// publishing policy are loaded from Yuzu Core using PublisherToken.
 type Config struct {
 	CoreURL        string `json:"core_url"`
 	PublisherToken string `json:"publisher_token"`
-	SignerBaseURL  string `json:"signer_base_url"`
-	SignerToken    string `json:"signer_token"`
 	StatePath      string `json:"state_path"`
 	Owner          string `json:"owner"`
 
-	PollIntervalSeconds      int   `json:"poll_interval_seconds"`
-	LeaseSeconds             int   `json:"lease_seconds"`
-	UploadRateBytesPerSecond int64 `json:"upload_rate_bytes_per_second"`
-	MaxObjectBytes           int64 `json:"max_object_bytes"`
-	HTTPTimeoutSeconds       int   `json:"http_timeout_seconds"`
+	PollIntervalSeconds int `json:"poll_interval_seconds"`
+	HTTPTimeoutSeconds  int `json:"http_timeout_seconds"`
+}
+
+type ManagedConfig struct {
+	AccelerationID           string `json:"acceleration_id"`
+	Enabled                  bool   `json:"enabled"`
+	Kind                     string `json:"kind"`
+	SignerBaseURL            string `json:"signer_base_url"`
+	SignerToken              string `json:"signer_token"`
+	LeaseTTLSeconds          int    `json:"lease_ttl_seconds"`
+	UploadRateBytesPerSecond int64  `json:"upload_rate_bytes_per_second"`
+	MaxObjectBytes           int64  `json:"max_object_bytes"`
 }
 
 func DefaultConfig() Config {
@@ -38,24 +43,20 @@ func DefaultConfig() Config {
 		hostname = "yuzu-edgeone"
 	}
 	return Config{
-		StatePath:                "data/yuzu-edgeone.db",
-		Owner:                    hostname,
-		PollIntervalSeconds:      defaultPollSeconds,
-		LeaseSeconds:             defaultLeaseSeconds,
-		UploadRateBytesPerSecond: defaultUploadRateBPS,
-		MaxObjectBytes:           defaultMaxObjectBytes,
-		HTTPTimeoutSeconds:       defaultHTTPTimeoutSecs,
+		CoreURL: "http://127.0.0.1:8080", StatePath: "data/yuzu-edgeone.db",
+		Owner: hostname, PollIntervalSeconds: defaultPollSeconds,
+		HTTPTimeoutSeconds: defaultHTTPTimeoutSecs,
 	}
 }
 
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
-	f, err := os.Open(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return cfg, fmt.Errorf("open config: %w", err)
 	}
-	defer f.Close()
-	decoder := json.NewDecoder(f)
+	defer file.Close()
+	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
@@ -67,34 +68,38 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	for name, value := range map[string]string{
-		"core_url":        c.CoreURL,
-		"publisher_token": c.PublisherToken,
-		"signer_base_url": c.SignerBaseURL,
-		"signer_token":    c.SignerToken,
-		"state_path":      c.StatePath,
-		"owner":           c.Owner,
-	} {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("%s is required", name)
-		}
+	if strings.TrimSpace(c.PublisherToken) == "" {
+		return errors.New("publisher_token is required")
 	}
-	for name, raw := range map[string]string{
-		"core_url": c.CoreURL, "signer_base_url": c.SignerBaseURL,
-	} {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("%s must be an absolute http(s) URL", name)
-		}
+	if strings.TrimSpace(c.Owner) == "" {
+		return errors.New("owner is required")
 	}
-	if c.PollIntervalSeconds <= 0 || c.LeaseSeconds <= 0 || c.HTTPTimeoutSeconds <= 0 {
-		return errors.New("poll_interval_seconds, lease_seconds and http_timeout_seconds must be positive")
+	if strings.TrimSpace(c.StatePath) == "" {
+		return errors.New("state_path is required")
 	}
-	if c.UploadRateBytesPerSecond < 0 {
-		return errors.New("upload_rate_bytes_per_second must not be negative")
+	parsed, err := url.Parse(c.CoreURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errors.New("core_url must be an absolute URL")
 	}
-	if c.MaxObjectBytes <= 0 {
-		return errors.New("max_object_bytes must be positive")
+	if c.PollIntervalSeconds <= 0 {
+		return errors.New("poll_interval_seconds must be positive")
+	}
+	if c.HTTPTimeoutSeconds <= 0 {
+		return errors.New("http_timeout_seconds must be positive")
+	}
+	return nil
+}
+
+func (c ManagedConfig) Validate() error {
+	if c.AccelerationID == "" || c.Kind != "edgeone" || c.SignerToken == "" {
+		return errors.New("managed acceleration configuration is incomplete")
+	}
+	parsed, err := url.Parse(c.SignerBaseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errors.New("managed signer_base_url must be an absolute URL")
+	}
+	if c.LeaseTTLSeconds <= 0 || c.UploadRateBytesPerSecond < 0 || c.MaxObjectBytes <= 0 {
+		return errors.New("managed acceleration limits are invalid")
 	}
 	return nil
 }

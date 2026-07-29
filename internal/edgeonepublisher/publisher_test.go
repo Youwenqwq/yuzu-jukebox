@@ -67,8 +67,8 @@ func TestPublisherRejectsOversizedObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { state.Close() })
+	fake.maxObjectBytes = 64
 	cfg := testPublisherConfig()
-	cfg.MaxObjectBytes = 64
 	publisher := newPublisher(cfg, state, &http.Client{Transport: fake, Timeout: time.Minute})
 	err = publisher.PublishOnce(context.Background())
 	var tooLarge objectTooLargeError
@@ -88,9 +88,8 @@ func TestPublisherRejectsOversizedObject(t *testing.T) {
 func testPublisherConfig() Config {
 	return Config{
 		CoreURL: "https://core.test", PublisherToken: "publisher-token",
-		SignerBaseURL: "https://signer.test/yuzu-blob", SignerToken: "signer-token",
-		Owner: "publisher-1", PollIntervalSeconds: 1, LeaseSeconds: 600,
-		UploadRateBytesPerSecond: 0, MaxObjectBytes: 1 << 20, HTTPTimeoutSeconds: 60,
+		StatePath: "publisher.db", Owner: "publisher-1",
+		PollIntervalSeconds: 1, HTTPTimeoutSeconds: 60,
 	}
 }
 
@@ -104,14 +103,26 @@ type publisherTransport struct {
 	uploadCacheControl string
 	completed          Candidate
 	failRetrySeconds   int
+	maxObjectBytes     int64
 }
 
 func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	switch {
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/distribution/publisher/config":
+		maxObjectBytes := f.maxObjectBytes
+		if maxObjectBytes == 0 {
+			maxObjectBytes = 1 << 20
+		}
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
+			"acceleration_id": "edgeone-main", "enabled": true, "kind": "edgeone",
+			"signer_base_url": "https://signer.test/yuzu-blob",
+			"signer_token":    "signer-token", "lease_ttl_seconds": 600,
+			"upload_rate_bytes_per_second": 0, "max_object_bytes": maxObjectBytes,
+		})
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/distribution/leases":
 		return jsonHTTPResponse(request, http.StatusCreated, map[string]any{
 			"lease": map[string]any{
-				"id": "lease-1", "backend": "edgeone", "track_ref": "local:song",
+				"id": "lease-1", "acceleration_id": "edgeone-main", "track_ref": "local:song",
 				"owner": "publisher-1", "expires_at": time.Now().Add(10 * time.Minute).UnixMilli(),
 				"created_at": time.Now().UnixMilli(),
 			},
@@ -127,6 +138,10 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 			Body:          io.NopCloser(bytes.NewReader(f.content)),
 			ContentLength: int64(len(f.content)), Request: request,
 		}, nil
+	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/progress"):
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"lease": map[string]any{"id": "lease-1"}})
+	case request.URL.Host == "signer.test" && strings.HasSuffix(request.URL.Path, "/health"):
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"ok": true})
 	case request.URL.Host == "signer.test" && strings.HasSuffix(request.URL.Path, "/put-urls"):
 		locator := "media/" + f.expectedVersion + "/object"
 		if f.expectedVersion == "" {

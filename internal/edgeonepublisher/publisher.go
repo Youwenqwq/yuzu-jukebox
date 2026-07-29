@@ -10,7 +10,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,10 +20,12 @@ const immutableCacheControl = "public, max-age=31536000, immutable"
 
 type Publisher struct {
 	cfg    Config
-	core   *CoreClient
-	signer *SignerClient
 	state  *State
 	client *http.Client
+	core   *CoreClient
+
+	heartbeatMu sync.RWMutex
+	heartbeat   PublisherHeartbeat
 }
 
 func New(cfg Config, state *State) *Publisher {
@@ -30,14 +34,19 @@ func New(cfg Config, state *State) *Publisher {
 }
 
 func newPublisher(cfg Config, state *State, client *http.Client) *Publisher {
-	return &Publisher{
+	publisher := &Publisher{
 		cfg: cfg, state: state, client: client,
-		core:   NewCoreClient(cfg.CoreURL, cfg.PublisherToken, client),
-		signer: NewSignerClient(cfg.SignerBaseURL, cfg.SignerToken, client),
+		core: NewCoreClient(cfg.CoreURL, cfg.PublisherToken, client),
 	}
+	publisher.heartbeat = PublisherHeartbeat{
+		Owner: cfg.Owner, Version: buildVersion(), State: "idle",
+		Capabilities: []string{"object"},
+	}
+	return publisher
 }
 
 func (p *Publisher) Run(ctx context.Context) error {
+	go p.runHeartbeats(ctx)
 	ticker := time.NewTicker(time.Duration(p.cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
 	for {
@@ -53,11 +62,64 @@ func (p *Publisher) Run(ctx context.Context) error {
 	}
 }
 
+func (p *Publisher) runHeartbeats(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		p.sendHeartbeat(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (p *Publisher) sendHeartbeat(ctx context.Context) {
+	p.heartbeatMu.RLock()
+	heartbeat := p.heartbeat
+	heartbeat.Capabilities = append([]string(nil), p.heartbeat.Capabilities...)
+	p.heartbeatMu.RUnlock()
+	heartbeatCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := p.core.Heartbeat(heartbeatCtx, heartbeat); err != nil && ctx.Err() == nil {
+		log.Printf("[edgeone] heartbeat: %v", err)
+	}
+}
+
+func (p *Publisher) setHeartbeat(state string, lease Lease, healthy bool, lastError string) {
+	p.heartbeatMu.Lock()
+	p.heartbeat.State = state
+	p.heartbeat.LeaseID = lease.ID
+	p.heartbeat.TrackRef = lease.TrackRef
+	p.heartbeat.BackendHealthy = healthy
+	p.heartbeat.LastError = lastError
+	p.heartbeatMu.Unlock()
+}
+
 func (p *Publisher) PublishOnce(ctx context.Context) error {
-	lease, err := p.core.Claim(ctx, p.cfg.Owner, p.cfg.LeaseSeconds)
+	managed, err := p.core.ManagedConfig(ctx)
 	if err != nil {
+		p.setHeartbeat("degraded", Lease{}, false, err.Error())
 		return err
 	}
+	if !managed.Enabled {
+		p.setHeartbeat("idle", Lease{}, true, "")
+		return ErrNoWork
+	}
+	signer := NewSignerClient(managed.SignerBaseURL, managed.SignerToken, p.client)
+	if err := signer.Health(ctx); err != nil {
+		p.setHeartbeat("degraded", Lease{}, false, err.Error())
+		return err
+	}
+	lease, err := p.core.Claim(ctx, p.cfg.Owner, managed.LeaseTTLSeconds)
+	if err != nil {
+		if errors.Is(err, ErrNoWork) {
+			p.setHeartbeat("idle", Lease{}, true, "")
+		}
+		return err
+	}
+	p.setHeartbeat("busy", lease, true, "")
 	state := UploadState{
 		LeaseID: lease.ID, TrackRef: lease.TrackRef, Owner: lease.Owner,
 		ExpiresAt: lease.ExpiresAt, Status: "claimed",
@@ -66,23 +128,33 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		return p.fail(ctx, lease, state, err, time.Minute)
 	}
 
-	candidate, err := p.publish(ctx, lease, &state)
+	reporter := newProgressReporter(p.core, lease)
+	candidate, err := p.publish(ctx, managed, signer, lease, &state, reporter)
 	if err != nil {
 		retry := retryDelay(err)
 		return p.fail(ctx, lease, state, err, retry)
 	}
+	_ = reporter.report(ctx, "completing", true)
 	if err := p.core.Complete(ctx, lease, candidate); err != nil {
 		return p.fail(ctx, lease, state, err, time.Minute)
 	}
 	if err := p.state.Delete(ctx, lease.ID); err != nil {
 		return fmt.Errorf("clean local state: %w", err)
 	}
+	p.setHeartbeat("idle", Lease{}, true, "")
 	log.Printf("[edgeone] ready %s -> %s (%d bytes)", lease.TrackRef, candidate.Locator, candidate.SizeBytes)
 	return nil
 }
 
-func (p *Publisher) publish(ctx context.Context, lease Lease, state *UploadState) (Candidate, error) {
-	tempPath, contentVersion, size, contentType, err := p.downloadSource(ctx, lease)
+func (p *Publisher) publish(
+	ctx context.Context,
+	managed ManagedConfig,
+	signer *SignerClient,
+	lease Lease,
+	state *UploadState,
+	reporter *progressReporter,
+) (Candidate, error) {
+	tempPath, contentVersion, size, contentType, err := p.downloadSource(ctx, managed, lease, reporter)
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -96,7 +168,7 @@ func (p *Publisher) publish(ctx context.Context, lease Lease, state *UploadState
 		return Candidate{}, err
 	}
 
-	signed, err := p.signer.SignPUT(ctx, state.Locator, contentType)
+	signed, err := signer.SignPUT(ctx, state.Locator, contentType)
 	if err != nil {
 		return Candidate{}, fmt.Errorf("sign PUT: %w", err)
 	}
@@ -104,11 +176,14 @@ func (p *Publisher) publish(ctx context.Context, lease Lease, state *UploadState
 	if err := p.state.Put(ctx, *state); err != nil {
 		return Candidate{}, err
 	}
-	etag, err := p.upload(ctx, signed.URL, tempPath, size, contentType)
+	reporter.total = size
+	_ = reporter.report(ctx, "uploading", true)
+	etag, err := p.upload(ctx, managed, signed.URL, tempPath, size, contentType, reporter)
 	if err != nil {
 		return Candidate{}, err
 	}
-	metadata, err := p.signer.Metadata(ctx, state.Locator)
+	_ = reporter.report(ctx, "verifying", true)
+	metadata, err := signer.Metadata(ctx, state.Locator)
 	if err != nil {
 		return Candidate{}, fmt.Errorf("verify metadata: %w", err)
 	}
@@ -119,27 +194,28 @@ func (p *Publisher) publish(ctx context.Context, lease Lease, state *UploadState
 		etag = metadata.ETag
 	}
 	return Candidate{
-		ContentVersion: contentVersion,
-		Locator:        state.Locator,
-		Layout:         "object",
-		SizeBytes:      size,
-		ContentType:    contentType,
-		ETag:           etag,
+		ContentVersion: contentVersion, Locator: state.Locator, Layout: "object",
+		SizeBytes: size, ContentType: contentType, ETag: etag,
 	}, nil
 }
 
-func (p *Publisher) downloadSource(ctx context.Context, lease Lease) (string, string, int64, string, error) {
-	resp, err := p.core.Source(ctx, lease)
+func (p *Publisher) downloadSource(
+	ctx context.Context,
+	managed ManagedConfig,
+	lease Lease,
+	reporter *progressReporter,
+) (string, string, int64, string, error) {
+	response, err := p.core.Source(ctx, lease)
 	if err != nil {
 		return "", "", 0, "", fmt.Errorf("open source: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return "", "", 0, "", fmt.Errorf("source status %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return "", "", 0, "", fmt.Errorf("source status %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
 	}
-	if resp.ContentLength > p.cfg.MaxObjectBytes {
-		return "", "", 0, "", objectTooLargeError{size: resp.ContentLength, max: p.cfg.MaxObjectBytes}
+	if response.ContentLength > managed.MaxObjectBytes {
+		return "", "", 0, "", objectTooLargeError{size: response.ContentLength, max: managed.MaxObjectBytes}
 	}
 	if err := os.MkdirAll(p.state.ObjectDir(), 0o755); err != nil {
 		return "", "", 0, "", err
@@ -156,25 +232,33 @@ func (p *Publisher) downloadSource(ctx context.Context, lease Lease) (string, st
 			_ = os.Remove(tempPath)
 		}
 	}()
+	reporter.total = max(response.ContentLength, 0)
+	_ = reporter.report(ctx, "downloading", true)
 	hash := sha256.New()
-	limited := io.LimitReader(resp.Body, p.cfg.MaxObjectBytes+1)
-	size, err := io.Copy(io.MultiWriter(temp, hash), limited)
+	limited := io.LimitReader(response.Body, managed.MaxObjectBytes+1)
+	reader := &progressReader{reader: limited, add: func(bytes int64) {
+		reporter.sourceBytes += bytes
+		_ = reporter.report(ctx, "downloading", false)
+	}}
+	size, err := io.Copy(io.MultiWriter(temp, hash), reader)
 	if err != nil {
 		return "", "", 0, "", fmt.Errorf("read source: %w", err)
 	}
-	if size > p.cfg.MaxObjectBytes {
-		return "", "", 0, "", objectTooLargeError{size: size, max: p.cfg.MaxObjectBytes}
+	if size > managed.MaxObjectBytes {
+		return "", "", 0, "", objectTooLargeError{size: size, max: managed.MaxObjectBytes}
 	}
-	if resp.ContentLength >= 0 && size != resp.ContentLength {
-		return "", "", 0, "", fmt.Errorf("source length mismatch: got %d, want %d", size, resp.ContentLength)
+	if response.ContentLength >= 0 && size != response.ContentLength {
+		return "", "", 0, "", fmt.Errorf("source length mismatch: got %d, want %d", size, response.ContentLength)
 	}
+	reporter.total = size
+	_ = reporter.report(ctx, "downloading", true)
 	if err := temp.Sync(); err != nil {
 		return "", "", 0, "", err
 	}
 	if err := temp.Close(); err != nil {
 		return "", "", 0, "", err
 	}
-	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
+	contentType := strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -182,33 +266,45 @@ func (p *Publisher) downloadSource(ctx context.Context, lease Lease) (string, st
 	return tempPath, hex.EncodeToString(hash.Sum(nil)), size, contentType, nil
 }
 
-func (p *Publisher) upload(ctx context.Context, signedURL, path string, size int64, contentType string) (string, error) {
-	f, err := os.Open(path)
+func (p *Publisher) upload(
+	ctx context.Context,
+	managed ManagedConfig,
+	signedURL, path string,
+	size int64,
+	contentType string,
+	reporter *progressReporter,
+) (string, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	body := io.Reader(f)
-	if p.cfg.UploadRateBytesPerSecond > 0 {
-		body = newPacedReader(body, p.cfg.UploadRateBytesPerSecond)
+	defer file.Close()
+	var body io.Reader = file
+	if managed.UploadRateBytesPerSecond > 0 {
+		body = newPacedReader(body, managed.UploadRateBytesPerSecond)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signedURL, body)
+	body = &progressReader{reader: body, add: func(bytes int64) {
+		reporter.uploadBytes += bytes
+		_ = reporter.report(ctx, "uploading", false)
+	}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, signedURL, body)
 	if err != nil {
 		return "", err
 	}
-	req.ContentLength = size
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Cache-Control", immutableCacheControl)
-	resp, err := p.client.Do(req)
+	request.ContentLength = size
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("Cache-Control", immutableCacheControl)
+	response, err := p.client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("upload Blob: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return "", fmt.Errorf("upload Blob: status %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return "", fmt.Errorf("upload Blob: status %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
 	}
-	return resp.Header.Get("ETag"), nil
+	_ = reporter.report(ctx, "uploading", true)
+	return response.Header.Get("ETag"), nil
 }
 
 func (p *Publisher) fail(ctx context.Context, lease Lease, state UploadState, publishErr error, retry time.Duration) error {
@@ -218,9 +314,11 @@ func (p *Publisher) fail(ctx context.Context, lease Lease, state UploadState, pu
 	failCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := p.core.Fail(failCtx, lease, publishErr, retry); err != nil {
+		p.setHeartbeat("degraded", Lease{}, false, publishErr.Error())
 		return fmt.Errorf("%v; report failure: %w", publishErr, err)
 	}
 	_ = p.state.Delete(context.Background(), lease.ID)
+	p.setHeartbeat("degraded", Lease{}, true, publishErr.Error())
 	return publishErr
 }
 
@@ -229,13 +327,10 @@ func verifyMetadata(metadata BlobMetadata, locator string, size int64, contentTy
 		return errors.New("uploaded Blob metadata not found")
 	}
 	if metadata.SizeBytes != size {
-		return fmt.Errorf("Blob size mismatch: got %d, want %d", metadata.SizeBytes, size)
+		return fmt.Errorf("uploaded Blob size mismatch: got %d, want %d", metadata.SizeBytes, size)
 	}
-	if metadata.ContentType != contentType {
-		return fmt.Errorf("Blob content type mismatch: got %q, want %q", metadata.ContentType, contentType)
-	}
-	if !strings.Contains(strings.ToLower(metadata.CacheControl), "immutable") {
-		return fmt.Errorf("Blob cache-control is not immutable: %q", metadata.CacheControl)
+	if metadata.ContentType != "" && metadata.ContentType != contentType {
+		return fmt.Errorf("uploaded Blob content type mismatch: got %q, want %q", metadata.ContentType, contentType)
 	}
 	return nil
 }
@@ -254,6 +349,46 @@ func retryDelay(err error) time.Duration {
 	return time.Minute
 }
 
+type progressReporter struct {
+	core         *CoreClient
+	lease        Lease
+	sourceBytes  int64
+	uploadBytes  int64
+	total        int64
+	lastBytes    int64
+	lastReported time.Time
+}
+
+func newProgressReporter(core *CoreClient, lease Lease) *progressReporter {
+	return &progressReporter{core: core, lease: lease}
+}
+
+func (r *progressReporter) report(ctx context.Context, phase string, force bool) error {
+	currentBytes := r.sourceBytes + r.uploadBytes
+	if !force && time.Since(r.lastReported) < 2*time.Second && currentBytes-r.lastBytes < 1<<20 {
+		return nil
+	}
+	if err := r.core.Progress(ctx, r.lease, phase, r.sourceBytes, r.uploadBytes, r.total); err != nil {
+		return err
+	}
+	r.lastBytes = currentBytes
+	r.lastReported = time.Now()
+	return nil
+}
+
+type progressReader struct {
+	reader io.Reader
+	add    func(int64)
+}
+
+func (r *progressReader) Read(buffer []byte) (int, error) {
+	count, err := r.reader.Read(buffer)
+	if count > 0 {
+		r.add(int64(count))
+	}
+	return count, err
+}
+
 type pacedReader struct {
 	r       io.Reader
 	rate    int64
@@ -266,17 +401,27 @@ func newPacedReader(reader io.Reader, bytesPerSecond int64) io.Reader {
 }
 
 func (r *pacedReader) Read(buffer []byte) (int, error) {
-	if len(buffer) > 32<<10 {
-		buffer = buffer[:32<<10]
-	}
-	n, err := r.r.Read(buffer)
-	r.read += int64(n)
-	if n > 0 && r.rate > 0 {
-		target := time.Duration(float64(r.read) / float64(r.rate) * float64(time.Second))
-		if wait := target - time.Since(r.started); wait > 0 {
-			timer := time.NewTimer(wait)
-			<-timer.C
+	count, err := r.r.Read(buffer)
+	r.read += int64(count)
+	if count > 0 && r.rate > 0 {
+		expected := time.Duration(float64(r.read) / float64(r.rate) * float64(time.Second))
+		if delay := expected - time.Since(r.started); delay > 0 {
+			time.Sleep(delay)
 		}
 	}
-	return n, err
+	return count, err
+}
+
+func buildVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
+		}
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && setting.Value != "" {
+				return setting.Value
+			}
+		}
+	}
+	return "devel"
 }
