@@ -3,6 +3,7 @@
 //
 // 同步策略（spec-v1 §2.2）：
 //
+//	should_be < 0    → 起播提前量窗口：装载并暂停待命，到点解除暂停
 //	|漂移| > 150ms  → 直接 seek
 //	// 30–150ms        → 调 speed（0.98–1.02）缓追  // REMOVED: 变速影响听感，见 spec-v1 讨论。纯 seek 方案
 //	< 30ms          → 不动
@@ -130,23 +131,33 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 	// 防抖：快速连续的 playback.changed（如管理员连切）塌缩成最后一次 apply。
 	// 否则每次 skip 都会触发一次完整的 loadfile + 探测下载 + 校偏，
 	// 除了最后一首其余全是浪费。
+	//
+	// 前沿触发：静默期后的第一次变更立即生效——常见的单次切歌白等一个窗口
+	// 就是一个窗口的头部损失，且会挤占服务端给的起播提前量。只有窗口内
+	// 后续的变更才合并到尾部，连切仍然只落地最后一首（代价是多一次 loadfile）。
 	const debounceWindow = 400 * time.Millisecond
 	applyCh := make(chan client.Playback, 1)
+	startCh := make(chan struct{}, 1)
 	var debounce *time.Timer
+	var startTimer *time.Timer
+	var lastApply time.Time
 	syncer := &driftSyncer{}
-	scheduleApply := func(pb client.Playback) {
-		if debounce != nil {
-			debounce.Stop()
+
+	// cancelStart 撤销待命中的预定起播，防止旧定时器在新状态上开声。
+	cancelStart := func() {
+		if startTimer != nil {
+			startTimer.Stop()
+			startTimer = nil
 		}
-		debounce = time.AfterFunc(debounceWindow, func() {
-			select {
-			case applyCh <- pb:
-			default:
-			}
-		})
+		select {
+		case <-startCh:
+		default:
+		}
 	}
 
 	apply := func(pb client.Playback) {
+		lastApply = time.Now()
+		cancelStart()
 		cur = pb
 		if pb.Current == nil {
 			loadedRef = ""
@@ -154,9 +165,20 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 			mpv.Stop()
 			return
 		}
+		shouldMs := pb.ShouldBeMs(cli.ServerNow())
+		leadIn := shouldMs < 0
+		if leadIn {
+			// 先暂停再装载：pause 是全局属性、跨 loadfile 保持，
+			// 否则 loadfile 与 SetPause 之间会漏出开头几毫秒。
+			mpv.SetPause(true)
+		}
 		if pb.Current.TrackRef != loadedRef {
-			// 开播即定位到房间当前进度，避免从 0 播一秒再大跳
-			startSec := float64(pb.ShouldBeMs(cli.ServerNow())) / 1000
+			// 开播即定位到房间当前进度，避免从 0 播一秒再大跳。
+			// 提前量窗口内（leadIn）曲目尚未开始，从头装载。
+			startSec := float64(shouldMs) / 1000
+			if startSec < 0 {
+				startSec = 0
+			}
 			if err := mpv.LoadFile(server+pb.Current.StreamURL, startSec); err != nil {
 				log.Printf("loadfile: %v", err)
 				return
@@ -166,8 +188,41 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 			mpv.SetSpeed(1.0) // 上一首可能残留变速
 			log.Printf("playing %s (%s)", pb.Current.Title, pb.Current.TrackRef)
 		}
+		if leadIn {
+			// 起播提前量（spec-v1 §2.2）：装载完成后保持暂停占住这段窗口，
+			// 到 position 0 时刻解除暂停——头部不再被装载延迟吃掉。
+			// playing=false 时不排定，等服务端 resume 推新状态重新计时。
+			if pb.Playing {
+				startTimer = time.AfterFunc(time.Duration(-shouldMs)*time.Millisecond, func() {
+					select {
+					case startCh <- struct{}{}:
+					default:
+					}
+				})
+				log.Printf("lead-in: starting in %dms", -shouldMs)
+			}
+			return
+		}
 		mpv.SetPause(!pb.Playing)
 		correct(mpv, cli, pb, syncer)
+	}
+
+	// scheduleApply 前沿触发 + 尾部合并，见 debounceWindow 说明。
+	scheduleApply := func(pb client.Playback) {
+		if debounce != nil {
+			debounce.Stop()
+			debounce = nil
+		}
+		if wait := debounceWindow - time.Since(lastApply); wait > 0 {
+			debounce = time.AfterFunc(wait, func() {
+				select {
+				case applyCh <- pb:
+				default:
+				}
+			})
+			return
+		}
+		apply(pb) // 与主循环同一 goroutine，直接落地
 	}
 
 	for {
@@ -187,7 +242,9 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 			case "room.left":
 				if debounce != nil {
 					debounce.Stop()
+					debounce = nil
 				}
+				cancelStart()
 				cur = client.Playback{}
 				loadedRef = ""
 				syncer.reset()
@@ -216,8 +273,17 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 			}
 		case pb := <-applyCh:
 			apply(pb)
+		case <-startCh:
+			// 预定起播时刻到达。基线从这一刻的读数重新学起。
+			startTimer = nil
+			if cur.Current == nil || !cur.Playing {
+				break
+			}
+			mpv.SetPause(false)
+			syncer.reset()
 		case <-ticker.C:
-			if cur.Current != nil && cur.Playing {
+			// 提前量窗口内曲目还没开声，不参与校偏（应播位置为负）。
+			if cur.Current != nil && cur.Playing && cur.ShouldBeMs(cli.ServerNow()) >= 0 {
 				correct(mpv, cli, cur, syncer)
 			}
 		}
@@ -250,6 +316,9 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *dri
 		return
 	}
 	shouldMs := pb.ShouldBeMs(cli.ServerNow())
+	if shouldMs < 0 {
+		return // 起播提前量窗口内，曲目还没开始，无从校偏
+	}
 	actualMs, err := mpv.TimePos()
 	if err != nil {
 		return // 文件刚加载，time-pos 暂不可用
