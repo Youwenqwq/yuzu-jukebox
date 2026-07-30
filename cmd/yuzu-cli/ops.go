@@ -127,8 +127,11 @@ func cmdQueue(ctx context.Context, roomID string) error {
 		if !snap.Playback.Playing {
 			state = "paused "
 		}
+		if pending := snap.Playback.PendingStartMs(cli.ServerNow()); pending > 0 {
+			state = fmt.Sprintf("starting in %dms", pending)
+		}
 		fmt.Printf("%s: %s — %s (%dms/%dms)\n", state, cur.Title, cur.Artist,
-			snap.Playback.ShouldBeMs(cli.ServerNow()), cur.DurationMs)
+			snap.Playback.DisplayPositionMs(cli.ServerNow()), cur.DurationMs)
 		if cur.StreamURL != "" {
 			fmt.Printf("stream:  %s\n", cur.StreamURL)
 		}
@@ -182,8 +185,11 @@ func cmdStatus(ctx context.Context, roomID string) error {
 		if !snap.Playback.Playing {
 			state = "paused"
 		}
+		if pending := snap.Playback.PendingStartMs(cli.ServerNow()); pending > 0 {
+			state = fmt.Sprintf("starting in %dms", pending)
+		}
 		fmt.Printf("state:     %s %s — %s (%ds/%ds)\n", state, cur.Title, cur.Artist,
-			snap.Playback.ShouldBeMs(cli.ServerNow())/1000, cur.DurationMs/1000)
+			snap.Playback.DisplayPositionMs(cli.ServerNow())/1000, cur.DurationMs/1000)
 		if cur.Album != "" {
 			fmt.Printf("album:     %s\n", cur.Album)
 		}
