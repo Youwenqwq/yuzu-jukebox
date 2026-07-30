@@ -1,8 +1,11 @@
 package app_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
+
+	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 )
 
 type roomAccessCodeResponse struct {
@@ -111,4 +114,149 @@ func TestRotatingRoomAccessAndIntegrationDelivery(t *testing.T) {
 	if delivered.AccessCode.Code != current.AccessCode.Code {
 		t.Fatalf("delivered code = %q, admin code = %q", delivered.AccessCode.Code, current.AccessCode.Code)
 	}
+}
+
+func TestRoomAdmissionIdentityBypassesAndTrustedRoleUpdates(t *testing.T) {
+	e := newEnv(t)
+	_, adminToken := e.guestAuth("admission-admin", "admin123")
+	controllerID, controllerToken := e.guestAuth("admission-controller", "")
+	trustedID, trustedToken := e.guestAuth("admission-trusted", "")
+	_, guestToken := e.guestAuth("admission-guest", "")
+
+	for _, roomSpec := range []map[string]any{
+		{"id": "admission-open", "name": "Open"},
+		{
+			"id":                "admission-a",
+			"name":              "Protected A",
+			"guest_access_mode": "static_password",
+			"guest_password":    "secret-a",
+		},
+		{
+			"id":                "admission-b",
+			"name":              "Protected B",
+			"guest_access_mode": "static_password",
+			"guest_password":    "secret-b",
+		},
+	} {
+		resp := e.post(adminToken, "/api/v1/rooms", roomSpec)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create room %q status = %d", roomSpec["id"], resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	assertWSRoomAdmission(t, e, guestToken, "admission-open", "", true)
+	assertWSRoomAdmission(t, e, guestToken, "admission-a", "", false)
+	assertWSRoomAdmission(t, e, guestToken, "admission-a", "secret-a", true)
+	assertWSRoomAdmission(t, e, adminToken, "admission-a", "", true)
+
+	if err := e.a.Store.GrantRoomGrant(
+		context.Background(), "admission-a", controllerID, control.CapabilityController,
+	); err != nil {
+		t.Fatal(err)
+	}
+	assertWSRoomAdmission(t, e, controllerToken, "admission-a", "", true)
+	assertWSRoomAdmission(t, e, controllerToken, "admission-b", "", false)
+
+	principal, err := e.a.Store.GetPrincipal(context.Background(), trustedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal.Roles = append(principal.Roles, "vip")
+	if err := e.a.Store.UpsertPrincipal(context.Background(), principal); err != nil {
+		t.Fatal(err)
+	}
+	assertWSRoomAdmission(t, e, trustedToken, "admission-a", "", false)
+	resp := integrationJSONRequest(t, e, http.MethodPatch, adminToken, "/api/v1/rooms/admission-a", map[string]any{
+		"trusted_roles": []string{"vip", "vip"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("trusted_roles hot update status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	persisted, err := e.a.Store.GetRoom(context.Background(), "admission-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.TrustedRoles) != 1 || persisted.TrustedRoles[0] != "vip" {
+		t.Fatalf("persisted trusted_roles = %#v, want [vip]", persisted.TrustedRoles)
+	}
+	assertWSRoomAdmission(t, e, trustedToken, "admission-a", "", true)
+
+	resp = e.post(adminToken, "/api/v1/rooms", map[string]any{
+		"id":                "invalid-listener-role",
+		"name":              "Invalid",
+		"guest_access_mode": "static_password",
+		"guest_password":    "secret",
+		"trusted_roles":     []string{"listener"},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("listener trusted role create status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = integrationJSONRequest(t, e, http.MethodPatch, adminToken, "/api/v1/rooms/admission-b", map[string]any{
+		"trusted_roles": []string{"requester"},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("requester trusted role update status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	persisted, err = e.a.Store.GetRoom(context.Background(), "admission-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.TrustedRoles) != 0 {
+		t.Fatalf("rejected trusted_roles update persisted %#v", persisted.TrustedRoles)
+	}
+
+	resp = e.post(adminToken, "/api/v1/integrations", map[string]any{
+		"id": "admission-bridge", "name": "Admission Bridge",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create admission Integration status = %d", resp.StatusCode)
+	}
+	var integration struct {
+		Token string `json:"token"`
+	}
+	decode(t, resp, &integration)
+	resp = integrationJSONRequest(t, e, http.MethodPut, adminToken, "/api/v1/integrations/admission-bridge/scopes", map[string]any{
+		"adapter_id": "onebot", "scope_type": "group", "scope_id": "admission-group", "room_id": "admission-a",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bind admission Integration status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	actor, raw, status := resolveIntegrationActor(t, e, integration.Token, map[string]any{
+		"adapter_id": "onebot",
+		"scope":      map[string]any{"type": "group", "id": "admission-group"},
+		"subject":    map[string]any{"id": "member", "display_name": "Member"},
+	})
+	if status != http.StatusOK || actor.DefaultRoomID != "admission-a" {
+		t.Fatalf("resolve admission actor = status %d actor %#v body %s", status, actor, raw)
+	}
+	assertWSRoomAdmission(t, e, actor.ActorToken, "admission-a", "", true)
+	assertWSRoomAdmission(t, e, actor.ActorToken, "admission-b", "", false)
+}
+
+func assertWSRoomAdmission(
+	t *testing.T,
+	e *env,
+	token, roomID, credential string,
+	allowed bool,
+) {
+	t.Helper()
+	ws := e.dialWS()
+	ws.send("auth", "admission-auth", map[string]any{"session_token": token})
+	ws.waitFor("auth.ok")
+	ws.send("room.join", "admission-join", map[string]any{
+		"room_id":  roomID,
+		"password": credential,
+	})
+	if allowed {
+		if joined := ws.waitFor("room.joined"); joined.Ref != "admission-join" {
+			t.Fatalf("room %s joined ref = %q", roomID, joined.Ref)
+		}
+		return
+	}
+	assertErrCode(t, ws.waitFor("error"), "admission-join", "forbidden")
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,17 +304,51 @@ func TestPlayerPlaneReceivesOnlyPlayback(t *testing.T) {
 	listener := &recordingClient{id: dj, messages: make(chan any, 16)}
 	r.Join(listener)
 	got := map[string]bool{}
+	var queueItems []QueueEntry
+	var queueRevision uint64
+	nextQueuePart := 0
+	queueDone := false
 	deadline := time.Now().Add(time.Second)
-	for len(got) < 4 && time.Now().Before(deadline) {
+	for !(got["playback.changed"] && queueDone && got["radio.changed"] && got["listeners.changed"]) &&
+		time.Now().Before(deadline) {
 		select {
-		case m := <-listener.messages:
-			got[msgType(t, m)] = true
+		case message := <-listener.messages:
+			typ := msgType(t, message)
+			if typ != "queue.snapshot" {
+				got[typ] = true
+				continue
+			}
+			raw, err := json.Marshal(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope QueueSnapshotMessage
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Data.Part != nextQueuePart ||
+				(nextQueuePart > 0 && envelope.Data.Revision != queueRevision) {
+				t.Fatalf("queue snapshot sequence = revision %d part %d, want revision %d part %d",
+					envelope.Data.Revision, envelope.Data.Part, queueRevision, nextQueuePart)
+			}
+			if nextQueuePart == 0 {
+				queueRevision = envelope.Data.Revision
+			}
+			queueItems = append(queueItems, envelope.Data.Items...)
+			nextQueuePart++
+			queueDone = envelope.Data.Done
 		case <-time.After(time.Until(deadline)):
 		}
 	}
-	for _, want := range []string{"playback.changed", "queue.changed", "radio.changed", "listeners.changed"} {
-		if !got[want] {
-			t.Fatalf("listener missing %s; got %v", want, got)
+	if !(got["playback.changed"] && queueDone && got["radio.changed"] && got["listeners.changed"]) {
+		t.Fatalf("listener join snapshot incomplete: events=%v queueDone=%v", got, queueDone)
+	}
+	if len(queueItems) != len(batch) {
+		t.Fatalf("reassembled queue has %d items, want %d", len(queueItems), len(batch))
+	}
+	for i := range batch {
+		if queueItems[i].TrackRef != batch[i].TrackRef {
+			t.Fatalf("reassembled queue item %d = %q, want %q", i, queueItems[i].TrackRef, batch[i].TrackRef)
 		}
 	}
 
@@ -361,20 +396,130 @@ func TestPlayerPlaneReceivesOnlyPlayback(t *testing.T) {
 		t.Fatalf("player received queue fanout: %s", msgType(t, extra))
 	case <-time.After(100 * time.Millisecond):
 	}
-	queueSeen := false
+	var patchOps []QueuePatchOp
+	nextPatchPart := 0
+	patchDone := false
 	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	for !patchDone && time.Now().Before(deadline) {
 		select {
-		case m := <-listener.messages:
-			if msgType(t, m) == "queue.changed" {
-				queueSeen = true
-				deadline = time.Time{}
+		case message := <-listener.messages:
+			if msgType(t, message) != "queue.patch" {
+				continue
 			}
+			raw, err := json.Marshal(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope QueuePatchMessage
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Data.BaseRevision != queueRevision ||
+				envelope.Data.Revision != queueRevision+1 ||
+				envelope.Data.Part != nextPatchPart {
+				t.Fatalf("queue patch sequence = base %d revision %d part %d",
+					envelope.Data.BaseRevision, envelope.Data.Revision, envelope.Data.Part)
+			}
+			patchOps = append(patchOps, envelope.Data.Ops...)
+			nextPatchPart++
+			patchDone = envelope.Data.Done
 		case <-time.After(time.Until(deadline)):
 		}
 	}
-	if !queueSeen {
-		t.Fatal("listener did not receive queue.changed after add")
+	if !patchDone || len(patchOps) != 1 || patchOps[0].Op != QueueOpAdd ||
+		patchOps[0].Item == nil || patchOps[0].Item.TrackRef != "local:extra" {
+		t.Fatalf("listener queue patch = %#v, done=%v", patchOps, patchDone)
+	}
+	snapshot, err := r.Snapshot(dj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Queue) != len(batch)+1 || snapshot.Queue[len(batch)].TrackRef != "local:extra" {
+		t.Fatalf("final queue state = %#v", snapshot.Queue)
+	}
+}
+
+func TestQueueProtocolChunksCompleteEnvelopesAndReassemblesSnapshot(t *testing.T) {
+	if QueueEnvelopeBudget != 24*1024 {
+		t.Fatalf("queue envelope budget = %d, want %d", QueueEnvelopeBudget, 24*1024)
+	}
+	entries := make([]QueueEntry, 240)
+	for i := range entries {
+		suffix := strconv.Itoa(i)
+		entries[i] = QueueEntry{
+			EntryID:  "entry-" + suffix,
+			TrackRef: "local:track-" + suffix,
+			Title:    strings.Repeat("title-"+suffix+"-", 80),
+			Artist:   strings.Repeat("artist-", 20),
+		}
+	}
+
+	snapshots, err := QueueSnapshotMessages(37, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) < 2 {
+		t.Fatalf("large snapshot used %d envelope, want chunking", len(snapshots))
+	}
+	var reassembled []QueueEntry
+	for i, message := range snapshots {
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(encoded) > QueueEnvelopeBudget {
+			t.Fatalf("snapshot part %d envelope = %d bytes, budget %d", i, len(encoded), QueueEnvelopeBudget)
+		}
+		if message.Type != "queue.snapshot" || message.Data.Revision != 37 || message.Data.Part != i {
+			t.Fatalf("snapshot part %d metadata = %#v", i, message)
+		}
+		if message.Data.Done != (i == len(snapshots)-1) {
+			t.Fatalf("snapshot part %d done = %v", i, message.Data.Done)
+		}
+		reassembled = append(reassembled, message.Data.Items...)
+	}
+	if len(reassembled) != len(entries) {
+		t.Fatalf("reassembled snapshot items = %d, want %d", len(reassembled), len(entries))
+	}
+	for i := range entries {
+		if reassembled[i].EntryID != entries[i].EntryID ||
+			reassembled[i].TrackRef != entries[i].TrackRef ||
+			reassembled[i].Title != entries[i].Title {
+			t.Fatalf("reassembled snapshot item %d differs", i)
+		}
+	}
+
+	ops := make([]QueuePatchOp, len(entries))
+	for i := range entries {
+		ops[i] = QueuePatchOp{Op: QueueOpAdd, Index: i, Item: &entries[i]}
+	}
+	patches, err := QueuePatchMessages(37, 38, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(patches) < 2 {
+		t.Fatalf("large patch used %d envelope, want chunking", len(patches))
+	}
+	reassembledOps := 0
+	for i, message := range patches {
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(encoded) > QueueEnvelopeBudget {
+			t.Fatalf("patch part %d envelope = %d bytes, budget %d", i, len(encoded), QueueEnvelopeBudget)
+		}
+		if message.Type != "queue.patch" || message.Data.BaseRevision != 37 ||
+			message.Data.Revision != 38 || message.Data.Part != i {
+			t.Fatalf("patch part %d metadata = %#v", i, message)
+		}
+		if message.Data.Done != (i == len(patches)-1) {
+			t.Fatalf("patch part %d done = %v", i, message.Data.Done)
+		}
+		reassembledOps += len(message.Data.Ops)
+	}
+	if reassembledOps != len(ops) {
+		t.Fatalf("reassembled patch operations = %d, want %d", reassembledOps, len(ops))
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/app"
+	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 	"github.com/youwenqwq/yuzu-jukebox/internal/config"
 )
 
@@ -129,11 +130,33 @@ func makeWAV(secs int) []byte {
 	return buf.Bytes()
 }
 
-// wsClient 是一个最小 WS 测试客户端。
+// wsClient 是一个最小 WS 测试客户端；它按 revision 原子维护队列副本。
 type wsClient struct {
-	t    *testing.T
-	conn *websocket.Conn
-	seen []wsMsg // 所有读到的消息（含被跳过的广播）
+	t     *testing.T
+	conn  *websocket.Conn
+	seen  []wsMsg // 所有读到的消息（含被跳过的广播）
+	queue wsQueueReplica
+}
+
+type wsQueueReplica struct {
+	revision uint64
+	items    []client.QueueEntry
+	ready    bool
+	snapshot *wsQueueSnapshotAssembly
+	patch    *wsQueuePatchAssembly
+}
+
+type wsQueueSnapshotAssembly struct {
+	revision uint64
+	nextPart int
+	items    []client.QueueEntry
+}
+
+type wsQueuePatchAssembly struct {
+	baseRevision uint64
+	revision     uint64
+	nextPart     int
+	ops          []client.QueuePatchOp
 }
 
 func (e *env) dialWS() *wsClient {
@@ -164,28 +187,164 @@ func (c *wsClient) send(typ, ref string, data any) {
 	}
 }
 
+func (c *wsClient) read(deadline time.Time) wsMsg {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+	defer cancel()
+	_, data, err := c.conn.Read(ctx)
+	if err != nil {
+		c.t.Fatalf("ws read: %v", err)
+	}
+	var m wsMsg
+	if err := json.Unmarshal(data, &m); err != nil {
+		c.t.Fatalf("ws unmarshal: %v", err)
+	}
+	c.seen = append(c.seen, m)
+	if err := c.queue.accept(m); err != nil {
+		c.t.Fatalf("invalid %s stream: %v", m.Type, err)
+	}
+	return m
+}
+
 // waitFor 读消息直到匹配类型（记录所有读到的消息），5 秒超时。
 func (c *wsClient) waitFor(typ string) wsMsg {
 	c.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
-		_, data, err := c.conn.Read(ctx)
-		cancel()
-		if err != nil {
-			c.t.Fatalf("ws read waiting for %s: %v", typ, err)
-		}
-		var m wsMsg
-		if err := json.Unmarshal(data, &m); err != nil {
-			c.t.Fatalf("ws unmarshal: %v", err)
-		}
-		c.seen = append(c.seen, m)
-		if m.Type == typ {
+		if m := c.read(deadline); m.Type == typ {
 			return m
 		}
 	}
 	c.t.Fatalf("timeout waiting for %s", typ)
 	return wsMsg{}
+}
+
+// waitForQueueState 等到一个完整 snapshot/patch 原子落地后再检查最终队列。
+func (c *wsClient) waitForQueueState(description string, matches func([]client.QueueEntry) bool) []client.QueueEntry {
+	c.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.queue.ready {
+			items := append([]client.QueueEntry(nil), c.queue.items...)
+			if matches(items) {
+				return items
+			}
+		}
+		c.read(deadline)
+	}
+	c.t.Fatalf("timeout waiting for queue state: %s", description)
+	return nil
+}
+
+func (q *wsQueueReplica) accept(m wsMsg) error {
+	switch m.Type {
+	case "queue.snapshot":
+		var part client.QueueSnapshotPart
+		if err := json.Unmarshal(m.Data, &part); err != nil {
+			return err
+		}
+		if part.Part < 0 {
+			return fmt.Errorf("negative snapshot part %d", part.Part)
+		}
+		if part.Part == 0 {
+			q.snapshot = &wsQueueSnapshotAssembly{revision: part.Revision}
+			q.patch = nil
+		}
+		assembly := q.snapshot
+		if assembly == nil || assembly.revision != part.Revision || assembly.nextPart != part.Part {
+			return fmt.Errorf("snapshot sequence revision=%d part=%d", part.Revision, part.Part)
+		}
+		assembly.items = append(assembly.items, part.Items...)
+		assembly.nextPart++
+		if part.Done {
+			q.items = append([]client.QueueEntry(nil), assembly.items...)
+			q.revision = assembly.revision
+			q.ready = true
+			q.snapshot = nil
+		}
+	case "queue.patch":
+		var part client.QueuePatchPart
+		if err := json.Unmarshal(m.Data, &part); err != nil {
+			return err
+		}
+		if part.Part < 0 || part.Revision != part.BaseRevision+1 {
+			return fmt.Errorf("invalid patch revision=%d base=%d part=%d", part.Revision, part.BaseRevision, part.Part)
+		}
+		if part.Part == 0 {
+			q.patch = &wsQueuePatchAssembly{
+				baseRevision: part.BaseRevision,
+				revision:     part.Revision,
+			}
+		}
+		assembly := q.patch
+		if assembly == nil || assembly.baseRevision != part.BaseRevision ||
+			assembly.revision != part.Revision || assembly.nextPart != part.Part {
+			return fmt.Errorf("patch sequence revision=%d part=%d", part.Revision, part.Part)
+		}
+		assembly.ops = append(assembly.ops, part.Ops...)
+		assembly.nextPart++
+		if !part.Done {
+			return nil
+		}
+		if !q.ready || q.revision != assembly.baseRevision {
+			return fmt.Errorf("patch base revision=%d, local revision=%d", assembly.baseRevision, q.revision)
+		}
+		next, err := applyWSQueuePatch(q.items, assembly.ops)
+		if err != nil {
+			return err
+		}
+		q.items = next
+		q.revision = assembly.revision
+		q.patch = nil
+	}
+	return nil
+}
+
+func applyWSQueuePatch(current []client.QueueEntry, ops []client.QueuePatchOp) ([]client.QueueEntry, error) {
+	next := append([]client.QueueEntry(nil), current...)
+	indexOf := func(entryID string) int {
+		for i := range next {
+			if next[i].EntryID == entryID {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, op := range ops {
+		switch op.Op {
+		case "add":
+			if op.Item == nil || op.Index < 0 || op.Index > len(next) || indexOf(op.Item.EntryID) >= 0 {
+				return nil, fmt.Errorf("invalid add operation")
+			}
+			next = append(next, client.QueueEntry{})
+			copy(next[op.Index+1:], next[op.Index:])
+			next[op.Index] = *op.Item
+		case "remove":
+			index := indexOf(op.EntryID)
+			if index < 0 {
+				return nil, fmt.Errorf("remove missing entry %q", op.EntryID)
+			}
+			copy(next[index:], next[index+1:])
+			next = next[:len(next)-1]
+		case "move":
+			index := indexOf(op.EntryID)
+			if index < 0 || op.ToIndex < 0 || op.ToIndex >= len(next) {
+				return nil, fmt.Errorf("invalid move operation")
+			}
+			item := next[index]
+			if index < op.ToIndex {
+				copy(next[index:op.ToIndex], next[index+1:op.ToIndex+1])
+			} else if index > op.ToIndex {
+				copy(next[op.ToIndex+1:index+1], next[op.ToIndex:index])
+			}
+			next[op.ToIndex] = item
+		case "clear":
+			next = []client.QueueEntry{}
+		default:
+			return nil, fmt.Errorf("unknown queue operation %q", op.Op)
+		}
+	}
+	return next, nil
 }
 
 // lastSeen 返回最近一条该类型消息（广播可能先于 ack 到达被记录）。
@@ -310,7 +469,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 	if pb.Current != nil || pb.Playing {
 		e.t.Fatalf("room should be idle, got %+v", pb)
 	}
-	c.waitFor("queue.changed")
+	c.waitForQueueState("empty join snapshot", func(items []client.QueueEntry) bool { return len(items) == 0 })
 	c.waitFor("listeners.changed")
 
 	// 8. 点歌 → 自动开播，playback.changed 带 stream_url

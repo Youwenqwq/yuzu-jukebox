@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 )
@@ -226,6 +227,126 @@ func TestRoomControlRESTUsesScopedControllerAndGlobalAdmin(t *testing.T) {
 	requireControlError(t, status, body, http.StatusForbidden, "forbidden")
 	status, body = controlRESTRequest(t, e, http.MethodPost, "/api/v1/rooms/control-b/playback/pause", adminToken, nil)
 	requireControlStatus(t, status, http.StatusOK, body)
+}
+
+func TestQueueClearWSAndRESTPreservesPlaybackAndRadio(t *testing.T) {
+	e := newEnv(t)
+	_, adminToken := e.guestAuth("clear-admin", "admin123")
+	controllerID, controllerToken := e.guestAuth("clear-controller", "")
+	trustedID, trustedToken := e.guestAuth("clear-trusted", "")
+	_, requesterToken := e.guestAuth("clear-requester", "")
+
+	resp := e.post(adminToken, "/api/v1/rooms", map[string]any{
+		"id":                "clear-room",
+		"name":              "Clear Room",
+		"guest_access_mode": "static_password",
+		"guest_password":    "room-secret",
+		"trusted_roles":     []string{"vip"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create clear room: status = %d, body = %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	if err := e.a.Store.GrantRoomGrant(context.Background(), "clear-room", controllerID, control.CapabilityController); err != nil {
+		t.Fatal(err)
+	}
+	principal, err := e.a.Store.GetPrincipal(context.Background(), trustedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal.Roles = append(principal.Roles, "vip")
+	if err := e.a.Store.UpsertPrincipal(context.Background(), principal); err != nil {
+		t.Fatal(err)
+	}
+
+	trackRef := uploadTrack(t, e, adminToken, "clear-track")
+	playlistID := createControlPlaylist(t, e, adminToken, trackRef)
+	status, body := controlRESTRequest(t, e, http.MethodPost, "/api/v1/rooms/clear-room/queue", requesterToken, map[string]any{
+		"track_refs": []string{trackRef, trackRef, trackRef},
+	})
+	requireControlStatus(t, status, http.StatusOK, body)
+	status, body = controlRESTRequest(t, e, http.MethodPost, "/api/v1/rooms/clear-room/radio", adminToken, map[string]any{
+		"source": "playlist:" + playlistID,
+		"once":   false,
+	})
+	requireControlStatus(t, status, http.StatusOK, body)
+
+	before := readControlRoomState(t, e, adminToken, "clear-room")
+	if before.Playback.Current == nil || before.Playback.Current.TrackRef != trackRef ||
+		before.Radio == nil || before.Radio.Source != "playlist:"+playlistID || len(before.Queue) == 0 {
+		t.Fatalf("clear precondition state = %#v", before)
+	}
+
+	trusted := e.dialWS()
+	trusted.send("auth", "trusted-auth", map[string]any{"session_token": trustedToken})
+	trusted.waitFor("auth.ok")
+	trusted.send("room.join", "trusted-join", map[string]any{"room_id": "clear-room"})
+	trusted.waitFor("room.joined")
+	trusted.waitForQueueState("trusted join queue snapshot", func(items []client.QueueEntry) bool {
+		return len(items) == len(before.Queue)
+	})
+	trusted.send("queue.clear", "trusted-clear", map[string]any{"room_id": "clear-room"})
+	assertErrCode(t, trusted.waitFor("error"), "trusted-clear", "forbidden")
+	afterDenied := readControlRoomState(t, e, adminToken, "clear-room")
+	if len(afterDenied.Queue) != len(before.Queue) {
+		t.Fatalf("trusted role cleared queue: before=%d after=%d", len(before.Queue), len(afterDenied.Queue))
+	}
+
+	controller := e.dialWS()
+	controller.send("auth", "controller-auth", map[string]any{"session_token": controllerToken})
+	controller.waitFor("auth.ok")
+	controller.send("room.join", "controller-join", map[string]any{"room_id": "clear-room"})
+	controller.waitFor("room.joined")
+	controller.waitForQueueState("controller join queue snapshot", func(items []client.QueueEntry) bool {
+		return len(items) == len(before.Queue)
+	})
+	controller.send("queue.clear", "controller-clear", map[string]any{"room_id": "clear-room"})
+	ack := controller.waitFor("ack")
+	if ack.Ref != "controller-clear" {
+		t.Fatalf("clear ack ref = %q", ack.Ref)
+	}
+	controller.waitForQueueState("cleared queue patch", func(items []client.QueueEntry) bool {
+		return len(items) == 0
+	})
+
+	afterWS := readControlRoomState(t, e, controllerToken, "clear-room")
+	assertClearPreservedState(t, before, afterWS)
+	status, body = controlRESTRequest(t, e, http.MethodDelete, "/api/v1/rooms/clear-room/queue", controllerToken, nil)
+	requireControlStatus(t, status, http.StatusOK, body)
+	afterREST := readControlRoomState(t, e, controllerToken, "clear-room")
+	assertClearPreservedState(t, before, afterREST)
+}
+
+func readControlRoomState(t *testing.T, e *env, token, roomID string) room.Snapshot {
+	t.Helper()
+	status, body := controlRESTRequest(t, e, http.MethodGet, "/api/v1/rooms/"+roomID+"/state", token, nil)
+	requireControlStatus(t, status, http.StatusOK, body)
+	var snapshot room.Snapshot
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		t.Fatalf("decode room state: %v; body = %s", err, body)
+	}
+	return snapshot
+}
+
+func assertClearPreservedState(t *testing.T, before, after room.Snapshot) {
+	t.Helper()
+	if len(after.Queue) != 0 {
+		t.Fatalf("queue after clear = %#v, want empty", after.Queue)
+	}
+	if before.Playback.Current == nil || after.Playback.Current == nil ||
+		after.Playback.Current.EntryID != before.Playback.Current.EntryID ||
+		after.Playback.Current.TrackRef != before.Playback.Current.TrackRef ||
+		after.Playback.Playing != before.Playback.Playing {
+		t.Fatalf("playback changed by queue clear: before=%#v after=%#v", before.Playback, after.Playback)
+	}
+	if before.Radio == nil || after.Radio == nil ||
+		after.Radio.Source != before.Radio.Source ||
+		after.Radio.Shuffle != before.Radio.Shuffle ||
+		after.Radio.Once != before.Radio.Once {
+		t.Fatalf("radio changed by queue clear: before=%#v after=%#v", before.Radio, after.Radio)
+	}
 }
 
 func TestRoomControlRESTRejectsBadPayloads(t *testing.T) {

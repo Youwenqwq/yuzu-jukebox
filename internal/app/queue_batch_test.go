@@ -49,28 +49,7 @@ type ackData struct {
 	EntryIDs []string `json:"entry_ids"`
 }
 
-type queueEntryView struct {
-	EntryID  string `json:"entry_id"`
-	TrackRef string `json:"track_ref"`
-}
-
-// lastQueue 返回最近一条 queue.changed 的待播队列。
-func lastQueue(t *testing.T, c *wsClient) []queueEntryView {
-	t.Helper()
-	m, ok := c.lastSeen("queue.changed")
-	if !ok {
-		t.Fatal("no queue.changed seen")
-	}
-	var d struct {
-		Queue []queueEntryView `json:"queue"`
-	}
-	if err := json.Unmarshal(m.Data, &d); err != nil {
-		t.Fatalf("queue.changed unmarshal: %v", err)
-	}
-	return d.Queue
-}
-
-func trackRefsOf(q []queueEntryView) []string {
+func trackRefsOf(q []client.QueueEntry) []string {
 	refs := []string{}
 	for _, e := range q {
 		refs = append(refs, e.TrackRef)
@@ -101,7 +80,7 @@ func TestQueueAddBatchWS(t *testing.T) {
 	c.waitFor("auth.ok")
 	c.send("room.join", "j1", map[string]any{"room_id": "bq"})
 	c.waitFor("room.joined")
-	c.waitFor("queue.changed") // 进房快照：空队列
+	c.waitForQueueState("empty join snapshot", func(items []client.QueueEntry) bool { return len(items) == 0 })
 
 	// 单条形态：ack 带 entry_ids（兼容字段），空闲自动开播
 	c.send("queue.add", "s1", map[string]any{"room_id": "bq", "track_ref": t1})
@@ -121,7 +100,9 @@ func TestQueueAddBatchWS(t *testing.T) {
 	if err := json.Unmarshal(ack.Data, &ad); err != nil || len(ad.EntryIDs) != 2 {
 		t.Fatalf("batch ack entry_ids = %+v (err=%v), want 2 ids", ad, err)
 	}
-	q := lastQueue(t, c)
+	q := c.waitForQueueState("batch t2,t3", func(items []client.QueueEntry) bool {
+		return equalStrings(trackRefsOf(items), []string{t2, t3})
+	})
 	if got, want := trackRefsOf(q), []string{t2, t3}; !equalStrings(got, want) {
 		t.Fatalf("queue refs = %v, want %v", got, want)
 	}
@@ -155,7 +136,9 @@ func TestQueueAddBatchWS(t *testing.T) {
 
 	c.send("queue.add", "s2", map[string]any{"room_id": "bq", "track_ref": t4})
 	c.waitFor("ack")
-	if got, want := trackRefsOf(lastQueue(t, c)), []string{t2, t3, t4}; !equalStrings(got, want) {
+	if got, want := trackRefsOf(c.waitForQueueState("t4 appended after rejected batch", func(items []client.QueueEntry) bool {
+		return equalStrings(trackRefsOf(items), []string{t2, t3, t4})
+	})), []string{t2, t3, t4}; !equalStrings(got, want) {
 		t.Fatalf("queue refs = %v, want %v（失败批次应零追加）", got, want)
 	}
 
@@ -182,9 +165,9 @@ func TestQueueAddBatchWS(t *testing.T) {
 	if len(ids) != 2 || ids[0] == "" || ids[0] == ids[1] {
 		t.Fatalf("QueueAddMany ids = %v, want 2 distinct ids", ids)
 	}
-	// 广播先于 ack 发出：此时 c 的连接上已有含 t5/t6 的最新 queue.changed，读入后取最新
-	c.waitFor("queue.changed")
-	q = lastQueue(t, c)
+	q = c.waitForQueueState("client batch t5,t6 applied", func(items []client.QueueEntry) bool {
+		return equalStrings(trackRefsOf(items), []string{t2, t3, t4, t5, t6})
+	})
 	if got, want := trackRefsOf(q), []string{t2, t3, t4, t5, t6}; !equalStrings(got, want) {
 		t.Fatalf("queue refs = %v, want %v", got, want)
 	}
