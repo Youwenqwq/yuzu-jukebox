@@ -360,11 +360,32 @@ type Playback struct {
 }
 
 // ShouldBeMs 由五元组推算 serverNow 时刻的播放位置。
+//
+// 返回值可以为负：切歌时服务端把新曲目的 position 0 排在未来（起播提前量，
+// spec-v1 §2.2），此时 -x 表示「距本曲开播还有 x 毫秒」。收听型客户端应在
+// 这段窗口内装载并保持暂停，到点开声；渲染进度用 DisplayPositionMs。
 func (p Playback) ShouldBeMs(serverNow int64) int64 {
 	if p.Playing {
 		return p.PositionMs + int64(float64(serverNow-p.UpdatedAt)*p.Rate)
 	}
 	return p.PositionMs
+}
+
+// PendingStartMs 距预定开播还剩多少毫秒；0 表示已进入播放窗口。
+func (p Playback) PendingStartMs(serverNow int64) int64 {
+	if ms := p.ShouldBeMs(serverNow); ms < 0 {
+		return -ms
+	}
+	return 0
+}
+
+// DisplayPositionMs 供渲染的播放位置：起播提前量窗口内钳到 0，
+// 不让进度条走负。
+func (p Playback) DisplayPositionMs(serverNow int64) int64 {
+	if ms := p.ShouldBeMs(serverNow); ms > 0 {
+		return ms
+	}
+	return 0
 }
 
 // ParsePlayback 解析 playback.changed 事件数据。
