@@ -181,6 +181,7 @@ Keep these separate from Integration credential lifecycle work:
 - **Stream endpoint uses ticket auth** (`?ticket=...`) — for `<audio>` tags. Tickets are 5-minute TTL bound to ref + identity
 - **CORS**: methods/headers/max-age are hardcoded in `httpapi.corsMiddleware`, only origins configurable
 - **WS state machine**: playback position is computed from `position_ms + updated_at + playing` — never stored as a continuous counter
+- **`position_ms` can be negative**: on track switch the room schedules position 0 at `updated_at + start_lead_ms` (room policy `start_lead_ms`, default 600ms) so clients can load and all start on time without losing the head of the track. A negative computed `should_be` means "starts in |x| ms" — clients load-and-pause, skip drift correction, and clamp to 0 when rendering. See `docs/spec-v1.md` §2.2
 - **Room actor**: per-room goroutine. Queue entries persisted in SQLite. Radio mode state is runtime-only (lost on restart)
 - **TrackRef format**: `provider:id` — opaque string below the API layer (e.g. `ncm:347230`, `bili:BV1xx`, `local:<uuid>`)
 - **All timestamps**: Unix milliseconds (UTC)

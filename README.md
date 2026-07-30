@@ -206,6 +206,10 @@ yuzu-cli policy set lobby '{"max_queue":100,"queue_limits":{"guest":5,"room_admi
 `member_player_volume` 缺省关闭；开启后也只允许由可信 Integration 签发、
 且 external scope 当前映射到该 Room 的 actor token 调整 Room headless output
 desired volume。普通 listener 和其他 Room 的 actor 仍无权控制。
+`start_lead_ms` 是切歌起播提前量（毫秒，`[0, 5000]`，缺省 600，0 = 关闭）：
+房间把新曲目的 position 0 排在切歌时刻之后这么久，客户端用这段窗口装载解码、
+到点同时开声，曲目头部不会被首帧延迟吃掉。客户端装载慢（公网小带宽、蓝牙
+输出）时调大，纯局域网可调小。
 
 ### 代理重连
 

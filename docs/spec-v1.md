@@ -73,6 +73,27 @@ should_be = position_ms + (server_now() - updated_at) * rate   (playing 时)
 should_be = position_ms                                        (paused 时)
 ```
 
+- **起播提前量（`should_be < 0`）**：切歌时服务端把新曲目的 position 0 排在
+  「切歌时刻 + 提前量」，因此 `position_ms` MAY 为负，推算出的 `should_be`
+  在这段窗口内同样为负，语义是「距本曲开播还有 `|should_be|` 毫秒」，预定
+  开播的服务端时刻为 `updated_at + (-position_ms)`。提前量由房间策略
+  `start_lead_ms` 控制（缺省 600ms，0 = 关闭）。
+  - 存在这段窗口的原因：客户端从收到 `playback.changed` 到第一个采样出声要经过
+    投递、HTTP 首字节、demux、音频设备灌注，累计数百毫秒。若房间时钟在切歌
+    瞬间就从 0 起跑，客户端装载完成时只能 seek 到已经走过的位置——**曲目头部
+    被确定性丢弃**。把 position 0 推到未来，这段延迟就被窗口吸收。
+  - 客户端处理：`should_be < 0` 时 SHOULD 立即装载媒体并**保持暂停**（定位到 0）
+    占住窗口预缓冲，到预定时刻再开声；MUST NOT 在此期间 seek（目标为负）或
+    学习 drift 基线。窗口内 `playing` 已经是 `true`——它表示时间线在跑，
+    **不能**用它判断是否该出声，只能看 `should_be` 的正负。
+  - 提前量窗口内暂停/恢复走的是同一个纯函数：暂停冻结负 position，恢复从剩余
+    倒计时续算，客户端无需特殊处理。
+  - 渲染进度时 MUST 把负值钳到 0（含大厅目录的 `now_playing` 摘要，它是同一对
+    `position_ms + updated_at` 字段）。
+  - 中途进房/重连时 `should_be` 通常已 ≥ 0，此时按常规定位——那段头部在房间
+    时间线上确实已经播过去了。
+  - 客户端 MAY 用已学到的设备输出延迟基线把开声动作提前同等毫秒，让声音而非
+    指令落在预定时刻上（见下方输出延迟区分）。
 - 对齐策略（客户端尽力而为，协议不强制）：
   - |偏差| > 150ms → seek
   - ≤ 150ms → 不动
@@ -479,13 +500,15 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 {
   "max_queue": 100,
   "queue_limits": { "guest": 5, "room_admin": 0 },
-  "member_player_volume": true
+  "member_player_volume": true,
+  "start_lead_ms": 600
 }
 ```
 
 - `max_queue`：待播队列总上限，0/缺省 = 不限。超限拒绝 `queue.add`，错误码 `queue_full`。
 - `queue_limits`：按身份的待播数上限。key 匹配身份的 **kind**（`guest`/`password`/`oidc`）或其任一 **role**；任一命中值为 0 → 显式不限（覆盖其他命中），否则取命中最大值，无命中 = 不限。超限拒绝，错误码 `quota_exceeded`。
 - `member_player_volume`：缺省 `false`。为 `true` 时，只允许由可信 Integration 签发、且来源 scope 当前默认 Room 正是该 Room 的 actor session 读取和设置 Room headless output desired volume；不授权普通 listener，不授权其他 Room，不授权单设备 mute、换房或绑定管理。
+- `start_lead_ms`：切歌起播提前量（毫秒），取值 `[0, 5000]`，缺省 600，0 = 关闭（切歌即 position 0）。房间内客户端装载普遍慢（公网带宽小、蓝牙输出）时调大；纯本地局域网可调小。语义与客户端处理见 §2.2。
 - 普通 guest 身份 ID 由名字确定性派生（`g_` + `sha256("guest:"+name)` 前 12 hex），同名重连仍是同一人；Integration synthetic guest 使用 3.6 的完整 external subject key——两者的限额与“移除自己点的歌”均可跨会话成立。
 - 电台补充不经过限额检查（补充只在队列 <3 时触发，天然有界）。
 - 播放历史与统计见 6 节 REST；`play_history` 只记**播放**（结束原因 `finished`/`skipped`），不记点歌意图。
@@ -1022,14 +1045,19 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
   current 为 null          → 停止播放
   track_ref 变了           → 用 stream_url 加载新媒体
   playing 变了             → 同步暂停/恢复
+  should_be < 0            → 起播提前量窗口：装载后保持暂停预缓冲，
+                             到 updated_at + (-position_ms) 时刻再开声，
+                             此期间跳过校偏（§2.2）
   之后执行校偏：
     should_be = position_ms + (server_now() - updated_at) * rate  (playing)
-    drift = 本地播放位置 - should_be
-    |drift| > 150ms        → seek 到 should_be
-    30–150ms               → 微调播放速率 (0.98–1.02) 缓追
-    < 30ms                 → 不动
+    drift = 本地播放位置 - should_be - drift_baseline
+    |drift| > 150ms        → seek 到 should_be + drift_baseline，基线作废重学
+    ≤ 150ms                → 不动
 周期任务：每 1s 校偏一次；每 60s 重校时一次（§2.2）
 ```
+
+纯 seek，不调速：变速会改变音高与听感，代价高于一次 150ms 以上的跳转。
+`drift_baseline` 是输出链路延迟造成的读数偏差，学习与使用细则见 §2.2。
 
 
 #### 9.2.1 Headless Agent 连接时序
