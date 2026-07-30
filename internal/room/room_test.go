@@ -548,3 +548,118 @@ func msgType(t *testing.T, msg any) string {
 	}
 	return envelope.Type
 }
+
+// TestAdvanceSchedulesStartLead 切歌把新曲目的 position 0 排在未来：position_ms
+// 为负，客户端用这段窗口装载解码，到点同时开声——否则装载延迟会确定性地
+// 吃掉曲目头部（客户端只能 seek 到房间已经走过的位置）。
+func TestAdvanceSchedulesStartLead(t *testing.T) {
+	r, _ := newTestRoom(t, "")
+	before := time.Now().UnixMilli()
+	if err := r.AddFor(guest, mkEntry("local:t0", guest.ID)); err != nil {
+		t.Fatalf("seed add: %v", err)
+	}
+
+	snapshot, err := r.Snapshot(guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := snapshot.Playback
+	if pb.Current == nil || !pb.Playing {
+		t.Fatalf("playback = %#v, want a playing current track", pb)
+	}
+	if pb.PositionMs != -DefaultStartLeadMs {
+		t.Fatalf("position_ms = %d, want -%d (start lead)", pb.PositionMs, DefaultStartLeadMs)
+	}
+	if pb.UpdatedAt < before {
+		t.Fatalf("updated_at = %d, want >= %d", pb.UpdatedAt, before)
+	}
+	// 预定开播时刻 = updated_at + |position_ms|，必须落在切歌之后
+	if startAt := pb.UpdatedAt - pb.PositionMs; startAt <= before {
+		t.Fatalf("scheduled start %d, want later than switch time %d", startAt, before)
+	}
+}
+
+// TestStartLeadPolicyOverride 房间策略可覆盖提前量；0 关闭（切歌即 position 0）。
+func TestStartLeadPolicyOverride(t *testing.T) {
+	for _, tc := range []struct {
+		policy string
+		want   int64
+	}{
+		{`{"start_lead_ms":0}`, 0},
+		{`{"start_lead_ms":1500}`, -1500},
+	} {
+		r, _ := newTestRoom(t, tc.policy)
+		if err := r.AddFor(guest, mkEntry("local:t0", guest.ID)); err != nil {
+			t.Fatalf("policy %s: seed add: %v", tc.policy, err)
+		}
+		snapshot, err := r.Snapshot(guest)
+		if err != nil {
+			t.Fatalf("policy %s: %v", tc.policy, err)
+		}
+		if got := snapshot.Playback.PositionMs; got != tc.want {
+			t.Fatalf("policy %s: position_ms = %d, want %d", tc.policy, got, tc.want)
+		}
+	}
+}
+
+// TestPauseDuringStartLeadFreezesCountdown 提前量窗口内暂停冻结倒计时，
+// resume 从剩余量续算——五元组是纯函数，负 position 走的是同一条路径。
+func TestPauseDuringStartLeadFreezesCountdown(t *testing.T) {
+	// 窗口取足够长，避免测试执行本身耗尽提前量。
+	r, _ := newTestRoom(t, `{"start_lead_ms":5000}`)
+	if err := r.AddFor(guest, mkEntry("local:t0", guest.ID)); err != nil {
+		t.Fatalf("seed add: %v", err)
+	}
+	if err := r.Pause(); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	paused, err := r.Snapshot(guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.Playback.Playing {
+		t.Fatal("playing = true after pause")
+	}
+	remaining := paused.Playback.PositionMs
+	if remaining >= 0 || remaining < -5000 {
+		t.Fatalf("paused position_ms = %d, want a pending negative countdown", remaining)
+	}
+
+	if err := r.Resume(); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	resumed, err := r.Snapshot(guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed.Playback.Playing {
+		t.Fatal("playing = false after resume")
+	}
+	if got := resumed.Playback.PositionMs; got != remaining {
+		t.Fatalf("resumed position_ms = %d, want unchanged %d", got, remaining)
+	}
+}
+
+// TestParsePolicyStartLeadBounds 提前量越界拒绝；缺省回落到默认值。
+func TestParsePolicyStartLeadBounds(t *testing.T) {
+	for _, raw := range []string{`{"start_lead_ms":-1}`, `{"start_lead_ms":5001}`} {
+		if _, err := ParsePolicy(raw); !errors.Is(err, ErrInvalidPolicy) {
+			t.Fatalf("ParsePolicy(%s) error = %v, want ErrInvalidPolicy", raw, err)
+		}
+	}
+	p, err := ParsePolicy(`{"max_queue":10}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.startLeadMs(); got != DefaultStartLeadMs {
+		t.Fatalf("unset start_lead_ms = %d, want default %d", got, DefaultStartLeadMs)
+	}
+	p, err = ParsePolicy(`{"start_lead_ms":0}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.startLeadMs(); got != 0 {
+		t.Fatalf("explicit 0 start_lead_ms = %d, want 0 (disabled)", got)
+	}
+}

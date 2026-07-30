@@ -26,7 +26,16 @@ type Policy struct {
 	MaxQueue           int            `json:"max_queue,omitempty"`            // 待播队列总上限，0 = 不限
 	QueueLimits        map[string]int `json:"queue_limits,omitempty"`         // kind/role → 待播上限
 	MemberPlayerVolume bool           `json:"member_player_volume,omitempty"` // scoped Integration actor 可调绑定播放器音量
+	// StartLeadMs 切歌起播提前量（毫秒）：新曲目的 position 0 被排在
+	// 「切歌时刻 + 提前量」，客户端拿到这段窗口装载解码，到点同时开声，
+	// 头部不再被装载延迟吃掉（spec-v1 §2.2 起播提前量）。
+	// nil = 用 DefaultStartLeadMs；0 = 关闭（切歌即 position 0，旧行为）。
+	// 房间内客户端装载普遍慢（公网/蓝牙输出）时调大。
+	StartLeadMs *int `json:"start_lead_ms,omitempty"`
 }
+
+// MaxStartLeadMs 起播提前量上限。超过 5s 的曲间静默不像点唱机像故障。
+const MaxStartLeadMs = 5000
 
 // ParsePolicy 解析并校验策略 JSON。空串等价于 {}。
 func ParsePolicy(raw string) (Policy, error) {
@@ -45,7 +54,18 @@ func ParsePolicy(raw string) (Policy, error) {
 			return p, fmt.Errorf("%w: queue_limits[%q] must be >= 0", ErrInvalidPolicy, k)
 		}
 	}
+	if p.StartLeadMs != nil && (*p.StartLeadMs < 0 || *p.StartLeadMs > MaxStartLeadMs) {
+		return p, fmt.Errorf("%w: start_lead_ms must be within [0, %d]", ErrInvalidPolicy, MaxStartLeadMs)
+	}
 	return p, nil
+}
+
+// startLeadMs 本房间生效的起播提前量。
+func (p Policy) startLeadMs() int64 {
+	if p.StartLeadMs != nil {
+		return int64(*p.StartLeadMs)
+	}
+	return DefaultStartLeadMs
 }
 
 // queueLimit 该身份的待播上限：0 = 不限。

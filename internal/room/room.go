@@ -85,6 +85,11 @@ func EntryFromTrack(t provider.Track, requestedBy string) QueueEntry {
 }
 
 // Playback 播放状态五元组（权威）。
+//
+// PositionMs 可以为负：切歌时房间把新曲目的 position 0 排在未来
+// 「UpdatedAt + |PositionMs|」时刻（起播提前量，见 Policy.StartLeadMs），
+// 推算出的 should_be 在这段窗口内为负，语义是「还有 |should_be| ms 开播」。
+// 客户端应在此期间完成装载并保持暂停，到点开声；渲染进度条时钳到 0。
 type Playback struct {
 	Current    *QueueEntry `json:"current"`
 	PositionMs int64       `json:"position_ms"`
@@ -93,8 +98,13 @@ type Playback struct {
 	Rate       float64     `json:"rate"`
 }
 
+// DefaultStartLeadMs 默认起播提前量。取值覆盖典型的「WS 投递 + HTTP 首字节 +
+// demux + 音频设备灌注」链路：低于此值仍会吃掉头部，高于此值曲间静默开始可闻。
+const DefaultStartLeadMs = 600
+
 // NowPlayingSummary 是大厅目录可公开的当前播放裁剪信息。
 // 它不含 track_ref、requested_by 或按身份签发的 stream_url。
+// PositionMs 与 Playback 同源，起播提前量窗口内为负——渲染方钳到 0。
 type NowPlayingSummary struct {
 	Title      string  `json:"title"`
 	Artist     string  `json:"artist"`
@@ -661,6 +671,10 @@ func (r *Room) Run(ctx context.Context) {
 	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充。
 	// 毒化条目（时长未知，如元数据缺失的历史遗留）直接丢弃——
 	// 它们会让 scheduleEnd 永不触发，队列永久停滞。
+	//
+	// 新曲目的 position 起于 -startLeadMs：房间时间线在曲间留出一段提前量，
+	// 客户端用它装载解码，到 position 0 时同时开声。没有这段窗口时，
+	// 客户端装载完成时房间已经走过几百毫秒，只能 seek 过去——头部固定丢失。
 	advance := func(reason string) error {
 		if len(queue) == 0 && radio != nil {
 			if err := refill(); err != nil {
@@ -716,7 +730,7 @@ func (r *Room) Run(ctx context.Context) {
 		}
 
 		playback = &Playback{
-			Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
+			Current: &next, PositionMs: -policy.startLeadMs(), UpdatedAt: now, Playing: true, Rate: 1.0,
 		}
 		// 物理层质量信息：已缓存则立即可知（Resolve 已发生）
 		if row, err := r.st.GetCacheRow(ctx, next.TrackRef); err == nil {
