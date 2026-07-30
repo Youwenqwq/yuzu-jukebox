@@ -4,3 +4,10 @@ bin/
 /config.json
 /edgeone.json
 temp/
+.claude/
+.vscode/
+.idea/
+.DS_Store
+*.exe
+*.test
+*.out
