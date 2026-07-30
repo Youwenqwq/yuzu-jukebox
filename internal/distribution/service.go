@@ -21,12 +21,13 @@ import (
 )
 
 var (
-	ErrNoWork               = sql.ErrNoRows
-	ErrInvalidLease         = store.ErrDistributionLeaseInvalid
-	ErrExpiredLease         = store.ErrDistributionLeaseExpired
-	ErrStaleProgress        = store.ErrDistributionProgressStale
-	ErrInvalidCredential    = errors.New("invalid acceleration credential")
-	ErrAccelerationDisabled = errors.New("acceleration is disabled")
+	ErrNoWork                = sql.ErrNoRows
+	ErrInvalidLease          = store.ErrDistributionLeaseInvalid
+	ErrExpiredLease          = store.ErrDistributionLeaseExpired
+	ErrStaleProgress         = store.ErrDistributionProgressStale
+	ErrCancellationRequested = store.ErrDistributionCancellationRequested
+	ErrInvalidCredential     = errors.New("invalid acceleration credential")
+	ErrAccelerationDisabled  = errors.New("acceleration is disabled")
 )
 
 type Candidate = store.DistributionCandidate
@@ -98,7 +99,7 @@ func (s *Service) Claim(
 		now.UnixMilli(), now.Add(ttl).UnixMilli())
 }
 
-func (s *Service) Lease(ctx context.Context, accelerationID, leaseID string) (Lease, error) {
+func (s *Service) LeaseStatus(ctx context.Context, accelerationID, leaseID string) (Lease, error) {
 	lease, err := s.st.GetDistributionLease(ctx, leaseID)
 	if err != nil {
 		return Lease{}, err
@@ -108,6 +109,17 @@ func (s *Service) Lease(ctx context.Context, accelerationID, leaseID string) (Le
 	}
 	if lease.ExpiresAt <= s.now().UnixMilli() {
 		return Lease{}, ErrExpiredLease
+	}
+	return lease, nil
+}
+
+func (s *Service) Lease(ctx context.Context, accelerationID, leaseID string) (Lease, error) {
+	lease, err := s.LeaseStatus(ctx, accelerationID, leaseID)
+	if err != nil {
+		return Lease{}, err
+	}
+	if lease.CancelRequested {
+		return Lease{}, ErrCancellationRequested
 	}
 	return lease, nil
 }
@@ -144,6 +156,19 @@ func (s *Service) Complete(
 		return errors.New("incomplete distribution candidate")
 	}
 	return s.st.CompleteDistribution(ctx, leaseID, owner, candidate, s.now().UnixMilli())
+}
+func (s *Service) CompleteCancellation(
+	ctx context.Context,
+	accelerationID, leaseID, owner string,
+) error {
+	lease, err := s.LeaseStatus(ctx, accelerationID, leaseID)
+	if err != nil {
+		return err
+	}
+	if lease.Owner != owner || !lease.CancelRequested {
+		return ErrInvalidLease
+	}
+	return s.st.CompleteDistributionCancellation(ctx, leaseID, owner, s.now().UnixMilli())
 }
 
 func (s *Service) Fail(

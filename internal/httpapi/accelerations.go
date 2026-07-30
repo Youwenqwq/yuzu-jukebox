@@ -37,6 +37,8 @@ type accelerationView struct {
 	StorageBudgetBytes          int64  `json:"storage_budget_bytes"`
 	StorageHighWatermarkPercent int    `json:"storage_high_watermark_percent"`
 	StorageLowWatermarkPercent  int    `json:"storage_low_watermark_percent"`
+	InventoryIntervalSeconds    int    `json:"inventory_interval_seconds"`
+	InventoryStaleAfterSeconds  int    `json:"inventory_stale_after_seconds"`
 	PublisherConfigured         bool   `json:"publisher_credential_configured"`
 	DeliveryConfigured          bool   `json:"delivery_credential_configured"`
 	BackendConfigured           bool   `json:"backend_credential_configured"`
@@ -64,6 +66,8 @@ type createAccelerationRequest struct {
 	StorageBudgetBytes          int64  `json:"storage_budget_bytes"`
 	StorageHighWatermarkPercent int    `json:"storage_high_watermark_percent"`
 	StorageLowWatermarkPercent  int    `json:"storage_low_watermark_percent"`
+	InventoryIntervalSeconds    int    `json:"inventory_interval_seconds"`
+	InventoryStaleAfterSeconds  int    `json:"inventory_stale_after_seconds"`
 }
 
 type updateAccelerationRequest struct {
@@ -78,6 +82,8 @@ type updateAccelerationRequest struct {
 	StorageBudgetBytes          *int64  `json:"storage_budget_bytes"`
 	StorageHighWatermarkPercent *int    `json:"storage_high_watermark_percent"`
 	StorageLowWatermarkPercent  *int    `json:"storage_low_watermark_percent"`
+	InventoryIntervalSeconds    *int    `json:"inventory_interval_seconds"`
+	InventoryStaleAfterSeconds  *int    `json:"inventory_stale_after_seconds"`
 }
 
 func accelerationResponse(acceleration store.Acceleration) accelerationView {
@@ -91,6 +97,8 @@ func accelerationResponse(acceleration store.Acceleration) accelerationView {
 		StorageBudgetBytes:          acceleration.StorageBudgetBytes,
 		StorageHighWatermarkPercent: acceleration.StorageHighWatermarkPercent,
 		StorageLowWatermarkPercent:  acceleration.StorageLowWatermarkPercent,
+		InventoryIntervalSeconds:    acceleration.InventoryIntervalSeconds,
+		InventoryStaleAfterSeconds:  acceleration.InventoryStaleAfterSeconds,
 		PublisherConfigured:         len(acceleration.PublisherTokenHash) != 0,
 		DeliveryConfigured:          len(acceleration.DeliveryTokenHash) != 0,
 		BackendConfigured:           acceleration.BackendToken != "",
@@ -183,10 +191,18 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 	if body.StorageLowWatermarkPercent == 0 {
 		body.StorageLowWatermarkPercent = 85
 	}
+	if body.InventoryIntervalSeconds == 0 {
+		body.InventoryIntervalSeconds = 900
+	}
+	if body.InventoryStaleAfterSeconds == 0 {
+		body.InventoryStaleAfterSeconds = 1800
+	}
 	if body.LeaseTTLSeconds <= 0 || uploadRate < 0 || body.MaxObjectBytes <= 0 ||
 		body.StorageBudgetBytes <= 0 || body.StorageLowWatermarkPercent <= 0 ||
 		body.StorageHighWatermarkPercent > 100 ||
-		body.StorageLowWatermarkPercent >= body.StorageHighWatermarkPercent {
+		body.StorageLowWatermarkPercent >= body.StorageHighWatermarkPercent ||
+		body.InventoryIntervalSeconds < 60 ||
+		body.InventoryStaleAfterSeconds < body.InventoryIntervalSeconds {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration limits")
 		return
 	}
@@ -213,6 +229,8 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 		StorageBudgetBytes:          body.StorageBudgetBytes,
 		StorageHighWatermarkPercent: body.StorageHighWatermarkPercent,
 		StorageLowWatermarkPercent:  body.StorageLowWatermarkPercent,
+		InventoryIntervalSeconds:    body.InventoryIntervalSeconds,
+		InventoryStaleAfterSeconds:  body.InventoryStaleAfterSeconds,
 	}, publisherHash, deliveryHash, backendToken)
 	if err != nil {
 		writeErr(w, http.StatusConflict, "conflict", "acceleration already exists")
@@ -260,6 +278,8 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 		StorageBudgetBytes:          current.StorageBudgetBytes,
 		StorageHighWatermarkPercent: current.StorageHighWatermarkPercent,
 		StorageLowWatermarkPercent:  current.StorageLowWatermarkPercent,
+		InventoryIntervalSeconds:    current.InventoryIntervalSeconds,
+		InventoryStaleAfterSeconds:  current.InventoryStaleAfterSeconds,
 	}
 	if body.Name != nil {
 		update.Name = strings.TrimSpace(*body.Name)
@@ -291,6 +311,12 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	if body.StorageLowWatermarkPercent != nil {
 		update.StorageLowWatermarkPercent = *body.StorageLowWatermarkPercent
 	}
+	if body.InventoryIntervalSeconds != nil {
+		update.InventoryIntervalSeconds = *body.InventoryIntervalSeconds
+	}
+	if body.InventoryStaleAfterSeconds != nil {
+		update.InventoryStaleAfterSeconds = *body.InventoryStaleAfterSeconds
+	}
 	if body.Enabled != nil {
 		update.Enabled = *body.Enabled
 	}
@@ -298,7 +324,9 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 		update.UploadRateBytesPerSecond < 0 || update.MaxObjectBytes <= 0 ||
 		update.StorageBudgetBytes <= 0 || update.StorageLowWatermarkPercent <= 0 ||
 		update.StorageHighWatermarkPercent > 100 ||
-		update.StorageLowWatermarkPercent >= update.StorageHighWatermarkPercent {
+		update.StorageLowWatermarkPercent >= update.StorageHighWatermarkPercent ||
+		update.InventoryIntervalSeconds < 60 ||
+		update.InventoryStaleAfterSeconds < update.InventoryIntervalSeconds {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration configuration")
 		return
 	}
@@ -319,6 +347,8 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 		current.StorageBudgetBytes = update.StorageBudgetBytes
 		current.StorageHighWatermarkPercent = update.StorageHighWatermarkPercent
 		current.StorageLowWatermarkPercent = update.StorageLowWatermarkPercent
+		current.InventoryIntervalSeconds = update.InventoryIntervalSeconds
+		current.InventoryStaleAfterSeconds = update.InventoryStaleAfterSeconds
 		controlOK, backendOK, healthDetail = distribution.CheckHealth(
 			r.Context(), accelerationHealthClient, current, current.BackendToken,
 		)
@@ -489,6 +519,14 @@ func (s *Server) accelerationStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load acceleration storage status")
 		return
 	}
+	var inventoryScan any
+	latestScan, scanErr := s.st.LatestAccelerationInventoryScan(r.Context(), id)
+	if scanErr == nil {
+		inventoryScan = latestScan
+	} else if !errors.Is(scanErr, sql.ErrNoRows) {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load inventory scan")
+		return
+	}
 	now := time.Now().UnixMilli()
 	publisherViews := make([]map[string]any, 0, len(publishers))
 	for _, publisher := range publishers {
@@ -504,7 +542,8 @@ func (s *Server) accelerationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"acceleration": accelerationResponse(acceleration), "summary": summary,
-		"storage": storageStatus, "publishers": publisherViews, "active": attempts,
+		"storage": storageStatus, "inventory_scan": inventoryScan,
+		"publishers": publisherViews, "active": attempts,
 		"counters": metrics, "last_24_hours": rolling,
 	})
 }
@@ -513,14 +552,116 @@ func (s *Server) accelerationRequests(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleMediaAdmin); !ok {
 		return
 	}
+	id := r.PathValue("id")
+	if _, err := s.st.GetAcceleration(r.Context(), id); errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "acceleration not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load acceleration")
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	rows, err := s.st.ListDistributionRequests(r.Context(), r.PathValue("id"),
+	rows, err := s.st.ListDistributionRequests(r.Context(), id,
 		r.URL.Query().Get("state"), time.Now().UnixMilli(), limit)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"requests": rows})
+}
+
+func (s *Server) accelerationRequest(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleMediaAdmin); !ok {
+		return
+	}
+	row, err := s.st.GetDistributionRequest(r.Context(), r.PathValue("id"),
+		r.PathValue("track_ref"), time.Now().UnixMilli())
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "distribution request not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load distribution request")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"request": row})
+}
+func (s *Server) cancelAccelerationRequest(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	trackRef := r.PathValue("track_ref")
+	now := time.Now().UnixMilli()
+	err := s.st.RequestDistributionCancellation(r.Context(), id, trackRef, now)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeErr(w, http.StatusNotFound, "not_found", "distribution request not found")
+		return
+	case errors.Is(err, store.ErrDistributionRequestReady):
+		writeErr(w, http.StatusConflict, "request_ready", "distribution request is already ready")
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to cancel distribution request")
+		return
+	}
+	s.audit(r.Context(), actor.ID, "acceleration.request.cancel", id,
+		map[string]any{"track_ref": trackRef})
+	row, err := s.st.GetDistributionRequest(r.Context(), id, trackRef, now)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load canceled request")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"request": row})
+}
+
+func (s *Server) refreshAccelerationInventory(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := s.st.GetAcceleration(r.Context(), id); errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "acceleration not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load acceleration")
+		return
+	}
+	scan, err := s.st.RequestAccelerationInventoryScan(r.Context(), id, time.Now().UnixMilli())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to request inventory refresh")
+		return
+	}
+	s.audit(r.Context(), actor.ID, "acceleration.inventory.refresh", id,
+		map[string]any{"scan_id": scan.ID})
+	writeJSON(w, http.StatusAccepted, map[string]any{"scan": scan})
+}
+
+func (s *Server) accelerationInventoryStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleMediaAdmin); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	storageStatus, err := s.st.AccelerationStorageStatus(r.Context(), id, time.Now().UnixMilli())
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not_found", "acceleration not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load inventory status")
+		return
+	}
+	var scan any
+	latest, err := s.st.LatestAccelerationInventoryScan(r.Context(), id)
+	if err == nil {
+		scan = latest
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load inventory scan")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"storage": storageStatus, "scan": scan})
 }
 
 func validateAccelerationURLs(controlRaw, backendRaw string) (string, string, error) {

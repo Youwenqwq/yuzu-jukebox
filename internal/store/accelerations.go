@@ -33,6 +33,8 @@ type Acceleration struct {
 	StorageBudgetBytes          int64
 	StorageHighWatermarkPercent int
 	StorageLowWatermarkPercent  int
+	InventoryIntervalSeconds    int
+	InventoryStaleAfterSeconds  int
 	ControlHealthy              *bool
 	BackendHealthy              *bool
 	HealthError                 string
@@ -53,6 +55,8 @@ type AccelerationUpdate struct {
 	StorageBudgetBytes          int64
 	StorageHighWatermarkPercent int
 	StorageLowWatermarkPercent  int
+	InventoryIntervalSeconds    int
+	InventoryStaleAfterSeconds  int
 	HealthChecked               bool
 	ControlHealthy              bool
 	BackendHealthy              bool
@@ -104,6 +108,12 @@ func (s *Store) CreateAcceleration(
 	if acceleration.StorageLowWatermarkPercent == 0 {
 		acceleration.StorageLowWatermarkPercent = 85
 	}
+	if acceleration.InventoryIntervalSeconds == 0 {
+		acceleration.InventoryIntervalSeconds = 900
+	}
+	if acceleration.InventoryStaleAfterSeconds == 0 {
+		acceleration.InventoryStaleAfterSeconds = 1800
+	}
 	now := nowMs()
 	encryptedBackend, err := s.encrypt(backendToken)
 	if err != nil {
@@ -114,15 +124,17 @@ func (s *Store) CreateAcceleration(
 		 backend_base_url, publisher_token_hash, delivery_token_hash, backend_token,
 		 lease_ttl_seconds, upload_rate_bytes_per_second, max_object_bytes,
 		 storage_budget_bytes, storage_high_watermark_percent,
-		 storage_low_watermark_percent, created_at, updated_at)
-		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 storage_low_watermark_percent, inventory_interval_seconds,
+		 inventory_stale_after_seconds, created_at, updated_at)
+		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		acceleration.ID, acceleration.Name, acceleration.Kind,
 		acceleration.PublishOnCacheReady, acceleration.ControlBaseURL,
 		acceleration.BackendBaseURL, publisherHash, deliveryHash, encryptedBackend,
 		acceleration.LeaseTTLSeconds, acceleration.UploadRateBytesPerSecond,
 		acceleration.MaxObjectBytes, acceleration.StorageBudgetBytes,
 		acceleration.StorageHighWatermarkPercent,
-		acceleration.StorageLowWatermarkPercent, now, now)
+		acceleration.StorageLowWatermarkPercent, acceleration.InventoryIntervalSeconds,
+		acceleration.InventoryStaleAfterSeconds, now, now)
 	if err != nil {
 		return Acceleration{}, err
 	}
@@ -175,11 +187,26 @@ func (s *Store) UpdateAcceleration(ctx context.Context, id string, update Accele
 	}
 	defer tx.Rollback()
 	now := nowMs()
+	if update.InventoryIntervalSeconds == 0 || update.InventoryStaleAfterSeconds == 0 {
+		var currentInterval, currentStale int
+		if err := tx.QueryRowContext(ctx, `SELECT inventory_interval_seconds,
+			inventory_stale_after_seconds FROM accelerations WHERE id = ?`, id).Scan(
+			&currentInterval, &currentStale); err != nil {
+			return Acceleration{}, err
+		}
+		if update.InventoryIntervalSeconds == 0 {
+			update.InventoryIntervalSeconds = currentInterval
+		}
+		if update.InventoryStaleAfterSeconds == 0 {
+			update.InventoryStaleAfterSeconds = currentStale
+		}
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE accelerations SET
 		name = ?, enabled = ?, publish_on_cache_ready = ?, control_base_url = ?,
 		backend_base_url = ?, lease_ttl_seconds = ?, upload_rate_bytes_per_second = ?,
 		max_object_bytes = ?, storage_budget_bytes = ?,
 		storage_high_watermark_percent = ?, storage_low_watermark_percent = ?,
+		inventory_interval_seconds = ?, inventory_stale_after_seconds = ?,
 		control_healthy = CASE WHEN ? THEN ? ELSE control_healthy END,
 		backend_healthy = CASE WHEN ? THEN ? ELSE backend_healthy END,
 		health_error = CASE WHEN ? THEN ? ELSE health_error END,
@@ -189,7 +216,8 @@ func (s *Store) UpdateAcceleration(ctx context.Context, id string, update Accele
 		update.ControlBaseURL, update.BackendBaseURL, update.LeaseTTLSeconds,
 		update.UploadRateBytesPerSecond, update.MaxObjectBytes,
 		update.StorageBudgetBytes, update.StorageHighWatermarkPercent,
-		update.StorageLowWatermarkPercent,
+		update.StorageLowWatermarkPercent, update.InventoryIntervalSeconds,
+		update.InventoryStaleAfterSeconds,
 		update.HealthChecked, update.ControlHealthy,
 		update.HealthChecked, update.BackendHealthy,
 		update.HealthChecked, update.HealthError,
@@ -434,7 +462,8 @@ const accelerationSelect = `SELECT id, name, kind, enabled, publish_on_cache_rea
 	publisher_pending_token_hash, delivery_token_hash, delivery_pending_token_hash,
 	backend_token, backend_pending_token, lease_ttl_seconds,
 	upload_rate_bytes_per_second, max_object_bytes, storage_budget_bytes,
-	storage_high_watermark_percent, storage_low_watermark_percent, control_healthy,
+	storage_high_watermark_percent, storage_low_watermark_percent,
+	inventory_interval_seconds, inventory_stale_after_seconds, control_healthy,
 	backend_healthy, health_error, last_health_at, created_at, updated_at
 	FROM accelerations`
 
@@ -456,9 +485,10 @@ func (s *Store) scanAcceleration(row accelerationScanner) (Acceleration, error) 
 		&acceleration.LeaseTTLSeconds, &acceleration.UploadRateBytesPerSecond,
 		&acceleration.MaxObjectBytes, &acceleration.StorageBudgetBytes,
 		&acceleration.StorageHighWatermarkPercent,
-		&acceleration.StorageLowWatermarkPercent, &controlHealthy, &backendHealthy,
-		&acceleration.HealthError, &lastHealth, &acceleration.CreatedAt,
-		&acceleration.UpdatedAt,
+		&acceleration.StorageLowWatermarkPercent,
+		&acceleration.InventoryIntervalSeconds, &acceleration.InventoryStaleAfterSeconds,
+		&controlHealthy, &backendHealthy, &acceleration.HealthError, &lastHealth,
+		&acceleration.CreatedAt, &acceleration.UpdatedAt,
 	)
 	if err != nil {
 		return Acceleration{}, err

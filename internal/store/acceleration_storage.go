@@ -66,12 +66,14 @@ type AccelerationStorageStatus struct {
 	AccountedBytes       int64  `json:"accounted_bytes"`
 	ReservedBytes        int64  `json:"reserved_bytes"`
 	ObservedBytes        int64  `json:"observed_bytes"`
-	ObjectCount          int64  `json:"object_count"`
+	ManagedObjectCount   int64  `json:"managed_object_count"`
 	ObservedObjectCount  int64  `json:"observed_object_count"`
 	OrphanCount          int64  `json:"orphan_count"`
 	MissingCount         int64  `json:"missing_count"`
 	PendingDeletionCount int64  `json:"pending_deletion_count"`
-	LastReconciledAt     int64  `json:"last_reconciled_at,omitempty"`
+	ObservedAt           int64  `json:"observed_at,omitempty"`
+	StaleAfterSeconds    int    `json:"stale_after_seconds"`
+	Stale                bool   `json:"stale"`
 	ReconciliationError  string `json:"reconciliation_error,omitempty"`
 	Pressure             string `json:"pressure"`
 }
@@ -184,9 +186,10 @@ func (s *Store) AccelerationStorageStatus(
 ) (AccelerationStorageStatus, error) {
 	var status AccelerationStorageStatus
 	if err := s.db.QueryRowContext(ctx, `SELECT storage_budget_bytes,
-		storage_high_watermark_percent, storage_low_watermark_percent
-		FROM accelerations WHERE id = ?`, accelerationID).Scan(
+		storage_high_watermark_percent, storage_low_watermark_percent,
+		inventory_stale_after_seconds FROM accelerations WHERE id = ?`, accelerationID).Scan(
 		&status.BudgetBytes, &status.HighWatermarkPercent, &status.LowWatermarkPercent,
+		&status.StaleAfterSeconds,
 	); err != nil {
 		return AccelerationStorageStatus{}, err
 	}
@@ -196,7 +199,7 @@ func (s *Store) AccelerationStorageStatus(
 		COUNT(*), COALESCE(SUM(CASE WHEN state = 'orphan' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN state = 'missing' THEN 1 ELSE 0 END), 0)
 		FROM acceleration_objects WHERE acceleration_id = ?`, accelerationID).Scan(
-		&status.AccountedBytes, &status.ObjectCount, &status.OrphanCount, &status.MissingCount,
+		&status.AccountedBytes, &status.ManagedObjectCount, &status.OrphanCount, &status.MissingCount,
 	); err != nil {
 		return AccelerationStorageStatus{}, err
 	}
@@ -212,10 +215,12 @@ func (s *Store) AccelerationStorageStatus(
 	err := s.db.QueryRowContext(ctx, `SELECT observed_bytes, observed_object_count,
 		last_reconciled_at, reconciliation_error FROM acceleration_storage_status
 		WHERE acceleration_id = ?`, accelerationID).Scan(&status.ObservedBytes,
-		&status.ObservedObjectCount, &status.LastReconciledAt, &status.ReconciliationError)
+		&status.ObservedObjectCount, &status.ObservedAt, &status.ReconciliationError)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AccelerationStorageStatus{}, err
 	}
+	status.Stale = status.ObservedAt == 0 ||
+		now-status.ObservedAt > int64(status.StaleAfterSeconds)*1000
 	status.Pressure = storagePressure(status)
 	return status, nil
 }

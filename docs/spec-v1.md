@@ -761,15 +761,21 @@ credential；后续查询只返回 credential-configured/pending 布尔值。
 | `GET /api/v1/accelerations/{id}` | 返回持久配置、健康状态与 credential flags |
 | `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy、水位或 enabled；启用前强制 readiness |
 | `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且不再拥有媒体或进行中工作的资源 |
-| `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、累计与最近 24 小时指标 |
-| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 pending/uploading/failed/ready 请求 |
+| `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、当前 inventory scan、累计与最近 24 小时指标 |
+| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued|leased|retry_wait|cancel_requested|ready|canceled` 请求；queued 返回 `pending_reason` |
+| `GET /api/v1/accelerations/{id}/requests/{track_ref...}` | 查询单个请求的 lease、phase、进度、重试和取消状态 |
+| `DELETE /api/v1/accelerations/{id}/requests/{track_ref...}` | 幂等取消；未认领任务立即 canceled，live lease 进入 cancel_requested |
+| `POST /api/v1/accelerations/{id}/inventory/refresh` | HTTP 202；创建或复用当前完整 inventory scan |
+| `GET /api/v1/accelerations/{id}/inventory/status` | 返回最后完整 storage 快照及当前/最近 scan |
 | `POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare` | 生成一次性 pending token |
 | `POST /api/v1/accelerations/{id}/credentials/{purpose}/activate` | 验证并切换 pending token |
 
 创建/更新的供应商无关字段为 `control_base_url`、`backend_base_url`、
 `publish_on_cache_ready`、`lease_ttl_seconds`、`upload_rate_bytes_per_second`、
-`max_object_bytes`、`storage_budget_bytes`、`storage_high_watermark_percent` 与
-`storage_low_watermark_percent`。默认容量是 850 MiB，高/低水位是 95%/85%。
+`max_object_bytes`、`storage_budget_bytes`、`storage_high_watermark_percent`、
+`storage_low_watermark_percent`、`inventory_interval_seconds` 与
+`inventory_stale_after_seconds`。默认容量是 850 MiB，高/低水位是 95%/85%；
+inventory 默认每 900 秒调度，超过 1800 秒没有完整观测即标记 stale。
 
 `purpose` 仅允许 `publisher|delivery|backend`。pending publisher/delivery token
 在切换窗口内可认证；backend activate 前必须通过受保护的 backend health。启用要求端点、
@@ -784,6 +790,13 @@ config 可向已认证 adapter 返回解密后的 backend token、lease TTL、�
 `claimed→downloading→uploading→verifying→completing` 的非逆向转换，字节计数必须单调
 增加；合法进度更新对 lease 做受资源 TTL 上限约束的续租。
 
+取消是协作式 lease 合同。Core 一旦收到管理端 DELETE，后续 progress、reserve、complete
+必须返回 409 `cancellation_requested`；publisher 也可轮询
+`GET /internal/v1/accelerations/leases/{id}`。adapter 必须停止源文件读取/上传、清理临时
+对象，并调用 `POST /internal/v1/accelerations/leases/{id}/cancel` 确认。若 publisher
+失联，lease 到期回收会把 cancel_requested 请求终结为 canceled。取消记录和 attempt
+历史必须保留，不得通过删除请求记录实现取消。
+
 完整对象上传前，publisher 必须对 lease 调
 `POST /internal/v1/accelerations/leases/{id}/reserve`，提交 opaque `locator` 与
 `size_bytes`。Core 对 `(acceleration_id, locator)` 去重，并在同一事务中计算已记账对象与
@@ -792,12 +805,16 @@ candidate 失效并创建删除 job。adapter 通过
 `POST /internal/v1/accelerations/deletions/claim` 领取 job，调用供应商 API 删除后再
 complete；失败必须调用 fail 并给出有限 retry delay。
 
-adapter 必须周期性向 `POST /internal/v1/accelerations/inventory` 分页提交同一
-`snapshot_id`，最后一批置 `complete:true`。Core 以完整快照更新 observed bytes、
-orphan/missing 对象和 reconcile 时间；unknown locator 只作为 opaque orphan 记账，不会
-被 Core 直接解释成供应商 key。`status.storage` 同时返回 accounted/reserved/observed
-bytes、对象数、pending deletion、水位和 pressure。删除到低水位前，GC 可以使被选中的
-candidate 立即 unavailable；播放因此走既有源站 fallback，而不是继续引用待删对象。
+Core 以持久 inventory scan task 调度外部观测。adapter 先调用
+`POST /internal/v1/accelerations/inventory/claim` 认领 scan，再向
+`POST /internal/v1/accelerations/inventory` 分页提交同一 `scan_id`；所有页面进入独立
+staging generation，只有最后一批 `complete:true` 才在事务中原子更新 observed bytes、
+managed/observed/orphan/missing 对象数和 `observed_at`。扫描失败必须调用
+`POST /internal/v1/accelerations/inventory/{id}/fail`；失败或不完整 generation 不得覆盖
+上一份完整快照。unknown locator 只作为 opaque orphan 记账，不会被 Core 解释成供应商
+key。`storage.stale` 表示最后完整 `observed_at` 已超过资源的 freshness window；它不把
+数据库查询时间冒充外部实时观测。删除到低水位前，GC 可以使被选中的 candidate 立即
+unavailable；播放因此走既有源站 fallback，而不是继续引用待删对象。
 
 ## 7. 错误码
 
@@ -822,6 +839,9 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `acceleration_storage_full` | 507 | 新对象会越过资源高水位；Core 已按 policy 排队回收，publisher 应稍后重试 |
 | `acceleration_storage_unmanaged` | 409 | 资源缺少正数容量预算；启用 readiness 同样会拒绝 |
 | `acceleration_storage_reserved` | 409 | 同一 opaque locator 已由另一个 live lease 预留；publisher 应稍后重试 |
+| `request_ready` | 409 | 已完成的 distribution request 不允许取消 |
+| `cancellation_requested` | 409 | 管理端已请求取消 live lease；publisher 必须停止并确认取消 |
+| `inventory_scan_invalid` | 409 | inventory scan 不存在、租约过期、owner/observed_at 不匹配或状态错误 |
 | `deletion_invalid` | 409 | 删除 job 不存在、已过期、状态错误或不属于提交 owner |
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |

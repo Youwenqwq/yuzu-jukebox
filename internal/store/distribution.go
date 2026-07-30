@@ -9,18 +9,21 @@ import (
 )
 
 var (
-	ErrDistributionLeaseInvalid  = errors.New("distribution lease invalid")
-	ErrDistributionLeaseExpired  = errors.New("distribution lease expired")
-	ErrDistributionProgressStale = errors.New("distribution progress is stale")
+	ErrDistributionLeaseInvalid          = errors.New("distribution lease invalid")
+	ErrDistributionLeaseExpired          = errors.New("distribution lease expired")
+	ErrDistributionProgressStale         = errors.New("distribution progress is stale")
+	ErrDistributionCancellationRequested = errors.New("distribution cancellation requested")
+	ErrDistributionRequestReady          = errors.New("distribution request is ready")
 )
 
 type DistributionLease struct {
-	ID             string `json:"id"`
-	AccelerationID string `json:"acceleration_id"`
-	TrackRef       string `json:"track_ref"`
-	Owner          string `json:"owner"`
-	ExpiresAt      int64  `json:"expires_at"`
-	CreatedAt      int64  `json:"created_at"`
+	ID              string `json:"id"`
+	AccelerationID  string `json:"acceleration_id"`
+	TrackRef        string `json:"track_ref"`
+	Owner           string `json:"owner"`
+	ExpiresAt       int64  `json:"expires_at"`
+	CreatedAt       int64  `json:"created_at"`
+	CancelRequested bool   `json:"cancel_requested,omitempty"`
 }
 
 type DistributionCandidate struct {
@@ -37,24 +40,31 @@ type DistributionCandidate struct {
 }
 
 type DistributionStatus struct {
-	Requested int64 `json:"requested"`
-	Pending   int64 `json:"pending"`
-	Leased    int64 `json:"leased"`
-	Ready     int64 `json:"ready"`
+	Requested       int64 `json:"requested"`
+	Queued          int64 `json:"queued"`
+	Leased          int64 `json:"leased"`
+	RetryWait       int64 `json:"retry_wait"`
+	CancelRequested int64 `json:"cancel_requested"`
+	Ready           int64 `json:"ready"`
+	Canceled        int64 `json:"canceled"`
+	OldestQueuedAt  int64 `json:"oldest_queued_at,omitempty"`
 }
 
 type DistributionRequestView struct {
-	AccelerationID string                 `json:"acceleration_id"`
-	TrackRef       string                 `json:"track_ref"`
-	State          string                 `json:"state"`
-	RequestedAt    int64                  `json:"requested_at"`
-	UpdatedAt      int64                  `json:"updated_at"`
-	NextAttemptAt  int64                  `json:"next_attempt_at"`
-	Attempts       int64                  `json:"attempts"`
-	LastError      string                 `json:"last_error,omitempty"`
-	Lease          *DistributionLease     `json:"lease,omitempty"`
-	Candidate      *DistributionCandidate `json:"candidate,omitempty"`
-	Progress       *DistributionAttempt   `json:"progress,omitempty"`
+	AccelerationID    string                 `json:"acceleration_id"`
+	TrackRef          string                 `json:"track_ref"`
+	State             string                 `json:"state"`
+	PendingReason     string                 `json:"pending_reason,omitempty"`
+	RequestedAt       int64                  `json:"requested_at"`
+	UpdatedAt         int64                  `json:"updated_at"`
+	NextAttemptAt     int64                  `json:"next_attempt_at"`
+	Attempts          int64                  `json:"attempts"`
+	LastError         string                 `json:"last_error,omitempty"`
+	CancelRequestedAt int64                  `json:"cancel_requested_at,omitempty"`
+	CanceledAt        int64                  `json:"canceled_at,omitempty"`
+	Lease             *DistributionLease     `json:"lease,omitempty"`
+	Candidate         *DistributionCandidate `json:"candidate,omitempty"`
+	Progress          *DistributionAttempt   `json:"progress,omitempty"`
 }
 
 // RequestDistribution records demand for a track. Repeated cache notifications
@@ -73,7 +83,11 @@ func (s *Store) RequestDistribution(ctx context.Context, accelerationID, trackRe
 		return err
 	}
 	if inserted == 0 {
-		_, err = s.db.ExecContext(ctx, `UPDATE distribution_requests SET updated_at = ?
+		_, err = s.db.ExecContext(ctx, `UPDATE distribution_requests SET
+			updated_at = ?, next_attempt_at = CASE WHEN canceled_at > 0 THEN 0 ELSE next_attempt_at END,
+			last_error = CASE WHEN canceled_at > 0 THEN '' ELSE last_error END,
+			cancel_requested_at = CASE WHEN canceled_at > 0 THEN 0 ELSE cancel_requested_at END,
+			canceled_at = 0
 			WHERE acceleration_id = ? AND track_ref = ?`, now, accelerationID, trackRef)
 		return err
 	}
@@ -108,9 +122,33 @@ func (s *Store) ClaimDistribution(
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_attempts SET
+		status = 'canceled', last_error = 'canceled by administrator',
+		finished_at = ?, updated_at = ? WHERE status = 'active' AND lease_id IN
+		(SELECT lease.id FROM distribution_leases lease
+		 JOIN distribution_requests request
+		  ON request.acceleration_id = lease.acceleration_id
+		  AND request.track_ref = lease.track_ref
+		 WHERE lease.expires_at <= ? AND request.cancel_requested_at > 0)`,
+		now, now, now); err != nil {
+		return DistributionLease{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE distribution_attempts SET
 		status = 'expired', last_error = 'lease expired', finished_at = ?, updated_at = ?
 		WHERE status = 'active' AND lease_id IN
-		(SELECT id FROM distribution_leases WHERE expires_at <= ?)`, now, now, now); err != nil {
+		(SELECT lease.id FROM distribution_leases lease
+		 JOIN distribution_requests request
+		  ON request.acceleration_id = lease.acceleration_id
+		  AND request.track_ref = lease.track_ref
+		 WHERE lease.expires_at <= ? AND request.cancel_requested_at = 0)`,
+		now, now, now); err != nil {
+		return DistributionLease{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
+		canceled_at = ?, updated_at = ? WHERE cancel_requested_at > 0 AND EXISTS
+		(SELECT 1 FROM distribution_leases lease
+		 WHERE lease.acceleration_id = distribution_requests.acceleration_id
+		 AND lease.track_ref = distribution_requests.track_ref AND lease.expires_at <= ?)`,
+		now, now, now); err != nil {
 		return DistributionLease{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM distribution_leases WHERE expires_at <= ?`, now); err != nil {
@@ -127,6 +165,7 @@ func (s *Store) ClaimDistribution(
 		 ON lease.acceleration_id = request.acceleration_id
 		 AND lease.track_ref = request.track_ref
 		WHERE request.acceleration_id = ? AND request.next_attempt_at <= ?
+		 AND request.cancel_requested_at = 0 AND request.canceled_at = 0
 		 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		ORDER BY request.requested_at, request.track_ref LIMIT 1`, accelerationID, now).Scan(&trackRef)
 	if err != nil {
@@ -165,12 +204,113 @@ func (s *Store) ClaimDistribution(
 
 func (s *Store) GetDistributionLease(ctx context.Context, leaseID string) (DistributionLease, error) {
 	var lease DistributionLease
-	err := s.db.QueryRowContext(ctx, `SELECT id, acceleration_id, track_ref,
-		owner, expires_at, created_at FROM distribution_leases WHERE id = ?`, leaseID).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT lease.id, lease.acceleration_id,
+		lease.track_ref, lease.owner, lease.expires_at, lease.created_at,
+		request.cancel_requested_at > 0
+		FROM distribution_leases lease JOIN distribution_requests request
+		 ON request.acceleration_id = lease.acceleration_id
+		 AND request.track_ref = lease.track_ref
+		WHERE lease.id = ?`, leaseID).Scan(
 		&lease.ID, &lease.AccelerationID, &lease.TrackRef, &lease.Owner,
-		&lease.ExpiresAt, &lease.CreatedAt,
+		&lease.ExpiresAt, &lease.CreatedAt, &lease.CancelRequested,
 	)
 	return lease, err
+}
+func (s *Store) RequestDistributionCancellation(
+	ctx context.Context,
+	accelerationID, trackRef string,
+	now int64,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var canceledAt int64
+	var candidate, lease sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT request.canceled_at, candidate.track_ref, lease.id
+		FROM distribution_requests request
+		LEFT JOIN distribution_candidates candidate
+		 ON candidate.acceleration_id = request.acceleration_id
+		 AND candidate.track_ref = request.track_ref
+		LEFT JOIN distribution_leases lease
+		 ON lease.acceleration_id = request.acceleration_id
+		 AND lease.track_ref = request.track_ref AND lease.expires_at > ?
+		WHERE request.acceleration_id = ? AND request.track_ref = ?`,
+		now, accelerationID, trackRef).Scan(&canceledAt, &candidate, &lease)
+	if err != nil {
+		return err
+	}
+	if canceledAt > 0 {
+		return tx.Commit()
+	}
+	if candidate.Valid {
+		return ErrDistributionRequestReady
+	}
+	if lease.Valid {
+		if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
+			cancel_requested_at = CASE WHEN cancel_requested_at = 0 THEN ? ELSE cancel_requested_at END,
+			last_error = 'cancellation requested by administrator', updated_at = ?
+			WHERE acceleration_id = ? AND track_ref = ?`,
+			now, now, accelerationID, trackRef); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
+		cancel_requested_at = ?, canceled_at = ?, next_attempt_at = 0,
+		last_error = 'canceled by administrator', updated_at = ?
+		WHERE acceleration_id = ? AND track_ref = ?`,
+		now, now, now, accelerationID, trackRef); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CompleteDistributionCancellation(
+	ctx context.Context,
+	leaseID, owner string,
+	now int64,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var accelerationID, trackRef string
+	var cancelRequestedAt int64
+	err = tx.QueryRowContext(ctx, `SELECT lease.acceleration_id, lease.track_ref,
+		request.cancel_requested_at FROM distribution_leases lease
+		JOIN distribution_requests request
+		 ON request.acceleration_id = lease.acceleration_id
+		 AND request.track_ref = lease.track_ref
+		WHERE lease.id = ? AND lease.owner = ?`, leaseID, owner).Scan(
+		&accelerationID, &trackRef, &cancelRequestedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrDistributionLeaseInvalid
+	}
+	if err != nil {
+		return err
+	}
+	if cancelRequestedAt == 0 {
+		return ErrDistributionLeaseInvalid
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE distribution_attempts SET
+		status = 'canceled', last_error = 'canceled by administrator',
+		updated_at = ?, finished_at = ? WHERE lease_id = ? AND status = 'active'`,
+		now, now, leaseID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM distribution_leases WHERE id = ?`, leaseID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
+		canceled_at = ?, next_attempt_at = 0, last_error = 'canceled by administrator',
+		updated_at = ? WHERE acceleration_id = ? AND track_ref = ?`,
+		now, now, accelerationID, trackRef); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateDistributionProgress(
@@ -380,16 +520,17 @@ func distributionLeaseForUpdate(
 	now int64,
 ) (DistributionLease, int64, error) {
 	var lease DistributionLease
-	var requestedAt int64
+	var requestedAt, cancelRequestedAt int64
 	err := tx.QueryRowContext(ctx, `SELECT lease.id, lease.acceleration_id,
 		lease.track_ref, lease.owner, lease.expires_at, lease.created_at,
-		request.requested_at FROM distribution_leases AS lease
+		request.requested_at, request.cancel_requested_at
+		FROM distribution_leases AS lease
 		JOIN distribution_requests AS request
 		 ON request.acceleration_id = lease.acceleration_id
 		 AND request.track_ref = lease.track_ref
 		WHERE lease.id = ? AND lease.owner = ?`, leaseID, owner).Scan(
 		&lease.ID, &lease.AccelerationID, &lease.TrackRef, &lease.Owner,
-		&lease.ExpiresAt, &lease.CreatedAt, &requestedAt,
+		&lease.ExpiresAt, &lease.CreatedAt, &requestedAt, &cancelRequestedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DistributionLease{}, 0, ErrDistributionLeaseInvalid
@@ -399,6 +540,10 @@ func distributionLeaseForUpdate(
 	}
 	if lease.ExpiresAt <= now {
 		return DistributionLease{}, 0, ErrDistributionLeaseExpired
+	}
+	if cancelRequestedAt > 0 {
+		lease.CancelRequested = true
+		return DistributionLease{}, 0, ErrDistributionCancellationRequested
 	}
 	return lease, requestedAt, nil
 }
@@ -474,10 +619,22 @@ func (s *Store) DistributionMetricsSince(ctx context.Context, accelerationID str
 func (s *Store) DistributionStatus(ctx context.Context, accelerationID string, now int64) (DistributionStatus, error) {
 	var status DistributionStatus
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
-		COALESCE(SUM(CASE WHEN candidate.track_ref IS NULL AND lease.id IS NULL
+		COALESCE(SUM(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at <= ? THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN lease.id IS NOT NULL THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN candidate.track_ref IS NOT NULL THEN 1 ELSE 0 END), 0)
+		COALESCE(SUM(CASE WHEN request.cancel_requested_at = 0
+		 AND request.canceled_at = 0 AND lease.id IS NOT NULL THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND candidate.track_ref IS NULL AND lease.id IS NULL
+		 AND request.next_attempt_at > ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.canceled_at = 0
+		 AND request.cancel_requested_at > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.canceled_at = 0
+		 AND candidate.track_ref IS NOT NULL THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.canceled_at > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(MIN(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND candidate.track_ref IS NULL AND lease.id IS NULL
+		 AND request.next_attempt_at <= ? THEN request.requested_at END), 0)
 		FROM distribution_requests AS request
 		LEFT JOIN distribution_candidates AS candidate
 		 ON candidate.acceleration_id = request.acceleration_id
@@ -485,8 +642,9 @@ func (s *Store) DistributionStatus(ctx context.Context, accelerationID string, n
 		LEFT JOIN distribution_leases AS lease
 		 ON lease.acceleration_id = request.acceleration_id
 		 AND lease.track_ref = request.track_ref AND lease.expires_at > ?
-		WHERE request.acceleration_id = ?`, now, now, accelerationID).Scan(
-		&status.Requested, &status.Pending, &status.Leased, &status.Ready,
+		WHERE request.acceleration_id = ?`, now, now, now, now, accelerationID).Scan(
+		&status.Requested, &status.Queued, &status.Leased, &status.RetryWait,
+		&status.CancelRequested, &status.Ready, &status.Canceled, &status.OldestQueuedAt,
 	)
 	return status, err
 }
@@ -523,18 +681,46 @@ func (s *Store) ListDistributionAttempts(ctx context.Context, accelerationID, st
 }
 
 func (s *Store) ListDistributionRequests(ctx context.Context, accelerationID, state string, now int64, limit int) ([]DistributionRequestView, error) {
+	return s.loadDistributionRequests(ctx, accelerationID, "", state, now, limit)
+}
+
+func (s *Store) GetDistributionRequest(
+	ctx context.Context,
+	accelerationID, trackRef string,
+	now int64,
+) (DistributionRequestView, error) {
+	rows, err := s.loadDistributionRequests(ctx, accelerationID, trackRef, "", now, 1)
+	if err != nil {
+		return DistributionRequestView{}, err
+	}
+	if len(rows) == 0 {
+		return DistributionRequestView{}, sql.ErrNoRows
+	}
+	return rows[0], nil
+}
+
+func (s *Store) loadDistributionRequests(
+	ctx context.Context,
+	accelerationID, trackRef, state string,
+	now int64,
+	limit int,
+) ([]DistributionRequestView, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	state = strings.TrimSpace(state)
 	query := `SELECT request.track_ref, request.requested_at, request.updated_at,
 		request.next_attempt_at, request.attempts, request.last_error,
+		request.cancel_requested_at, request.canceled_at,
 		lease.id, lease.owner, lease.expires_at, lease.created_at,
 		candidate.content_version, candidate.locator, candidate.layout,
 		candidate.size_bytes, candidate.content_type, candidate.etag,
 		candidate.created_at, candidate.updated_at,
 		attempt.phase, attempt.source_bytes, attempt.upload_bytes,
-		attempt.total_bytes, attempt.updated_at
+		attempt.total_bytes, attempt.updated_at,
+		EXISTS (SELECT 1 FROM distribution_publishers publisher
+		 WHERE publisher.acceleration_id = request.acceleration_id
+		 AND publisher.last_seen_at >= ?)
 		FROM distribution_requests AS request
 		LEFT JOIN distribution_leases AS lease
 		 ON lease.acceleration_id = request.acceleration_id
@@ -545,18 +731,29 @@ func (s *Store) ListDistributionRequests(ctx context.Context, accelerationID, st
 		LEFT JOIN distribution_attempts AS attempt
 		 ON attempt.lease_id = lease.id AND attempt.status = 'active'
 		WHERE request.acceleration_id = ?`
-	args := []any{now, accelerationID}
+	args := []any{now - 45_000, now, accelerationID}
+	if trackRef != "" {
+		query += ` AND request.track_ref = ?`
+		args = append(args, trackRef)
+	}
 	switch state {
 	case "", "all":
-	case "pending":
-		query += ` AND candidate.track_ref IS NULL AND lease.id IS NULL AND request.next_attempt_at <= ?`
+	case "queued":
+		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND candidate.track_ref IS NULL AND lease.id IS NULL AND request.next_attempt_at <= ?`
 		args = append(args, now)
-	case "uploading":
-		query += ` AND lease.id IS NOT NULL`
-	case "failed":
-		query += ` AND candidate.track_ref IS NULL AND request.last_error <> ''`
+	case "leased":
+		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0 AND lease.id IS NOT NULL`
+	case "retry_wait":
+		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND candidate.track_ref IS NULL AND lease.id IS NULL AND request.next_attempt_at > ?`
+		args = append(args, now)
+	case "cancel_requested":
+		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at > 0`
 	case "ready":
-		query += ` AND candidate.track_ref IS NOT NULL`
+		query += ` AND request.canceled_at = 0 AND candidate.track_ref IS NOT NULL`
+	case "canceled":
+		query += ` AND request.canceled_at > 0`
 	default:
 		return nil, fmt.Errorf("invalid distribution request state %q", state)
 	}
@@ -577,15 +774,19 @@ func (s *Store) ListDistributionRequests(ctx context.Context, accelerationID, st
 		var sizeBytes, candidateCreated, candidateUpdated sql.NullInt64
 		var phase sql.NullString
 		var sourceBytes, uploadBytes, totalBytes, progressUpdated sql.NullInt64
+		var publisherOnline bool
 		if err := rows.Scan(&view.TrackRef, &view.RequestedAt, &view.UpdatedAt,
 			&view.NextAttemptAt, &view.Attempts, &view.LastError,
+			&view.CancelRequestedAt, &view.CanceledAt,
 			&leaseID, &owner, &leaseExpires, &leaseCreated,
 			&contentVersion, &locator, &layout, &sizeBytes, &contentType, &etag,
 			&candidateCreated, &candidateUpdated, &phase, &sourceBytes,
-			&uploadBytes, &totalBytes, &progressUpdated); err != nil {
+			&uploadBytes, &totalBytes, &progressUpdated, &publisherOnline); err != nil {
 			return nil, err
 		}
 		switch {
+		case view.CanceledAt > 0:
+			view.State = "canceled"
 		case contentVersion.Valid:
 			view.State = "ready"
 			view.Candidate = &DistributionCandidate{
@@ -596,10 +797,14 @@ func (s *Store) ListDistributionRequests(ctx context.Context, accelerationID, st
 				CreatedAt: candidateCreated.Int64, UpdatedAt: candidateUpdated.Int64,
 			}
 		case leaseID.Valid:
-			view.State = "uploading"
+			if view.CancelRequestedAt > 0 {
+				view.State = "cancel_requested"
+			} else {
+				view.State = "leased"
+			}
 			view.Lease = &DistributionLease{ID: leaseID.String, AccelerationID: accelerationID,
 				TrackRef: view.TrackRef, Owner: owner.String, ExpiresAt: leaseExpires.Int64,
-				CreatedAt: leaseCreated.Int64}
+				CreatedAt: leaseCreated.Int64, CancelRequested: view.CancelRequestedAt > 0}
 			if phase.Valid {
 				view.Progress = &DistributionAttempt{LeaseID: leaseID.String,
 					AccelerationID: accelerationID, TrackRef: view.TrackRef,
@@ -608,10 +813,19 @@ func (s *Store) ListDistributionRequests(ctx context.Context, accelerationID, st
 					Status: "active", StartedAt: leaseCreated.Int64,
 					UpdatedAt: progressUpdated.Int64}
 			}
-		case view.LastError != "":
-			view.State = "failed"
+		case view.NextAttemptAt > now:
+			view.State = "retry_wait"
+			view.PendingReason = "retry_backoff"
 		default:
-			view.State = "pending"
+			view.State = "queued"
+			switch {
+			case !publisherOnline:
+				view.PendingReason = "publisher_offline"
+			case view.LastError != "":
+				view.PendingReason = "retry_due"
+			default:
+				view.PendingReason = "awaiting_claim"
+			}
 		}
 		out = append(out, view)
 	}

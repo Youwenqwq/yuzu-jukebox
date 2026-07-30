@@ -214,8 +214,8 @@ manifest 至少包含：
 - [x] acceleration 改为 `media_admin` 可创建、停用和管理的持久资源，移除 Server JSON 配置。
 - [x] publisher/delivery/backend 使用独立凭据；出站 backend secret 经 `secret_key` AES-GCM 加密。
 - [x] adapter 从 Core 读取 backend URL、token、限速、对象上限和 lease policy。
-- [x] 增加 publisher heartbeat、下载/上传字节、phase、错误、attempt history 与有界续租。
-- [x] 增加 status/requests 管理 API、健康探测、fallback 原因和最近 24 小时指标。
+- [x] 增加 publisher heartbeat、下载/上传字节、phase、错误、attempt history、有界续租，以及管理端可观测的 queued/retry/cancel 状态。
+- [x] 增加 status/requests 管理 API、任务详情与协作式取消、健康探测、fallback 原因和最近 24 小时指标。
 - [x] 实现 staged credential prepare/activate。
 - [x] 公开 stream 函数迁移为可直接粘贴的站点级 Edge Function，Makers 只保留控制面。
 - [ ] 在真实主域名 Dashboard 部署函数与触发规则后，完成 `<audio>`/MPV 端到端回归。
@@ -224,11 +224,11 @@ manifest 至少包含：
 
 - [x] Core 使用供应商无关的 acceleration/backend/delivery 合同；EdgeOne key 对 Core 保持 opaque。
 - [x] 上传前按 lease 原子预留容量；同 content-addressed locator 只记账一次。
-- [x] 持久保存 object/refcount/access time、reservation、inventory snapshot、deletion job 与 reconcile status。
-- [x] adapter 周期性执行 Blob 强一致 inventory，报告 observed bytes、orphan 与 missing 对象。
+- [x] 持久保存 object/refcount/access time、reservation、inventory generation、scan task、deletion job 与 reconcile status。
+- [x] Core 按资源 freshness policy 调度 inventory；adapter 认领后执行 Blob 强一致分页扫描，只有完整 generation 原子更新 observed bytes、managed/observed/orphan/missing 对象数。
 - [x] 高水位触发 LRU candidate 失效和删除 job，回收到低水位；删除失败有租约与 retry。
-- [x] readiness 要求容量预算和 `storage.inventory`/`object.delete` capability；管理 status 暴露容量压力。
-- [x] adapter 重启会释放持久化的 live lease；同 locator 预留串行化，重复提交与上传中断通过 ready/orphan reconciliation 收敛。
+- [x] readiness 要求容量预算和 `storage.inventory`/`object.delete` capability；管理 status 暴露 `observed_at`、stale 与容量压力。
+- [x] adapter 重启会释放持久化的 live lease；同 locator 预留串行化，失败/中断 inventory 不覆盖上一完整快照。
 
 ### P2B：分块与内容变化
 

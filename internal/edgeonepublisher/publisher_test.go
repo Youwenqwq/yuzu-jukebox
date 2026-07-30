@@ -60,6 +60,40 @@ func TestPublisherCompleteObject(t *testing.T) {
 	}
 }
 
+func TestPublisherConfirmsRequestedCancellation(t *testing.T) {
+	content := bytes.Repeat([]byte("cancel-audio-"), 128)
+	hash := sha256.Sum256(content)
+	fake := &publisherTransport{
+		content: content, expectedVersion: hex.EncodeToString(hash[:]),
+		cancelRequested: true,
+	}
+	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Close() })
+	publisher := newPublisher(testPublisherConfig(), state,
+		&http.Client{Transport: fake, Timeout: time.Minute})
+	if err := publisher.PublishOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !fake.cancelConfirmed {
+		t.Fatal("publisher did not confirm requested cancellation")
+	}
+	if fake.completed.ContentVersion != "" {
+		t.Fatalf("canceled candidate was completed: %#v", fake.completed)
+	}
+	states, err := state.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("canceled upload states = %#v", states)
+	}
+}
+
 func TestPublisherRecoversInterruptedLease(t *testing.T) {
 	fake := &publisherTransport{}
 	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
@@ -166,6 +200,8 @@ type publisherTransport struct {
 	inventoryComplete  bool
 	deletedLocator     string
 	deletionCompleted  bool
+	cancelRequested    bool
+	cancelConfirmed    bool
 }
 
 func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -190,6 +226,13 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 				"size_bytes": 64, "external_version": "etag-a",
 			}},
 			"cursor": "",
+		})
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/inventory/claim":
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
+			"scan": map[string]any{
+				"id": "inventory-1", "owner": "publisher-1", "state": "leased",
+				"lease_expires_at": time.Now().Add(30 * time.Minute).UnixMilli(),
+			},
 		})
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/inventory":
 		var body struct {
@@ -236,6 +279,17 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 				"created_at": time.Now().UnixMilli(),
 			},
 			"source_url": "/internal/v1/accelerations/leases/lease-1/source",
+		})
+	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/leases/lease-1":
+		f.mu.Lock()
+		cancelRequested := f.cancelRequested
+		f.mu.Unlock()
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
+			"lease": map[string]any{
+				"id": "lease-1", "acceleration_id": "edgeone-main", "track_ref": "local:song",
+				"owner": "publisher-1", "expires_at": time.Now().Add(10 * time.Minute).UnixMilli(),
+				"created_at": time.Now().UnixMilli(), "cancel_requested": cancelRequested,
+			},
 		})
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/source"):
 		return &http.Response{
@@ -297,6 +351,11 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 				"etag": "etag-metadata",
 			}},
 		})
+	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/cancel"):
+		f.mu.Lock()
+		f.cancelConfirmed = true
+		f.mu.Unlock()
+		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"canceled": true})
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/complete"):
 		var body struct {
 			ContentVersion string `json:"content_version"`

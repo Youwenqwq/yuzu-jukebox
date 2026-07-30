@@ -14,18 +14,20 @@ import (
 )
 
 var (
-	ErrNoWork        = errors.New("no distribution work")
-	ErrLeaseInactive = errors.New("distribution lease is no longer active")
+	ErrNoWork                = errors.New("no distribution work")
+	ErrLeaseInactive         = errors.New("distribution lease is no longer active")
+	ErrCancellationRequested = errors.New("distribution cancellation requested")
 )
 
 type Lease struct {
-	ID             string `json:"id"`
-	AccelerationID string `json:"acceleration_id"`
-	TrackRef       string `json:"track_ref"`
-	Owner          string `json:"owner"`
-	ExpiresAt      int64  `json:"expires_at"`
-	CreatedAt      int64  `json:"created_at"`
-	SourceURL      string `json:"-"`
+	ID              string `json:"id"`
+	AccelerationID  string `json:"acceleration_id"`
+	TrackRef        string `json:"track_ref"`
+	Owner           string `json:"owner"`
+	ExpiresAt       int64  `json:"expires_at"`
+	CreatedAt       int64  `json:"created_at"`
+	CancelRequested bool   `json:"cancel_requested,omitempty"`
+	SourceURL       string `json:"-"`
 }
 
 type Candidate struct {
@@ -44,6 +46,12 @@ type StorageInventoryObject struct {
 	Locator         string `json:"locator"`
 	SizeBytes       int64  `json:"size_bytes"`
 	ExternalVersion string `json:"external_version,omitempty"`
+}
+type InventoryScan struct {
+	ID             string `json:"id"`
+	Owner          string `json:"owner"`
+	State          string `json:"state"`
+	LeaseExpiresAt int64  `json:"lease_expires_at"`
 }
 
 type StorageDeletion struct {
@@ -121,6 +129,24 @@ func (c *CoreClient) Claim(ctx context.Context, owner string, leaseSeconds int) 
 	response.Lease.SourceURL = response.SourceURL
 	return response.Lease, nil
 }
+func (c *CoreClient) LeaseStatus(ctx context.Context, lease Lease) (Lease, error) {
+	var response struct {
+		Lease Lease `json:"lease"`
+	}
+	status, err := c.json(ctx, http.MethodGet,
+		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID), nil, &response)
+	if err != nil {
+		return Lease{}, err
+	}
+	if status == http.StatusNotFound || status == http.StatusConflict {
+		return Lease{}, ErrLeaseInactive
+	}
+	if status != http.StatusOK {
+		return Lease{}, fmt.Errorf("lease status: status %d", status)
+	}
+	response.Lease.SourceURL = lease.SourceURL
+	return response.Lease, nil
+}
 
 func (c *CoreClient) Source(ctx context.Context, lease Lease) (*http.Response, error) {
 	target, err := resolveURL(c.baseURL, lease.SourceURL)
@@ -190,6 +216,9 @@ func (c *CoreClient) Complete(ctx context.Context, lease Lease, candidate Candid
 	if err != nil {
 		return err
 	}
+	if status == http.StatusConflict {
+		return ErrCancellationRequested
+	}
 	if status != http.StatusOK {
 		return fmt.Errorf("complete lease: status %d", status)
 	}
@@ -218,22 +247,76 @@ func (c *CoreClient) Fail(ctx context.Context, lease Lease, publishErr error, re
 	}
 	return nil
 }
+func (c *CoreClient) Cancel(ctx context.Context, lease Lease) error {
+	status, err := c.json(ctx, http.MethodPost,
+		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID)+"/cancel",
+		map[string]any{"owner": lease.Owner}, nil)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusNotFound {
+		return ErrLeaseInactive
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("cancel lease: status %d", status)
+	}
+	return nil
+}
+
+func (c *CoreClient) ClaimInventory(
+	ctx context.Context,
+	owner string,
+	leaseSeconds int,
+) (InventoryScan, error) {
+	var response struct {
+		Scan InventoryScan `json:"scan"`
+	}
+	status, err := c.json(ctx, http.MethodPost, "/internal/v1/accelerations/inventory/claim",
+		map[string]any{"owner": owner, "lease_seconds": leaseSeconds}, &response)
+	if err != nil {
+		return InventoryScan{}, err
+	}
+	if status == http.StatusNoContent {
+		return InventoryScan{}, ErrNoWork
+	}
+	if status != http.StatusOK {
+		return InventoryScan{}, fmt.Errorf("claim inventory: status %d", status)
+	}
+	return response.Scan, nil
+}
 
 func (c *CoreClient) Inventory(
 	ctx context.Context,
-	owner, snapshotID string,
+	scan InventoryScan,
 	observedAt int64,
 	objects []StorageInventoryObject,
 	complete bool,
 ) error {
 	status, err := c.json(ctx, http.MethodPost, "/internal/v1/accelerations/inventory",
-		map[string]any{"owner": owner, "snapshot_id": snapshotID, "observed_at": observedAt,
+		map[string]any{"owner": scan.Owner, "scan_id": scan.ID, "observed_at": observedAt,
 			"objects": objects, "complete": complete}, nil)
 	if err != nil {
 		return err
 	}
 	if status != http.StatusNoContent {
 		return fmt.Errorf("report inventory: status %d", status)
+	}
+	return nil
+}
+
+func (c *CoreClient) FailInventory(ctx context.Context, scan InventoryScan, scanErr error) error {
+	message := scanErr.Error()
+	if len(message) > 2000 {
+		message = message[:2000]
+	}
+	status, err := c.json(ctx, http.MethodPost,
+		"/internal/v1/accelerations/inventory/"+url.PathEscape(scan.ID)+"/fail",
+		map[string]any{"owner": scan.Owner, "error": message}, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("fail inventory: status %d", status)
 	}
 	return nil
 }

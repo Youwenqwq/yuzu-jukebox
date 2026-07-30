@@ -122,6 +122,81 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 		t.Fatalf("status = %d: %s", status.Code, status.Body.String())
 	}
 
+	refresh := authenticatedJSONRequest(t, handler, http.MethodPost,
+		"/api/v1/accelerations/edgeone-main/inventory/refresh", adminToken, nil)
+	if refresh.Code != http.StatusAccepted {
+		t.Fatalf("inventory refresh = %d: %s", refresh.Code, refresh.Body.String())
+	}
+	var refreshResponse struct {
+		Scan store.AccelerationInventoryScan `json:"scan"`
+	}
+	decodeRecorder(t, refresh, &refreshResponse)
+	inventoryClaim := distributionRequest(t, handler, http.MethodPost,
+		"/internal/v1/accelerations/inventory/claim", createResponse.Credentials.PublisherToken,
+		map[string]any{"owner": "publisher-1", "lease_seconds": 600})
+	if inventoryClaim.Code != http.StatusOK {
+		t.Fatalf("inventory claim = %d: %s", inventoryClaim.Code, inventoryClaim.Body.String())
+	}
+	inventoryComplete := distributionRequest(t, handler, http.MethodPost,
+		"/internal/v1/accelerations/inventory", createResponse.Credentials.PublisherToken,
+		map[string]any{
+			"owner": "publisher-1", "scan_id": refreshResponse.Scan.ID,
+			"observed_at": 1_000_000, "objects": []any{}, "complete": true,
+		})
+	if inventoryComplete.Code != http.StatusNoContent {
+		t.Fatalf("inventory complete = %d: %s", inventoryComplete.Code, inventoryComplete.Body.String())
+	}
+	inventoryStatus := authenticatedJSONRequest(t, handler, http.MethodGet,
+		"/api/v1/accelerations/edgeone-main/inventory/status", adminToken, nil)
+	if inventoryStatus.Code != http.StatusOK ||
+		!strings.Contains(inventoryStatus.Body.String(), `"state":"completed"`) ||
+		!strings.Contains(inventoryStatus.Body.String(), `"observed_object_count":0`) {
+		t.Fatalf("inventory status = %d: %s", inventoryStatus.Code, inventoryStatus.Body.String())
+	}
+
+	if err := st.RequestDistribution(t.Context(), "edgeone-main", "local:queued", 1_000_010); err != nil {
+		t.Fatal(err)
+	}
+	queuedCancel := authenticatedJSONRequest(t, handler, http.MethodDelete,
+		"/api/v1/accelerations/edgeone-main/requests/local:queued", adminToken, nil)
+	if queuedCancel.Code != http.StatusOK ||
+		!strings.Contains(queuedCancel.Body.String(), `"state":"canceled"`) {
+		t.Fatalf("queued cancel = %d: %s", queuedCancel.Code, queuedCancel.Body.String())
+	}
+
+	if err := st.RequestDistribution(t.Context(), "edgeone-main", "local:active", 1_000_020); err != nil {
+		t.Fatal(err)
+	}
+	distributionClaim := distributionRequest(t, handler, http.MethodPost,
+		"/internal/v1/accelerations/leases", createResponse.Credentials.PublisherToken,
+		map[string]any{"owner": "publisher-1", "lease_seconds": 600})
+	if distributionClaim.Code != http.StatusCreated {
+		t.Fatalf("distribution claim = %d: %s", distributionClaim.Code, distributionClaim.Body.String())
+	}
+	var claimResponse struct {
+		Lease store.DistributionLease `json:"lease"`
+	}
+	decodeRecorder(t, distributionClaim, &claimResponse)
+	activeCancel := authenticatedJSONRequest(t, handler, http.MethodDelete,
+		"/api/v1/accelerations/edgeone-main/requests/local:active", adminToken, nil)
+	if activeCancel.Code != http.StatusOK ||
+		!strings.Contains(activeCancel.Body.String(), `"state":"cancel_requested"`) {
+		t.Fatalf("active cancel = %d: %s", activeCancel.Code, activeCancel.Body.String())
+	}
+	leaseStatus := distributionRequest(t, handler, http.MethodGet,
+		"/internal/v1/accelerations/leases/"+claimResponse.Lease.ID,
+		createResponse.Credentials.PublisherToken, nil)
+	if leaseStatus.Code != http.StatusOK ||
+		!strings.Contains(leaseStatus.Body.String(), `"cancel_requested":true`) {
+		t.Fatalf("lease status = %d: %s", leaseStatus.Code, leaseStatus.Body.String())
+	}
+	cancelComplete := distributionRequest(t, handler, http.MethodPost,
+		"/internal/v1/accelerations/leases/"+claimResponse.Lease.ID+"/cancel",
+		createResponse.Credentials.PublisherToken, map[string]any{"owner": "publisher-1"})
+	if cancelComplete.Code != http.StatusOK {
+		t.Fatalf("cancel complete = %d: %s", cancelComplete.Code, cancelComplete.Body.String())
+	}
+
 	prepared := authenticatedJSONRequest(t, handler, http.MethodPost,
 		"/api/v1/accelerations/edgeone-main/credentials/publisher/prepare", adminToken, nil)
 	if prepared.Code != http.StatusOK {

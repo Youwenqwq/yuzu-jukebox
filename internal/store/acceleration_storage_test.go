@@ -112,6 +112,97 @@ func TestAccelerationStorageReservationGCAndInventory(t *testing.T) {
 	}
 }
 
+func TestAccelerationInventoryScanCommitsAtomically(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "inventory.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	publisherHash := make([]byte, 32)
+	deliveryHash := make([]byte, 32)
+	publisherHash[0], deliveryHash[0] = 1, 2
+	_, err = st.CreateAcceleration(ctx, Acceleration{
+		ID: "inventory", Name: "Inventory", Kind: "edgeone",
+		ControlBaseURL: "https://control.test", BackendBaseURL: "https://backend.test",
+		LeaseTTLSeconds: 600, MaxObjectBytes: 100, StorageBudgetBytes: 1000,
+		StorageHighWatermarkPercent: 95, StorageLowWatermarkPercent: 80,
+		InventoryIntervalSeconds: 60, InventoryStaleAfterSeconds: 120,
+	}, publisherHash, deliveryHash, "backend-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scan, err := st.RequestAccelerationInventoryScan(ctx, "inventory", 1_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err = st.ClaimAccelerationInventoryScan(ctx, "inventory", "publisher",
+		time.Minute, 1_000_001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPage := []StorageInventoryObject{{Locator: "object-a", SizeBytes: 10}}
+	if err := st.AppendClaimedAccelerationInventory(ctx, "inventory", scan.ID,
+		scan.Owner, 1_000_002, firstPage, false, 1_000_003); err != nil {
+		t.Fatal(err)
+	}
+	status, err := st.AccelerationStorageStatus(ctx, "inventory", 1_000_004)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ObservedAt != 0 || status.ObservedObjectCount != 0 || !status.Stale {
+		t.Fatalf("partial scan changed active snapshot: %#v", status)
+	}
+	secondPage := []StorageInventoryObject{{Locator: "object-b", SizeBytes: 20}}
+	if err := st.AppendClaimedAccelerationInventory(ctx, "inventory", scan.ID,
+		scan.Owner, 1_000_002, secondPage, true, 1_000_005); err != nil {
+		t.Fatal(err)
+	}
+	status, err = st.AccelerationStorageStatus(ctx, "inventory", 1_000_006)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ObservedObjectCount != 2 || status.ObservedBytes != 30 ||
+		status.ObservedAt != 1_000_002 || status.Stale {
+		t.Fatalf("completed snapshot = %#v", status)
+	}
+	completed, err := st.GetAccelerationInventoryScan(ctx, "inventory", scan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.State != "completed" {
+		t.Fatalf("scan = %#v", completed)
+	}
+
+	failed, err := st.RequestAccelerationInventoryScan(ctx, "inventory", 1_000_010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = st.ClaimAccelerationInventoryScan(ctx, "inventory", "publisher",
+		time.Minute, 1_000_011)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendClaimedAccelerationInventory(ctx, "inventory", failed.ID,
+		failed.Owner, 1_000_012, []StorageInventoryObject{{Locator: "partial", SizeBytes: 99}},
+		false, 1_000_013); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FailAccelerationInventoryScan(ctx, "inventory", failed.ID,
+		failed.Owner, "backend failed", 1_000_014); err != nil {
+		t.Fatal(err)
+	}
+	status, err = st.AccelerationStorageStatus(ctx, "inventory", 1_000_015)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ObservedObjectCount != 2 || status.ObservedBytes != 30 ||
+		status.ObservedAt != 1_000_002 || status.ReconciliationError != "backend failed" {
+		t.Fatalf("failed scan replaced complete snapshot: %#v", status)
+	}
+}
+
 func publishStorageTestCandidate(
 	t *testing.T,
 	st *Store,

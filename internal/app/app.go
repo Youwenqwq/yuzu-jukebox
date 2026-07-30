@@ -71,6 +71,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	accelerationRegistry := distribution.NewRegistry(st)
 	healthMonitor := distribution.NewHealthMonitor(st)
 	go healthMonitor.Run(ctx)
+	go runAccelerationInventoryScheduler(ctx, st)
 	c.SetReadyHook(func(ref provider.TrackRef) {
 		if err := distributionService.RequestCacheReady(context.Background(), ref); err != nil {
 			log.Printf("[distribution] request %s failed: %v", ref, err)
@@ -125,6 +126,32 @@ func runSessionJanitor(ctx context.Context, manager *auth.Manager, st *store.Sto
 			if err := st.PruneExternalBindingCodes(ctx, now.UnixMilli()); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("[auth] binding code prune failed: %v", err)
 			}
+		}
+	}
+}
+
+func runAccelerationInventoryScheduler(ctx context.Context, st *store.Store) {
+	schedule := func(now time.Time) {
+		scans, err := st.ScheduleDueAccelerationInventoryScans(ctx, now.UnixMilli())
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("[distribution] schedule inventory scans: %v", err)
+			}
+			return
+		}
+		for _, scan := range scans {
+			log.Printf("[distribution] scheduled inventory scan %s for %s", scan.ID, scan.AccelerationID)
+		}
+	}
+	schedule(time.Now())
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			schedule(now)
 		}
 	}
 }

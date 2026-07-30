@@ -103,19 +103,19 @@ func (p *Publisher) runHeartbeats(ctx context.Context) {
 }
 
 func (p *Publisher) runStorageLifecycle(ctx context.Context) {
-	reconcileTicker := time.NewTicker(6 * time.Hour)
+	inventoryTicker := time.NewTicker(5 * time.Second)
 	deleteTicker := time.NewTicker(5 * time.Second)
-	defer reconcileTicker.Stop()
+	defer inventoryTicker.Stop()
 	defer deleteTicker.Stop()
-	if err := p.ReconcileStorage(ctx); err != nil && ctx.Err() == nil {
+	if err := p.ReconcileStorage(ctx); err != nil && !errors.Is(err, ErrNoWork) && ctx.Err() == nil {
 		log.Printf("[edgeone] inventory: %v", err)
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-reconcileTicker.C:
-			if err := p.ReconcileStorage(ctx); err != nil && ctx.Err() == nil {
+		case <-inventoryTicker.C:
+			if err := p.ReconcileStorage(ctx); err != nil && !errors.Is(err, ErrNoWork) && ctx.Err() == nil {
 				log.Printf("[edgeone] inventory: %v", err)
 			}
 		case <-deleteTicker.C:
@@ -179,14 +179,38 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		return p.fail(ctx, lease, state, err, time.Minute)
 	}
 
+	workCtx, cancelWork := context.WithCancelCause(ctx)
+	defer cancelWork(nil)
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		p.watchCancellation(watchCtx, lease, cancelWork)
+	}()
+
 	reporter := newProgressReporter(p.core, lease)
-	candidate, err := p.publish(ctx, managed, backend, lease, &state, reporter)
+	candidate, publishErr := p.publish(workCtx, managed, backend, lease, &state, reporter)
+	stopWatch()
+	<-watchDone
+	if errors.Is(context.Cause(workCtx), ErrCancellationRequested) {
+		return p.finishCancellation(lease, state)
+	}
+	if publishErr != nil {
+		retry := retryDelay(publishErr)
+		return p.fail(ctx, lease, state, publishErr, retry)
+	}
+	current, err := p.core.LeaseStatus(ctx, lease)
 	if err != nil {
-		retry := retryDelay(err)
-		return p.fail(ctx, lease, state, err, retry)
+		return p.fail(ctx, lease, state, err, time.Minute)
+	}
+	if current.CancelRequested {
+		return p.finishCancellation(lease, state)
 	}
 	_ = reporter.report(ctx, "completing", true)
 	if err := p.core.Complete(ctx, lease, candidate); err != nil {
+		if errors.Is(err, ErrCancellationRequested) {
+			return p.finishCancellation(lease, state)
+		}
 		return p.fail(ctx, lease, state, err, time.Minute)
 	}
 	if err := p.state.Delete(ctx, lease.ID); err != nil {
@@ -197,42 +221,93 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 	return nil
 }
 
+func (p *Publisher) watchCancellation(
+	ctx context.Context,
+	lease Lease,
+	cancel context.CancelCauseFunc,
+) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		current, err := p.core.LeaseStatus(ctx, lease)
+		if err == nil && current.CancelRequested {
+			cancel(ErrCancellationRequested)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (p *Publisher) finishCancellation(lease Lease, state UploadState) error {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.core.Cancel(cancelCtx, lease); err != nil && !errors.Is(err, ErrLeaseInactive) {
+		p.setHeartbeat("degraded", Lease{}, false, err.Error())
+		return fmt.Errorf("confirm canceled lease: %w", err)
+	}
+	if state.TempPath != "" {
+		_ = os.Remove(state.TempPath)
+	}
+	if err := p.state.Delete(cancelCtx, lease.ID); err != nil {
+		return fmt.Errorf("clean canceled lease state: %w", err)
+	}
+	p.setHeartbeat("idle", Lease{}, true, "")
+	log.Printf("[edgeone] canceled %s", lease.TrackRef)
+	return nil
+}
+
 func (p *Publisher) ReconcileStorage(ctx context.Context) error {
 	managed, err := p.core.ManagedConfig(ctx)
 	if err != nil {
 		return err
 	}
+	scan, err := p.core.ClaimInventory(ctx, p.cfg.Owner, 30*60)
+	if err != nil {
+		return err
+	}
 	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
 	observedAt := time.Now().UnixMilli()
-	snapshotID := fmt.Sprintf("%s-%d", p.cfg.Owner, observedAt)
 	cursor := ""
 	for {
-		objects, nextCursor, err := backend.Inventory(ctx, cursor)
-		if err != nil {
-			return err
+		objects, nextCursor, scanErr := backend.Inventory(ctx, cursor)
+		if scanErr != nil {
+			return p.failInventory(scan, scanErr)
 		}
 		if len(objects) == 0 {
-			if err := p.core.Inventory(ctx, p.cfg.Owner, snapshotID, observedAt, nil,
-				nextCursor == ""); err != nil {
-				return err
+			if scanErr := p.core.Inventory(ctx, scan, observedAt, nil,
+				nextCursor == ""); scanErr != nil {
+				return p.failInventory(scan, scanErr)
 			}
 		}
 		for start := 0; start < len(objects); start += 200 {
 			end := min(start+200, len(objects))
 			complete := nextCursor == "" && end == len(objects)
-			if err := p.core.Inventory(ctx, p.cfg.Owner, snapshotID, observedAt,
-				objects[start:end], complete); err != nil {
-				return err
+			if scanErr := p.core.Inventory(ctx, scan, observedAt,
+				objects[start:end], complete); scanErr != nil {
+				return p.failInventory(scan, scanErr)
 			}
 		}
 		if nextCursor == "" {
 			return nil
 		}
 		if nextCursor == cursor {
-			return errors.New("backend inventory cursor did not advance")
+			return p.failInventory(scan, errors.New("backend inventory cursor did not advance"))
 		}
 		cursor = nextCursor
 	}
+}
+
+func (p *Publisher) failInventory(scan InventoryScan, scanErr error) error {
+	reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.core.FailInventory(reportCtx, scan, scanErr); err != nil {
+		return fmt.Errorf("%v; report inventory failure: %w", scanErr, err)
+	}
+	return scanErr
 }
 
 func (p *Publisher) DeleteOnce(ctx context.Context) error {

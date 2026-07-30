@@ -49,6 +49,36 @@ func (s *Server) accelerationReserve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reservation": reservation})
 }
 
+func (s *Server) accelerationInventoryClaim(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Owner        string `json:"owner"`
+		LeaseSeconds int    `json:"lease_seconds"`
+	}
+	if !decodeDistributionJSON(w, r, &body) {
+		return
+	}
+	scan, err := s.st.ClaimAccelerationInventoryScan(r.Context(), acceleration.ID,
+		strings.TrimSpace(body.Owner), time.Duration(body.LeaseSeconds)*time.Second,
+		time.Now().UnixMilli())
+	if errors.Is(err, sql.ErrNoRows) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if errors.Is(err, store.ErrAccelerationInventoryScanInvalid) {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to claim inventory scan")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
+}
+
 func (s *Server) accelerationInventory(w http.ResponseWriter, r *http.Request) {
 	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
 	if !ok {
@@ -56,7 +86,7 @@ func (s *Server) accelerationInventory(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Owner      string                         `json:"owner"`
-		SnapshotID string                         `json:"snapshot_id"`
+		ScanID     string                         `json:"scan_id"`
 		ObservedAt int64                          `json:"observed_at"`
 		Objects    []store.StorageInventoryObject `json:"objects"`
 		Complete   bool                           `json:"complete"`
@@ -68,17 +98,42 @@ func (s *Server) accelerationInventory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "inventory batch exceeds 1000 objects")
 		return
 	}
-	if err := s.st.AppendAccelerationInventory(r.Context(), acceleration.ID,
-		strings.TrimSpace(body.Owner), strings.TrimSpace(body.SnapshotID), body.ObservedAt,
+	if err := s.st.AppendClaimedAccelerationInventory(r.Context(), acceleration.ID,
+		strings.TrimSpace(body.ScanID), strings.TrimSpace(body.Owner), body.ObservedAt,
 		body.Objects, body.Complete, time.Now().UnixMilli()); err != nil {
-		if errors.Is(err, store.ErrStorageInventoryInvalid) {
-			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		if errors.Is(err, store.ErrStorageInventoryInvalid) ||
+			errors.Is(err, store.ErrAccelerationInventoryScanInvalid) {
+			writeErr(w, http.StatusConflict, "inventory_scan_invalid", err.Error())
 		} else {
 			writeErr(w, http.StatusInternalServerError, "internal", "failed to record storage inventory")
 		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) accelerationInventoryFail(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Owner string `json:"owner"`
+		Error string `json:"error"`
+	}
+	if !decodeDistributionJSON(w, r, &body) {
+		return
+	}
+	if err := s.st.FailAccelerationInventoryScan(r.Context(), acceleration.ID,
+		r.PathValue("id"), strings.TrimSpace(body.Owner), body.Error,
+		time.Now().UnixMilli()); err != nil {
+		if errors.Is(err, store.ErrAccelerationInventoryScanInvalid) {
+			writeErr(w, http.StatusConflict, "inventory_scan_invalid", err.Error())
+		} else {
+			writeErr(w, http.StatusInternalServerError, "internal", "failed to record inventory failure")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"failed": true})
 }
 
 func (s *Server) accelerationDeletionClaim(w http.ResponseWriter, r *http.Request) {

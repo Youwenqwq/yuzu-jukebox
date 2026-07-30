@@ -69,7 +69,7 @@ func TestDistributionLeaseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Requested != 1 || status.Ready != 1 || status.Pending != 0 || status.Leased != 0 {
+	if status.Requested != 1 || status.Ready != 1 || status.Queued != 0 || status.Leased != 0 {
 		t.Fatalf("status = %#v", status)
 	}
 	metrics, err = st.DistributionMetrics(ctx, "edgeone")
@@ -111,6 +111,65 @@ func TestDistributionExpiredLeaseCanBeReclaimedAndFailed(t *testing.T) {
 	}
 	if _, err := st.ClaimDistribution(ctx, "edgeone", "retry", "retry-lease", 230, 600); err != nil {
 		t.Fatalf("claim at retry time: %v", err)
+	}
+}
+
+func TestDistributionCancellationLifecycle(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "distribution.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	createDistributionTestAcceleration(t, st)
+
+	if err := st.RequestDistribution(ctx, "edgeone", "local:queued", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RequestDistributionCancellation(ctx, "edgeone", "local:queued", 110); err != nil {
+		t.Fatal(err)
+	}
+	view, err := st.GetDistributionRequest(ctx, "edgeone", "local:queued", 111)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != "canceled" || view.CanceledAt != 110 {
+		t.Fatalf("queued cancellation = %#v", view)
+	}
+	if _, err := st.ClaimDistribution(ctx, "edgeone", "publisher", "canceled-lease", 120, 500); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("claim canceled request: %v", err)
+	}
+
+	if err := st.RequestDistribution(ctx, "edgeone", "local:queued", 130); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := st.ClaimDistribution(ctx, "edgeone", "publisher", "active-lease", 140, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RequestDistributionCancellation(ctx, "edgeone", "local:queued", 150); err != nil {
+		t.Fatal(err)
+	}
+	view, err = st.GetDistributionRequest(ctx, "edgeone", "local:queued", 151)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != "cancel_requested" || view.Lease == nil || !view.Lease.CancelRequested {
+		t.Fatalf("active cancellation = %#v", view)
+	}
+	if _, err := st.UpdateDistributionProgress(ctx, lease.ID, lease.Owner,
+		"downloading", 1, 0, 10, 160, 600); !errors.Is(err, ErrDistributionCancellationRequested) {
+		t.Fatalf("progress after cancellation = %v", err)
+	}
+	if err := st.CompleteDistributionCancellation(ctx, lease.ID, lease.Owner, 170); err != nil {
+		t.Fatal(err)
+	}
+	view, err = st.GetDistributionRequest(ctx, "edgeone", "local:queued", 171)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != "canceled" || view.Lease != nil {
+		t.Fatalf("completed cancellation = %#v", view)
 	}
 }
 

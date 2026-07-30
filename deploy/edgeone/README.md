@@ -148,8 +148,10 @@ go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone
 
 The adapter reports heartbeat, source/download bytes, Blob upload bytes,
 current phase, and errors to Core. Progress updates renew the lease up to the
-managed resource's `lease_ttl_seconds`. It also reports a strongly consistent
-Blob inventory every six hours, executes Core-issued deletion jobs, and never
+managed resource's `lease_ttl_seconds`; it polls live lease state and
+cooperatively aborts downloads/uploads when Core requests cancellation. The
+adapter claims Core-scheduled inventory scans, stages paginated Blob inventory
+under one scan generation, executes Core-issued deletion jobs, and never
 uploads without a Core storage reservation.
 
 ## Enable and observe
@@ -174,11 +176,18 @@ Operational APIs:
 - `GET /api/v1/accelerations`
 - `GET /api/v1/accelerations/{id}`
 - `GET /api/v1/accelerations/{id}/status`
-- `GET /api/v1/accelerations/{id}/requests?state=pending|uploading|failed|ready`
+- `GET /api/v1/accelerations/{id}/requests?state=queued|leased|retry_wait|cancel_requested|ready|canceled`
+- `GET /api/v1/accelerations/{id}/requests/{track_ref}`
+- `DELETE /api/v1/accelerations/{id}/requests/{track_ref}`
+- `POST /api/v1/accelerations/{id}/inventory/refresh`
+- `GET /api/v1/accelerations/{id}/inventory/status`
 
-The status response includes `storage.accounted_bytes`, `reserved_bytes`,
-`observed_bytes`, orphan/missing counts, pending deletions, watermarks, and
-`pressure`. At the high watermark Core invalidates least-recently-used
+The status response distinguishes managed and externally observed object
+counts and includes `observed_at`, `stale`, orphan/missing counts, the current
+inventory scan, pending deletions, watermarks, and pressure. Inventory defaults
+to a 15-minute Core schedule with a 30-minute freshness window; both values are
+configurable per acceleration. A failed or partial scan preserves the previous
+complete snapshot. At the high watermark Core invalidates least-recently-used
 candidates and queues provider-specific deletes until projected usage reaches
 the low watermark. Unknown objects found by inventory are recorded as orphans
 and become eligible for the same GC path.

@@ -158,6 +158,18 @@ func (s *Server) distributionClaim(w http.ResponseWriter, r *http.Request) {
 		"source_url": fmt.Sprintf("/internal/v1/accelerations/leases/%s/source", lease.ID),
 	})
 }
+func (s *Server) distributionLeaseStatus(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	lease, err := s.distribution.LeaseStatus(r.Context(), acceleration.ID, r.PathValue("id"))
+	if err != nil {
+		writeDistributionLeaseError(w, err)
+		return
+	}
+	writeDistributionJSON(w, http.StatusOK, map[string]any{"lease": lease})
+}
 
 func (s *Server) distributionSource(w http.ResponseWriter, r *http.Request) {
 	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
@@ -282,6 +294,25 @@ func (s *Server) distributionFail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeDistributionJSON(w, http.StatusOK, map[string]any{"failed": true})
+}
+func (s *Server) distributionCancel(w http.ResponseWriter, r *http.Request) {
+	acceleration, ok := s.authenticateAccelerationPublisher(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Owner string `json:"owner"`
+	}
+	if !decodeDistributionJSON(w, r, &body) {
+		return
+	}
+	err := s.distribution.CompleteCancellation(r.Context(), acceleration.ID,
+		r.PathValue("id"), body.Owner)
+	if err != nil {
+		writeDistributionLeaseError(w, err)
+		return
+	}
+	writeDistributionJSON(w, http.StatusOK, map[string]any{"canceled": true})
 }
 
 func (s *Server) distributionEvent(w http.ResponseWriter, r *http.Request) {
@@ -412,6 +443,8 @@ func writeDistributionLeaseError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, "lease_not_found", "distribution lease not found")
 	case errors.Is(err, distribution.ErrExpiredLease):
 		writeErr(w, http.StatusConflict, "lease_expired", "distribution lease expired")
+	case errors.Is(err, distribution.ErrCancellationRequested):
+		writeErr(w, http.StatusConflict, "cancellation_requested", "distribution cancellation requested")
 	case errors.Is(err, distribution.ErrStaleProgress):
 		writeErr(w, http.StatusConflict, "progress_stale", "distribution progress moved backwards")
 	default:
