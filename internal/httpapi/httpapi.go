@@ -39,6 +39,8 @@ type Server struct {
 	oidc        *auth.OIDCValidator // nil = OIDC 未启用
 	oidcRoleMap map[string][]string
 
+	ncmCoverDirect bool
+
 	distribution         *distribution.Service
 	accelerationRegistry *distribution.Registry
 }
@@ -63,11 +65,13 @@ func NewServer(
 	ws *wsapi.Server,
 	oidc *auth.OIDCValidator,
 	oidcRoleMap map[string][]string,
+	ncmCoverDirect bool,
 ) *Server {
 	return &Server{
 		st: st, authm: authm, integrations: integrations, bindings: bindings,
 		rooms: rooms, reg: reg, local: lp, cache: c, controls: controls, ws: ws,
 		oidc: oidc, oidcRoleMap: oidcRoleMap,
+		ncmCoverDirect: ncmCoverDirect,
 	}
 }
 

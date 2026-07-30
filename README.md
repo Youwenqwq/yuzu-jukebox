@@ -1,403 +1,187 @@
-# yuzu-jukebox
+# Yuzu Jukebox
 
-多房间同步点唱机 / 虚拟音乐大厅。服务器是唯一权威状态源，维护房间播放状态、
-管理媒体来源并提供统一出流；客户端各自适配——包括 MPV 播放代理、命令行
-控制端、WebUI，以及通过 Integration API 接入的 Chatbot / 游戏 Mod。
+自托管的多房间音乐点唱机——从多个来源点歌、跨房间同步播放，
+通过 CLI、WebUI 或聊天机器人控制一切。
 
-## 架构
+## 能做什么？
+
+- **多房间播放** — 每个房间独立队列、独立播放状态、独立听众
+- **多来源支持** — 本地文件、网易云音乐、Bilibili 搜索与播放
+- **实时同步** — WebSocket 推送播放状态，所有客户端百毫秒级对齐
+- **无头播放** — `yuzu-agent` 装在任何有 MPV 的机器上，充当房间音箱
+- **聊天机器人集成** — 通过 Integration API 接入 Discord/Telegram/IM Bot
+- **电台模式** — 歌单随机、每日推荐、私人 FM、相似歌曲电台
+- **OIDC 登录** — 对接 Zitadel 等 IdP，角色映射到 Yuzu 权限
+- **流式缓存** — 首次播放边下边存，重放命中本地文件，LRU 自动清理
+
+## 工作原理
 
 ```
-                      ┌──────────── 通用服务端 (Go) ────────────┐
-  凭据池 (DB 存储) ──→ │  Provider 层 (local / ncm / ...)         │
-                      │    Search / GetTrack / Resolve           │
-                      │         ↓ StreamLocator                  │
-                      │  Room Actor ×N（状态机 + 队列 + 广播）      │
-                      │  流式缓存（边下边播 + LRU）                 │
-                      │  WS /ws/v1 · REST /api/v1 · /stream/v1   │
-                      └──────┬───────────┬───────────┬──────────┘
-                       MPV 代理      控制 CLI      WebUI / 外部集成
-                       (纯收听)     (控制/管理)   (浏览器 / IM / Mod)
+You (CLI / WebUI / Chat bot)
+        │
+        ▼
+┌──────────────────────────────┐
+│        yuzu-server           │
+│  Room state machines         │
+│  Queue + playback control    │
+│  Provider layer (NCM/Bili)   │
+│  Stream cache + ticket auth  │
+└──────────┬───────────────────┘
+           │
+    ┌──────┴──────┐
+    ▼             ▼
+yuzu-agent     Web browser
+(MPV speaker)  (HTML5 Audio)
 ```
 
-核心设计（详见 [docs/spec-v1.md](docs/spec-v1.md)）：
+- **Server** 是唯一权威状态源——房间、队列、播放状态
+- **Agent** 是无头 MPV 渲染器，作为持久音箱绑定到房间
+- **Client**（CLI、WebUI、Bot）通过 REST + WebSocket 控制播放
 
-- **媒体两级模型**：队列里存逻辑引用 `TrackRef`（`ncm:347230`），临近播放才
-  `Resolve` 成临时物理地址 `StreamLocator`——签名 URL 过期天然免疫。
-- **播放状态是纯函数**：`position_ms + updated_at + playing + rate`，任何客户端
-  配合 WS 校时（ping/pong 测 RTT）推算出一致的"此刻应该放到哪"，百毫秒级同步。
-- **凭据不出服务器**：MUSIC_U 等凭据存服务端、热更新、先校验再生效；
-  客户端凭一次性签发的短时效票据从 `/stream/v1/{track_ref}?ticket=` 拉流。
-- **流式缓存**：首次播放边下边播（tee），重放直接命中本地文件，LRU 自动清理。
-- **统一外部身份模型**：Integration 把 IM scope 映射到 Room、把外部用户映射到
-  持久 Principal；Room controller grant 与 WebUI/CLI 共用同一套服务端授权。
+## 技术栈
+
+| 层 | 技术 |
+|---|------|
+| 服务端 | Go 1.22+，`net/http` 标准库，WebSocket |
+| 数据库 | SQLite（WAL 模式，goose 迁移） |
+| 播放代理 | MPV（JSON IPC） |
+| 认证 | Guest、OIDC（Zitadel）、会话令牌、流票据鉴权 |
+| Provider | NeteaseCloudMusicApi、bilibili-api（sidecar 进程） |
 
 ## 快速开始
 
-需要 Go 1.22+。播放代理另需本机安装 [MPV](https://mpv.io/)。
+**前置条件：** Go 1.22+。播放代理需要 [MPV](https://mpv.io/)。
 
 ```bash
 # 构建
 go build -o bin/yuzu-server ./cmd/yuzu-server
 go build -o bin/yuzu-agent  ./cmd/yuzu-agent
 go build -o bin/yuzu-cli    ./cmd/yuzu-cli
-go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone  # 公网低带宽部署可选
 
-# 启动服务器（首次启动自动生成默认 config.json，按需修改后重启）
+# 启动（首次运行自动生成 config.json）
 ./bin/yuzu-server -config config.json
 ```
 
-公网源站带宽较小时，可选用 EdgeOne Blob + Functions 旁路分发缓存文件；局域网部署无需启用。
-外部加速通过 `media_admin` API 持久管理，不写入 `config.json`。参见
-[EdgeOne 旁路分发设计与部署](docs/edgeone-distribution.md)。
-
-`config.json` 示例：
+编辑 `config.json` 启用 Provider：
 
 ```json
 {
-  "addr": "127.0.0.1:8080",
-  "db_path": "data/yuzu.db",
-  "media_dir": "data/media",
-  "cache_dir": "data/cache",
-  "cache_max_bytes": 21474836480,
-  "admin_password": "admin123",
-  "ncm": {
-    "enabled": true,
-    "base_url": "http://127.0.0.1:3000",
-    "level": "exhigh"
-  },
-  "bili": {
-    "enabled": true,
-    "base_url": "http://127.0.0.1:3002"
-  }
+  "addr": ":8080",
+  "admin_password": "change-me",
+  "ncm": { "enabled": true, "base_url": "http://127.0.0.1:3000", "level": "exhigh" },
+  "bili": { "enabled": true, "base_url": "http://127.0.0.1:3002" }
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `admin_password` | 全局管理员口令；guest 认证时携带即获 `room_admin`/`media_admin` 角色 |
-| `cache_max_bytes` | 流式缓存容量上限，超出按 LRU 清理 |
-| `ncm` | 网易云 Provider，对接 [NeteaseCloudMusicApi](https://github.com/neteasecloudmusicapienhanced/api-enhanced) 实例；`level` 为音质等级 |
-| `bili` | B 站 Provider，对接 bilibili-api sidecar（封装 WBI 签名 / DASH 音频选轨 / 风控）；无 cookie 可匿名 Resolve（320kbps 上限），Search 需扫码登录 |
+NCM 和 Bili 需要各自运行 sidecar API——见下方[外部依赖](#外部依赖)。
 
-创建一个房间并上传一首本地音乐：
+## 基本使用
 
-```bash
-# 认证拿 token（带管理员口令）
-TOKEN=$(curl -s -X POST localhost:8080/api/v1/auth/guest \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"admin","password":"admin123"}' | jq -r .session_token)
-
-# 建房：静态密码
-curl -X POST localhost:8080/api/v1/rooms -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"lobby","name":"大厅","guest_password":"room123"}'
-
-# 或使用默认每日轮换的动态验证码
-curl -X POST localhost:8080/api/v1/rooms -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"event","name":"活动厅","guest_access_mode":"rotating_code","guest_code_period_seconds":86400}'
-curl localhost:8080/api/v1/rooms/event/access-code \
-  -H "Authorization: Bearer $TOKEN"
-
-# 上传媒体（WAV 自动解析时长，其他格式需 ffprobe 或显式传 duration_ms）
-curl -X POST localhost:8080/api/v1/media/upload -H "Authorization: Bearer $TOKEN" \
-  -F file=@song.wav -F title="My Song"
-```
-
-然后配置 Player、启动收听 Agent，再用 CLI 控制：
+认证、创建房间、开始点歌：
 
 ```bash
 export YUZU_SERVER=http://127.0.0.1:8080
-export YUZU_PASSWORD=admin123          # 需要管理员权限的操作
-export YUZU_ROOM_PASSWORD=room123
+export YUZU_PASSWORD=change-me
 
-# 创建持久 Player；复制命令输出的一次性 key
-yuzu-cli player create living-room-speaker "Living Room Speaker"
-yuzu-cli player bind living-room-speaker lobby
+# 管理员认证
+TOKEN=$(curl -s -X POST $YUZU_SERVER/api/v1/auth/guest \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"admin","password":"change-me"}' | jq -r .session_token)
 
-# Agent 只持有 Player key；Player ID 与 Room 均由服务端解析
+# 创建房间
+curl -X POST $YUZU_SERVER/api/v1/rooms -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"lobby","name":"大厅"}'
+
+# 搜索并点歌
+yuzu-cli search "海阔天空" -provider ncm
+yuzu-cli add lobby ncm:347230
+
+# 播放控制
+yuzu-cli pause lobby
+yuzu-cli resume lobby
+yuzu-cli skip lobby
+yuzu-cli queue lobby
+```
+
+### 常用 CLI 命令
+
+| 命令 | 说明 |
+|------|------|
+| `yuzu-cli search <关键词> [-provider ncm\|bili\|local]` | 搜索曲目 |
+| `yuzu-cli add <房间> <track_ref>...` | 点歌入队 |
+| `yuzu-cli queue <房间>` | 查看当前播放与队列 |
+| `yuzu-cli skip <房间>` | 切歌 |
+| `yuzu-cli pause\|resume\|seek <房间> <秒>` | 播放控制 |
+| `yuzu-cli room list` | 列出房间 |
+| `yuzu-cli room create <id> <名称>` | 创建房间 |
+| `yuzu-cli radio play <房间> playlist:<id> -shuffle` | 开启电台 |
+| `yuzu-cli radio stop <房间>` | 停止电台 |
+| `yuzu-cli media upload <文件>` | 上传本地音频 |
+| `yuzu-cli provider qrlogin ncm` | 扫码登录网易云 |
+| `yuzu-cli player create <id> <名称>` | 创建音箱 |
+| `yuzu-cli player bind <id> <房间>` | 分配音箱到房间 |
+| `yuzu-cli login` | OIDC 设备登录 |
+
+每个命令都有 `--help`。运行 `yuzu-cli <命令> --help` 查看详情。
+
+## 配置音箱
+
+创建持久 Player，绑定到房间，然后启动 Agent：
+
+```bash
+yuzu-cli player create living-room "客厅音箱"
+# 保存输出中的一次性 key！
+yuzu-cli player bind living-room lobby
+
+# 在音箱机器上：
 YUZU_PLAYER_KEY=yzp_xxx ./bin/yuzu-agent
-
-yuzu-cli room list
-yuzu-cli search "海阔天空" -provider ncm   # 或 -provider local
-yuzu-cli add lobby ncm:347230              # 点歌（空闲时自动开播）
-yuzu-cli queue lobby                       # 查看当前播放与队列
-yuzu-cli skip lobby                        # 切歌（Room controller）
-yuzu-cli pause|resume|seek lobby [秒]       # 播放控制（Room controller）
-# 配置 NCM 账号凭据解锁高音质（可选，先校验再生效，热更新）
-yuzu-cli provider credential ncm "MUSIC_U=xxxx"
-
-# 或者扫码登录：终端渲染二维码，用网易云 App 扫码确认，凭据自动生效
-yuzu-cli provider qrlogin ncm
 ```
 
-## CLI 参考
+Agent 自动断线重连、同步播放进度，始终绑定到已分配的房间。
 
-全局 flag 可放在子命令前后任意位置，均可用环境变量代替：
+## 外部依赖
 
-| flag | 环境变量 | 说明 |
-|---|---|---|
-| `-server` | `YUZU_SERVER` | 服务器地址，默认 `http://127.0.0.1:8080` |
-| `-name` | `YUZU_NAME` | 显示名 |
-| `-password` | `YUZU_PASSWORD` | 全局管理员口令 |
-| `-room-password` | `YUZU_ROOM_PASSWORD` | 入房凭据；建静态密码房间时作为新密码 |
-| `-room-access` | — | 建房访问模式：`open/static_password/rotating_code` |
-| `-room-code-period` | — | 动态码轮换周期，默认 `24h` |
+以下作为独立 sidecar 进程运行：
 
-| 子命令 | 权限 | 说明 |
-|---|---|---|
-| `room list` | 任意身份 | 列出所有房间 |
-| `search <关键词> [-provider p]` | `requester` | 搜索曲目，输出 `track_ref` 供点歌 |
-| `queue <room>` | 任意身份 | 查看当前播放（含实时进度）与队列（含电台行） |
-| `status <room>` | 任意身份 | 房间总览：播放状态、电台绑定、队列规模、听众 |
-| `add <room> <track_ref>...` | `requester` | 点歌，队尾追加，空闲自动开播；多首时原子批量入队 |
-| `skip <room>` | Room controller | 切歌，自动播放下一首 |
-| `pause / resume <room>` | Room controller | 暂停 / 恢复 |
-| `seek <room> <秒>` | Room controller | 跳转进度 |
-| `room create <id> <名称>` | `room_admin` | 创建持久房间 |
-| `room access <id> <mode>` | `room_admin` | 热更新访问模式；动态码周期取 `-room-code-period` |
-| `room code <id>` | `room_admin` | 查看当前动态验证码及过期时间；Integration adapter 使用 actor token 调 REST API |
-| `room delete <id>` | `room_admin` | 删除房间（队列与历史级联） |
-| `media upload <文件>` | `media_admin` | 上传本地媒体（`-title/-artist/-duration-ms`） |
-| `playlist list` | `requester` | 歌单列表 |
-| `playlist show <id> [offset]` | `requester` | 歌单条目分页（`-limit`） |
-| `playlist create / delete` | `media_admin` | 歌单创建 / 删除 |
-| `playlist add <id> <ref>...` | `media_admin` | 追加条目（≤100/次） |
-| `playlist delitem <id> <ord>` | `media_admin` | 删除条目 |
-| `playlist move <id> <ord> <to_ord>` | `media_admin` | 移动歌单条目 |
-| `playlist import <ncm:id|URL|ncm:daily>` | `media_admin` | 导入外部歌单或曲目源快照 |
-| `radio play <room> <source>` | Room controller | 电台模式（`-shuffle` / `-once`） |
-| `radio stop <room>` | Room controller | 退出电台 |
-| `queue del <room> <entry_id>` | 本人 / Room controller | 移除队列条目 |
-| `queue move <room> <entry_id> <位置>` | Room controller | 移动队列条目 |
-| `room history <room> [offset] [-limit]` | 已认证 | 播放历史（最新在前） |
-| `room top <room> [-limit]` | 已认证 | 曲目热度榜（次数、首播/最近） |
-| `policy set <room> <JSON>` | `room_admin` | 热更新房间治理策略 |
-| `policy show <room>` | 已认证 | 查看房间策略 |
-| `player list` / `player show <id>` | `room_admin` | 持久 Player 资源、Room 分配与在线状态 |
-| `player create <id> <name>` | `room_admin` | 创建 Player；明文 key 仅显示一次 |
-| `player rename/enable/disable <id> ...` | `room_admin` | 管理名称和启停状态；停用立即断开 Agent |
-| `player key rotate <id>` | `room_admin` | 轮换一次性显示的 key，旧 key 立即失效 |
-| `player delete <id>` | `room_admin` | 删除 Player、Room 分配并断开 Agent |
-| `player volume <id> <0-100>` / `player mute <id> on\|off` | `room_admin` | 在线单设备维护指令 |
-| `player bind <id> <room>` / `player unbind <id> <room>` | `room_admin` | 持久分配/解除；支持先分配离线 Player |
-| `room players <room>` | `room_admin` | 查看 Room 的持久分配和在线状态 |
-| `room volume <room> <0-100>` | Room controller | 持久化 Room desired volume 并向在线 Agent fan-out |
-| `provider credential <provider> <payload>` | `media_admin` | 热更新凭据（先校验再生效） |
-| `provider qrlogin <provider>` | `media_admin` | 终端二维码扫码登录，凭据自动生效 |
-| `help [命令]` | — | 帮助；`yuzu-cli <命令> --help` 等价 |
-| `login` / `logout` / `whoami` | — | OIDC 登录（设备流）/ 登出 / 查看当前身份 |
-| `integration list` | `room_admin` | 列出已配置的 Integration（不输出 token） |
-| `integration scope list/bind/unbind ...` | `room_admin` | 管理外部频道/群组到默认 Room 的映射 |
-| `integration subject list/link/unlink ...` | `room_admin` | 管理外部用户到持久 Principal 的关联 |
-| `principal list [query]` | `room_admin` | 按 ID 或名称查询 Principal |
-| `room controller list/grant/revoke ...` | `room_admin` | 管理指定 Room 的 controller grant |
+| Provider | Sidecar | 默认地址 |
+|----------|---------|---------|
+| 网易云音乐 | [NeteaseCloudMusicApi](https://github.com/neteasecloudmusicapienhanced/api-enhanced) | `http://127.0.0.1:3000` |
+| Bilibili | bilibili-api（WBI 签名 / DASH 音频选轨 / 风控） | `http://127.0.0.1:3002` |
 
-### 房间治理策略
-
-每房间可配置点歌限制，以及是否允许同 Room 的 Integration actor 调节共享播放设备音量（`policy set`，热生效）：
-
-```bash
-yuzu-cli policy set lobby '{"max_queue":100,"queue_limits":{"guest":5,"room_admin":0},"member_player_volume":true}'
-```
-
-`max_queue` 为队列总上限；`queue_limits` 按身份 kind/role 限待播数
-（命中 0 = 显式不限）。guest 身份 ID 由名字确定性派生，限额跨会话成立。
-`member_player_volume` 缺省关闭；开启后也只允许由可信 Integration 签发、
-且 external scope 当前映射到该 Room 的 actor token 调整 Room headless output
-desired volume。普通 listener 和其他 Room 的 actor 仍无权控制。
-`start_lead_ms` 是切歌起播提前量（毫秒，`[0, 5000]`，缺省 600，0 = 关闭）：
-房间把新曲目的 position 0 排在切歌时刻之后这么久，客户端用这段窗口装载解码、
-到点同时开声，曲目头部不会被首帧延迟吃掉。客户端装载慢（公网小带宽、蓝牙
-输出）时调大，纯局域网可调小。
-
-### 代理重连
-
-yuzu-agent 内置断线重连：指数退避 1s→30s，连续稳定运行后重置。
-每次连接自动重走校时→Player key 认证→`player.hello`；Room ID 只从服务端持久
-分配解析，Agent 不携带 Room 密码，也不能自行换房。一个 Room 可持久分配多个
-Player；可先离线创建和分配，Agent 首次上线即进入目标 Room。Room desired
-volume 初始未设置，不会覆盖设备本地音量；首次设置后持久化，在线 Agent
-立即收到，离线 Agent 重连时自动收敛。普通 WebUI 不注册 player plane，
-因此本地音量不受影响。停用 Player、轮换 key 或删除 Player 会立即断开 Agent。
-服务端重启后，各房间自动续播队首（当前曲目不持久化，队列保留）。
-
-从旧版自声明 `player_id` 升级时，已有 Room 分配会保留为 disabled Player。
-管理员先执行 `player key rotate <id>` 保存新 key，再执行 `player enable <id>`。
-
-### OIDC 登录（Zitadel 等 IdP）
-
-服务端可对接 OIDC IdP，组织成员用已有账号登录。全局角色由 IdP role mapping
-授予或回收；单个 Room 的 controller 权限由 Yuzu grant 管理：
-
-```jsonc
-// config.json
-"oidc": {
-  "enabled": true,
-  "issuer": "https://id.example.org",   // Zitadel 实例域名
-  "client_id": "…",                     // Native 应用的 client_id
-  "role_mapping": {                     // Zitadel project role → yuzu roles
-    "jukebox-admin": ["room_admin", "media_admin"]
-  }
-}
-```
-
-流程：客户端从 IdP 拿到 ID token（CLI/agent 推荐 Device Authorization Grant，
-WebUI 推荐 Authorization Code + PKCE）→ `POST /api/v1/auth/oidc` 换 yuzu
-session_token → 之后与 guest 完全同构（REST Bearer / WS `auth{session_token}`）。
-服务端只验证 ID token（JWKS 本地验签，缓存 + kid 轮换刷新），显示名取
-`preferred_username`，身份 ID 由 `sub` 确定性派生（改名不影响权限归属）。
-
-Zitadel console 一次性配置：Native 类型应用（勾 Device Code grant）。角色进
-ID token 需 Application 级设置（Token Settings 勾选包含 User Roles 的选项；旧版
-UI 叫 "User Roles Inside ID Token"，新版与 Project 级同名为 "Assert Roles on
-Authentication"）。Project 级 "Assert Roles on Authentication" 只作用于 userinfo，
-可选作兜底。也可由客户端请求 scope `urn:zitadel:iam:org:projects:roles` 替代上述
-console 设置。
-
-CLI 登录（推荐路径）：
-
-```bash
-yuzu-cli login     # 自动发现服务端 OIDC 配置，终端显示验证链接，浏览器确认
-yuzu-cli whoami    # 查看当前身份
-yuzu-cli logout    # 清除本地会话缓存
-```
-
-登录后会话缓存于 `~/.config/yuzu-cli/session.json`（0600），之后所有命令自动
-携带该身份；未登录时回退 guest（`-name`/`-password`）。会话服务端持久化，
-服务器重启不掉登录；`logout` 同时在服务端吊销会话。
-
-### 外部 Chatbot / Integration
-
-外部 Bot 使用独立的持久 Integration token 调用 actor resolve，不应复用管理员
-session token。Integration 在服务端数据库中管理；创建和轮换时 token 只显示一次，
-数据库只保存 hash。服务端按以下链路解析每次请求：
-
-```text
-Integration + adapter + scope ──→ 默认 Room
-Integration + adapter + scope + subject ──→ Principal
-Principal + Room ──→ controller grant
-```
-
-未绑定的外部用户会得到稳定的 synthetic guest Principal，只具备普通点歌能力；
-绑定到 OIDC Principal 后，外部身份与该成员在 WebUI/CLI 中共享 Principal 和
-Room grant。Integration token 只证明调用方是受信任网关，不会自动授予
-`room_admin`。
-
-管理员可在 WebUI 的“管理 → 外部集成”创建、改名、停用、轮换或删除 Integration，
-并管理 scope、subject 和 Room controller。CLI 等价流程：
-
-```bash
-# token 只在 create/rotate-token 的本次输出中出现；立即保存到 Bot secret store
-yuzu-cli integration create astrbot-main "AstrBot 主实例"
-yuzu-cli integration list
-yuzu-cli integration scope bind astrbot-main astrbot group group-123 lobby
-yuzu-cli principal list alice
-yuzu-cli integration subject link astrbot-main astrbot group group-123 user-456 o_abc
-yuzu-cli room controller grant lobby o_abc
-
-# 运维
-yuzu-cli integration rename astrbot-main "AstrBot Gateway"
-yuzu-cli integration disable astrbot-main
-yuzu-cli integration enable astrbot-main
-yuzu-cli integration rotate-token astrbot-main
-yuzu-cli integration delete astrbot-main
-```
-
-停用、轮换或删除会立即吊销该 Integration 已签发的 actor session。Bot/Plugin 对
-Room 写请求必须携带由外部平台 event/message ID 派生的 `Idempotency-Key`，安全
-处理 webhook 重投；读请求不需要。解除映射操作需要传入与创建时相同的完整键。
-精确参数见 `yuzu-cli help integration` / `yuzu-cli help room`；运行时 JSON 契约见
-[docs/spec-v1.md](docs/spec-v1.md)。
-
-### 电台模式
-
-房间可绑定**曲目源**实现无人值守续播（队列见底自动批量补充）：
-
-```bash
-yuzu-cli radio play lobby playlist:pl_xxx -shuffle   # 通用歌单，洗牌袋
-yuzu-cli radio play lobby ncm:daily                  # 每日推荐（跨日自动刷新）
-yuzu-cli radio play lobby ncm:fm                     # 私人FM（无限流）
-yuzu-cli radio play lobby ncm:simi:347230            # 相似歌曲电台（跟随当前曲目）
-yuzu-cli radio play lobby ncm:heart:347230           # 心动模式
-yuzu-cli radio stop lobby                            # 退出电台
-```
-
-无限源（fm/simi/heart）不接受 `-shuffle`/`-once`；链式源有 seen 去重防绕圈。
-
-每个子命令都有独立帮助文档，如 `yuzu-cli search --help`。
-
-## 组件
-
-| 二进制 | 形态 | 职责 |
-|---|---|---|
-| `yuzu-server` | 常驻服务 | 房间状态机、Provider 管理、流式缓存、WS/REST API |
-| `yuzu-agent` | 常驻客户端 | 持 Player key 认证；由服务端分配 Room，把权威播放状态渲染到本地 MPV，自动校偏 |
-| `yuzu-cli` | 短命命令 | 搜索、点歌、队列/播放控制、凭据与 Integration 管理 |
-
-官方客户端共享公共 REST/WS 协议；WebUI、Chatbot Plugin、Game Mod 只需按
-spec 调用对应能力，服务器不包含平台专用命令解析。
-
-## 项目结构
-
-```
-cmd/
-  yuzu-server/        # 服务端入口
-  yuzu-agent/         # MPV 播放代理（含 MPV JSON IPC 控制）
-  yuzu-cli/           # 控制端
-internal/
-  app/                # 依赖组装（main 与集成测试共用）
-  auth/               # Identity/Roles、会话、Player key、出流票据
-  cache/              # 流式缓存：tee 首拉、singleflight、LRU
-  client/             # Go 协议客户端库（agent 与 CLI 共用）
-  config/             # JSON 配置
-  httpapi/            # REST /api/v1 + 出流 /stream/v1
-  provider/           # Provider 抽象（TrackRef/StreamLocator）+ Registry
-    local/            # 本地上传媒体
-    ncm/              # 网易云音乐（NeteaseCloudMusicApi 实例）
-  room/               # 房间 actor：channel 串行状态机，队列持久化
-  store/              # SQLite（WAL）+ goose 迁移
-  wsapi/              # WS /ws/v1：校时、认证、房间会话
-docs/
-  spec-v1.md          # 协议与房间状态机权威规格
-```
+在 config 中设 `"enabled": false` 即可禁用对应 Provider。
 
 ## 部署
 
-生产部署（TLS 反代、systemd、备份、secret_key 注意）见 [docs/deploy.md](docs/deploy.md)。
-Provider 凭据（ncm/bili cookie）使用 config 的 `secret_key` AES-GCM 加密落盘；Player key 和 Integration token 仅保存 SHA-256 hash，明文只在创建/轮换时返回一次。
+生产环境部署详见 [docs/deploy.md](docs/deploy.md)：
+- 反向代理（Caddy 或 nginx）+ TLS 终结
+- systemd 服务单元
+- 备份策略
+- 公域与私域部署考量
 
-## 测试
+**运行环境：** Linux 服务器（x86/ARM）。Agent 可运行在任何有 MPV 的 Linux 机器上——树莓派、旧笔记本皆可。
 
-```bash
-go test ./...          # 含端到端冒烟测试（httptest + WS 全链路）
-go test ./... -race
-```
+公网源站带宽较小时，可选 [EdgeOne CDN 旁路分发](docs/edgeone-distribution.md)。
 
-## 当前状态与路线
+## 文档
 
-已实现：
+| 文档 | 内容 |
+|------|------|
+| [docs/spec-v1.md](docs/spec-v1.md) | 协议、房间状态机、认证流程、Integration 契约 |
+| [docs/deploy.md](docs/deploy.md) | 生产环境部署指南 |
+| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN 旁路设计 |
+| [AGENTS.md](AGENTS.md) | 代码库指南（面向贡献者与 Coding Agent） |
 
-- 房间 actor 模型（持久房间、队列持久化、服务端权威时钟、自然结束检测）
-- local / ncm / bili 三个 Provider
-- 通用歌单（CRUD、分页、ncm 歌单导入、曲目源物化）
-- 电台模式（TrackSource 抽象：歌单/每日推荐/私人FM/相似歌曲/心动模式，
-  洗牌袋、once、链式种子、seen 去重）
-- 房间治理策略（max_queue / 按 kind/role 的点歌限额，热更新）
-- 播放历史与热度统计 API（首播时间、播放次数）
-- 代理断线重连（指数退避 + 自动恢复渲染）、重启后房间自动续播队首
-- 播放端管理平面（player.hello/command/state，远程音量/静音/换房，服务端迁移连接）
-- 富元数据（album/cover/source_url/contributors 曲目层 + size/bitrate 物理层、
-  封面代理、歌词端点；local 支持 tag/内嵌封面提取）
-- 凭据热更新、扫码登录（ncm / bili）、凭据定期健康检查（credmon）
-- 流式缓存（tee + 后台续传 + LRU）、下载进度可观测、票据化出流
-- MPV 播放代理（防抖渲染）、控制 CLI、WebUI 与端到端冒烟测试
-- Guest/password/OIDC Principal、持久会话、Room-scoped controller grant
-- 持久 Integration 生命周期、actor session 吊销、外部 scope → Room、subject → Principal 绑定及管理 UI/API
-- Integration actor Room 写请求强制幂等 key、24 小时响应去重与定期清理
-- 凭据 AES-GCM 加密存储与定期健康检查
+## 权限
 
-规划中（spec §8 也列了明确不做的）：
+| 角色 | 能力 |
+|------|------|
+| `listener` | 加入房间、查看状态、接收播放 |
+| `requester` | 搜索、点歌、删除自己的待播条目 |
+| `room_admin` | 管理房间、Integration 与授权；所有房间的 controller |
+| `media_admin` | 上传媒体、管理 Provider 凭据与歌单 |
+| Room `controller` 授权 | 控制指定房间的播放 |
 
-- 更多 Provider
-- 投票切歌、DJ 模式等进一步的房间治理策略
+## License
+
+MIT

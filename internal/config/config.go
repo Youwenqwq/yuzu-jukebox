@@ -61,9 +61,10 @@ type OIDCConfig struct {
 }
 
 type NCMConfig struct {
-	Enabled bool   `json:"enabled"`
-	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3000
-	Level   string `json:"level"`    // 音质等级，默认 exhigh
+	Enabled     bool   `json:"enabled"`
+	BaseURL     string `json:"base_url"` // 如 http://127.0.0.1:3000
+	Level       string `json:"level"`    // 音质等级，默认 exhigh
+	CoverDirect bool   `json:"cover_direct"`
 }
 
 type BiliConfig struct {

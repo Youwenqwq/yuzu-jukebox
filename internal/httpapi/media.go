@@ -32,7 +32,7 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found", "no cover")
 			return
 		}
-		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Header().Set("Cache-Control", "public, max-age=2592000")
 		http.ServeFile(w, r, mf.CoverPath)
 		return
 	}
@@ -41,6 +41,12 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 	if err != nil || track.CoverURL == "" {
 		writeErr(w, http.StatusNotFound, "not_found", "no cover")
 		return
+	}
+	if s.ncmCoverDirect {
+		if _, ok := p.(provider.CoverAware); !ok {
+			http.Redirect(w, r, track.CoverURL, http.StatusFound)
+			return
+		}
 	}
 	req, err := http.NewRequestWithContext(r.Context(), "GET", track.CoverURL, nil)
 	if err != nil {
@@ -67,7 +73,7 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 	if ct := resp.Header.Get("Content-Type"); ct != "" && strings.HasPrefix(ct, "image/") {
 		w.Header().Set("Content-Type", ct)
 	}
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", "public, max-age=2592000")
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, io.LimitReader(resp.Body, 20<<20))
 }
