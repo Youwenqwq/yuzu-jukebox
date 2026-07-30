@@ -20,7 +20,7 @@
 | 协议面 | 入口 | 用途边界 |
 |---|---|---|
 | REST | `/api/v1/*` | 无状态领域查询/命令、认证和低频管理；请求结束后不建立房间订阅 |
-| WebSocket | `/ws/v1` | 校时、认证、加入房间、实时全量快照广播；也可发送与 REST 共用领域服务的房间命令 |
+| WebSocket | `/ws/v1` | 校时、认证、加入房间、实时状态广播，以及按 revision 分块的队列 snapshot/patch；也可发送与 REST 共用领域服务的房间命令 |
 | stream | `/stream/v1/{track_ref}` | 持短期票据获取媒体字节与 HTTP Range；不承载领域命令 |
 | player plane | `/ws/v1` 的 `player.*` + `/api/v1/players*` | 管理无头播放端的音量、静音与换房；不供普通交互客户端或 Integration 命令复用 |
 
@@ -108,7 +108,7 @@ should_be = position_ms                                        (paused 时)
 ```
 
 - `password` 字段是**全局管理员口令**（可选）：不传或错误时签发普通 guest Principal（`g_` + `sha256("guest:"+name)` 前 12 hex，`kind=guest`，roles 为 `listener+requester`）；命中 `admin_password` 时签发独立 password Principal（`p_` + `sha256("password:"+name)` 前 12 hex，`kind=password`），追加 `room_admin+media_admin`。两种 Principal 即使显示名相同也绝不共享身份或角色。
-- **房间访问凭据不在此处传递**——每个 Room 可配置 `open`、`static_password` 或 `rotating_code`，在 `room.join.password` 校验（见 4.2、6.2）。
+- **房间访问凭据不在此处传递**——它只作为受保护 Room 的 `room.join.password` 最终 fallback；身份具备免密准入条件时无需提供（见 4.2、6.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
 - 普通 guest 身份 ID 由名字确定性派生，同名重连仍是同一人；管理员口令身份使用上述独立 `password` 命名空间。
 - 普通会话默认 TTL 24h，**持久化于 sessions 表**：重启不失效，过期自动清理；`DELETE /api/v1/auth/session` 吊销。Integration actor 会话例外，固定 TTL 5 分钟（见 3.6）。
@@ -212,12 +212,12 @@ Content-Type: application/json
 ```
 
 - `actor_token` 是标准 session token，可直接用于 `Authorization: Bearer <actor_token>`，也可作为 WS `auth` 的 `session_token`；固定有效期 **5 分钟**。`expires_at` 是与实际会话过期点相同的 Unix 毫秒。
-- `default_room_id` 来自 external scope 绑定；未绑定时该字段**省略**，不是空值错误。它只是 Client 的默认选择，不自动加入 WS Room。映射到该 Room 的 actor session 可读取当前动态验证码，随后用于 `room.join`。
+- `default_room_id` 来自 external scope 绑定；未绑定时该字段**省略**，不是空值错误。它只是 Client 的默认选择，不自动加入 WS Room。该 actor session 加入这个 Room 时免交 guest credential；读取当前动态码仍可用于把码展示或分享给需要以 guest 身份加入的用户。
 - `integration_id` 从通过认证的 Integration token 得出，请求体不能冒充。external scope key 为
   `(integration_id, adapter_id, scope.type, scope.id)`；external subject key 再追加 `subject.id`。`display_name` 不参与 key：未链接的 synthetic guest 在下次 resolve 时更新名称；已链接时忽略它并以当前 Principal 名称为准。
 - 若 external subject key 已链接到一个 Principal，返回该 Principal 的**当前** identity/roles；若未链接，则生成稳定 guest：ID 为 `ig_` + `sha256(JSON([integration_id, adapter_id, scope.type, scope.id, subject.id]))` 的完整十六进制，`kind=guest`，roles 为 `listener+requester`。Client MUST 把返回的 `identity.id` 当作不透明值。
 - scope 绑定、subject 链接和 controller grant 的管理合同见 6.4。
-- actor session 持久记录签发它的 `integration_id/adapter_id/scope.type/scope.id`。服务端据此执行 scope-specific 授权；这些来源字段不能由 Client 在 Room 请求中覆盖。当前唯一额外授权是 4.8 的 Room headless output 音量控制，且必须同时命中 actor resolve 的 `default_room_id` 与 Room policy。
+- actor session 持久记录签发它的 `integration_id/adapter_id/scope.type/scope.id`。服务端据此执行 scope-specific 授权；这些来源字段不能由 Client 在 Room 请求中覆盖。额外授权仅限：免 guest credential 加入 actor resolve 的 `default_room_id`，以及 4.8 中同时命中该 Room 与 policy 的 headless output 音量控制；两者都不能扩展到其它 Room。
 
 ### 3.7 OIDC 自助绑定 external subject
 
@@ -281,24 +281,22 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 
 - `player_key` 不能与 `name/password/session_token` 混用。认证后连接只允许 `ping`、`player.hello`、`player.state`；Player 没有 Yuzu role，不能作为 Principal 点歌或控制 Room。
 - `player.hello` 不接受客户端声明的 Player ID；服务端只信任 key 解析出的持久 Player。每个 Player ID 同时只保留一条在线连接，新连接会关闭旧连接。
-- Room 分配由 `room_admin` 持久管理。若 Player 已分配 Room，`player.hello.ok` 之后服务端自动推送 `room.joined` 与 `playback.changed`；未分配时 Agent 保持在线等待。Player 不能自行 `room.join`/`room.leave`。Headless Player 是输出端：不接收 `queue/radio/listeners.changed`（长队列整包会撑爆 WS 帧），也不进入 `listeners` 列表；其加入/离开不触发 `listeners.changed`，也不计入大厅 `listener_count`。
+- Room 分配由 `room_admin` 持久管理。若 Player 已分配 Room，`player.hello.ok` 之后服务端自动推送 `room.joined` 与 `playback.changed`；未分配时 Agent 保持在线等待。Player 不能自行 `room.join`/`room.leave`。Headless Player 是输出端，不订阅 `queue.snapshot`、`queue.patch`、`radio.changed` 或 `listeners.changed`，也不进入 `listeners` 列表；其加入/离开不触发 `listeners.changed`，也不计入大厅 `listener_count`。
 - 停用 Player、轮换 key 或删除 Player 都会立即关闭在线连接。停用保留 key 与 Room 分配；重新启用后可用原 key 重连。轮换后旧 key 立即失效；删除级联清理 Room 分配。
 - `last_seen_at` 在成功 Player-key 认证时更新。Agent SHOULD 对断线使用有上限的指数退避；连续稳定运行后重置退避。
 - 从旧版自声明 `player_id` 升级时，已有 Room 分配迁移为 `active=false`、尚无 key 的 Player；管理员必须先轮换 key，再显式启用。没有凭据的 Player 不能启用。
 
 ## 4. 房间会话
 
-### 4.1 房间快照
+### 4.1 入房状态与 revision 队列协议
 
-`room.join` 成功时，服务端按固定顺序推送五条消息：
+`room.join` 成功后，服务端先返回带原请求 `ref` 的：
 
-1. `room.joined`（回带 ref，data: `{"room_id": "..."}`）
-2. `playback.changed` —— 当前播放状态
-3. `queue.changed` —— 完整队列
-4. `radio.changed` —— 电台模式状态（见 4.5）
-5. `listeners.changed` —— 完整听众列表
+```json
+{ "type": "room.joined", "ref": "join-1", "data": { "room_id": "lobby" } }
+```
 
-四条状态快照此后有任何变更都会再次全量推送，客户端始终用最新一份覆盖本地副本。
+随后发布当前 `playback.changed`、一个逻辑 `queue.snapshot`、`radio.changed` 与 `listeners.changed`。客户端 MUST 按 `type` 分派，不能依赖这些状态消息之间的固定条数或固定相对顺序：队列快照可拆成任意数量的 part，入房期间也可能发生新的状态广播。唯一需要按序组装的是同一个逻辑队列 snapshot/patch 的 part。
 
 **`playback.changed` 的 data（即 playback 对象本身，无外层包装）：**
 
@@ -324,11 +322,66 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 - 空闲时 `current` 为 `null`、`playing` 为 `false`。
 - `stream_url` 仅出现在 `current` 上，且**按接收身份签发**（见 4.4），不同听众收到的票据不同。
 
-**`queue.changed` 的 data：**`{"queue": [ <队列条目>, ... ]}`——条目字段同 `current`（但无 `stream_url`/`size_bytes`/`bitrate_kbps`）。
+**队列基线 `queue.snapshot`：**
+
+```json
+{ "type": "queue.snapshot", "data": {
+  "revision": 42,
+  "part": 0,
+  "items": [ /* 零个或多个队列条目 */ ],
+  "done": false
+} }
+{ "type": "queue.snapshot", "data": {
+  "revision": 42,
+  "part": 1,
+  "items": [ /* 余下条目 */ ],
+  "done": true
+} }
+```
+
+- `revision` 是该 Room 待播队列的版本。一个逻辑快照的所有 part 使用同一 revision；每个逻辑快照都从 `part: 0` 开始，part 连续递增，且只有最后一个 part 为 `done: true`。空队列仍发送一条 `part:0/items:[]/done:true`。
+- 客户端 MUST 先在临时缓冲区拼接全部 `items`，收到 `done:true` 后才把本地队列和 revision **同时原子替换**。不得逐 part 更新 UI，也不得把不同 revision 的 part 混合。
+- 队列条目字段同 `current`，但不含 `stream_url`、`size_bytes` 或 `bitrate_kbps`。
+
+**增量 `queue.patch`：**
+
+```json
+{ "type": "queue.patch", "data": {
+  "base_revision": 42,
+  "revision": 43,
+  "part": 0,
+  "ops": [
+    {"op":"add", "index":2, "item":{ /* 完整队列条目 */ }},
+    {"op":"move", "entry_id":"e_991", "to_index":0},
+    {"op":"remove", "entry_id":"e_123"}
+  ],
+  "done": true
+} }
+```
+
+- 一次逻辑队列变更恰好把 revision 从 `base_revision` 推进到 `revision = base_revision + 1`。若 ops 过大，它可拆为多个 part；所有 part 的两个 revision 相同，`part` 从 0 连续递增，最后一 part 才 `done:true`。
+- `add` 在当时队列的零基 `index` 插入完整 `item`；`remove` 按 `entry_id` 删除；`move` 把该 `entry_id` 移到当时队列的零基 `to_index`；`clear` 无其它字段并把待播队列置空。多个 op MUST 按数组顺序作用。
+- 客户端 MUST 先收齐所有 part，再在本地队列副本上依序验证并执行全部 ops；全部成功后才同时提交新队列与新 revision。任一 op 非法时不得部分提交。
+
+每个 `queue.snapshot` 或 `queue.patch` 的**完整 JSON 信封**（包含 `type`、`data`、字段名和转义开销）不超过 **24 KiB**。分块边界按实际 JSON 编码字节数决定，不按条目数决定；该预算低于 coder/websocket 保持的 **32 KiB ReadLimit**。客户端 MUST 接受任意合法分块，不能假设每 part 的 items/ops 数量。单个队列条目仍必须能装入一个 envelope。
+
+**丢包、乱序与 resync：**
+
+客户端遇到以下任一情况 MUST 保留最后一次已提交队列、丢弃当前临时组装，并发送 `queue.sync`：part 不从 0 开始或不连续、同一组内 revision 改变、patch 的 `base_revision` 不等于本地 revision、`revision != base_revision + 1`，或 op 无法合法应用。
+
+```json
+→ { "type": "queue.sync", "ref": "sync-7", "data": { "room_id": "lobby" } }
+← { "type": "queue.snapshot", "data": {
+     "revision": 57, "part": 0, "items": [], "done": true
+   } }
+← { "type": "ack", "ref": "sync-7", "data": {} }
+```
+
+`queue.sync` 只允许已认证且已加入同一 Room、并订阅队列的连接；服务端返回一个新的分块 snapshot 及带 ref 的 ack，snapshot 可先于 ack 到达。新的 snapshot 完成前客户端不得用不连续 patch 改写展示；完成后以其 revision 为新基线继续处理后续 patch。慢客户端被断开时，重连并重新 join 同样会获得新基线。
 
 **曲目元数据层次**（客户端只需面对这一个形状，字段可空即降级）：
 
-- 曲目层（入队快照，队列与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors/requester_name`。`requester_name` 是入队时操作者 identity 的显示名快照，请求人后来改名不影响历史条目；旧数据为空串时客户端可降级显示 `requested_by`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
+- 曲目层（入队 snapshot/patch 与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors/requester_name`。`requester_name` 是入队时操作者 identity 的显示名快照，请求人后来改名不影响历史条目；旧数据为空串时客户端可降级显示 `requested_by`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
 - 物理层（仅 `playback.current`，Resolve/缓存后可得）：`size_bytes/bitrate_kbps`。
 - provider 能力缺席合法：bili 无歌词、local 无 source_url，字段缺省即降级。
 
@@ -340,16 +393,28 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 
 | type | data | 权限 | 说明 |
 |---|---|---|---|
-| `room.join` | `{room_id, password}` | 任何已认证身份 | `password` 承载静态密码或动态验证码；无效凭据返回 `error` |
+| `room.join` | `{room_id, password?}` | 任何已认证身份 | `password` 是受保护 Room 的 guest credential fallback；免密准入见下文 |
 | `room.leave` | `{room_id}` | — | |
+| `queue.sync` | `{room_id}` | 已加入同一 Room 的队列订阅者 | 请求新的 `queue.snapshot` 基线；revision/part 异常时使用 |
 | `queue.add` | `{room_id, track_ref}` 或 `{room_id, track_refs[1..100]}` | `requester` | 队尾追加；批量为原子：整体预校验，任一失败一条不加；ack 回 entry_ids |
-| `queue.remove` | `{room_id, entry_id}` | 条目所有者 / 该 Room 的 controller | |
+| `queue.remove` | `{room_id, entry_id}` | 条目所有者 / 该 Room 的 controller | 只作用于待播队列 |
 | `queue.move` | `{room_id, entry_id, to_index}` | 该 Room 的 controller | |
+| `queue.clear` | `{room_id}` | 该 Room 的 controller | 原子清空待播队列；保留 `playback.current` 与 radio 绑定；空队列也成功 |
 | `playback.pause` / `playback.resume` | `{room_id}` | 该 Room 的 controller | |
 | `playback.seek` | `{room_id, position_ms}` | 该 Room 的 controller | |
 | `playback.skip` | `{room_id}` | 该 Room 的 controller | 切下一首 |
 | `radio.play` | `{room_id, source, shuffle, once}` | 该 Room 的 controller | 进入电台模式（见 4.5） |
 | `radio.stop` | `{room_id}` | 该 Room 的 controller | 退出电台模式 |
+
+受保护 Room 的入房判定按以下顺序执行：
+
+1. `guest_access.mode == "open"`：任何已认证身份免凭据；
+2. 当前身份有 `room_admin`，或拥有该**准确 Room** 的显式 `controller` grant：免凭据；
+3. 当前 session 是由映射到该**同一 Room** 的 Integration scope 签发的 actor session：免凭据，不能跨 Room；
+4. 当前身份 roles 命中 Room 的任一 `trusted_roles`：免凭据；
+5. 只有都未命中时，才把 `room.join.password` 当作 static password 或 rotating code 校验。
+
+因此 guest access credential 是 fallback，不是所有身份的前置条件。普通 guest 通常走第 5 步；动态码继续用于向这些 guest 分享入房权限。只有实际进入第 5 步的错误凭据探测才计入 Room 凭据限流。
 
 ### 4.3 服务端 → 客户端消息
 
@@ -361,20 +426,21 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 | `room.left` | `room.leave` 成功 | 空对象；回带 `ref` |
 | `pong` | 响应 `ping` | `{client_time, server_time}`；回带 `ref` |
 | `playback.changed` | 播放/暂停/seek/切歌/自然结束/新听众进房 | 完整 `playback` 对象（见 4.1） |
-| `queue.changed` | 队列任何变更 | `{"queue": [...]}`（当前版本全量下发，量大后再做 diff） |
+| `queue.snapshot` | 入房或 `queue.sync` | revisioned 完整基线；按 `part/done` 分块 |
+| `queue.patch` | 待播队列逻辑变更 | 从 `base_revision` 到 `revision` 的原子 ops；按 `part/done` 分块 |
 | `listeners.changed` | 听众进出 | `{"listeners": [...]}` |
 | `radio.changed` | 电台开启/停止/新听众进房 | `{"radio": null | {...}}` |
 
-**请求-响应匹配**：在房间协议中，除广播四件套（`playback/queue/radio/listeners.changed`）外，响应都回带触发请求的 `ref`。客户端 MUST 用 `ref` 路由响应；无匹配 `ref` 的消息按广播处理。player plane 的异步 `player.command` 是独立的无 `ref` 服务端推送（见 4.8）。
+**请求-响应匹配**：请求的 `ack`/`error` 回带触发请求的 `ref`；状态广播与 `queue.snapshot`/`queue.patch` 不带 `ref`。客户端 MUST 用 `ref` 路由响应，并独立按 `type` 处理队列组装。player plane 的异步 `player.command` 是独立的无 `ref` 服务端推送（见 4.8）。
 
 **关键设计：`playback.changed` 永远携带完整 playback 对象。** 客户端无需区分事件原因，统一按"以最新状态重算 should_be"处理。新增听众也凭此一次性对齐。
 
 ### 4.4 WS 与无状态 REST 的操作边界
 
-- WS 房间命令要求连接先以 `room.join` 加入同一个 Room；`room.join.password` 按 Room 当前访问模式解释，并建立实时广播订阅。
-- 6.3 的 Room REST 不建立 listener、不要求先 join，也不接收或检查房间访问凭据；它只校验标准 Bearer session 及各操作的 requester/controller 权限。
-- 两种传输适配器调用同一个 Room 领域服务和同一个 actor。REST 命令造成的状态变化会照常广播给已加入该 Room 的 WS 客户端；WS 命令也可由后续 REST state 查询观察。
-- `GET .../state` 是一次性、按调用身份投影的完整快照，不是订阅。需要实时变化时仍 MUST 使用 `/ws/v1` 加房并处理四类 `*.changed` 广播。
+- WS 房间命令要求连接先以 `room.join` 加入同一个 Room；只有需要走 guest fallback 时才按 Room 当前访问模式解释 `room.join.password`。成功加入会建立实时广播订阅。
+- 6.3 的 Room REST 不建立 listener、不要求先 join，也不接收或检查 guest credential、`trusted_roles` 或其它 WS admission 条件；它只校验标准 Bearer session 及各操作的 requester/controller 权限。
+- 两种传输适配器调用同一个 Room 领域服务和同一个 actor。REST 命令造成的状态变化会广播为 `queue.patch` 或对应状态消息给已加入该 Room 的 WS 客户端；WS 命令也可由后续 REST state 查询观察。
+- `GET .../state` 是一次性、按调用身份投影的完整快照，不是订阅。需要实时变化时仍 MUST 使用 `/ws/v1` 加房，并处理 `playback.changed`、`queue.snapshot`/`queue.patch`、`radio.changed` 与 `listeners.changed`。
 
 ### 4.5 电台模式与曲目源
 
@@ -500,7 +566,7 @@ pause│  │resume
 ### 5.3 并发模型
 
 - 每个房间一个 actor goroutine；所有 4.2 节操作、timer 事件、听众进出全部经 `inbound` channel 串行处理。无锁。
-- 广播由 actor 组装一次快照，扇出给各 listener 的发送队列；慢客户端（发送缓冲满）直接断开，由客户端重连 + 重新 join 拿全量快照恢复。
+- 广播由 actor 按状态类型组装一次，扇出给各 listener 的发送队列；队列消息按 4.1 的 envelope 预算分块。慢客户端（发送缓冲满）直接断开，由客户端重连 + 重新 join 取得新的 revisioned 队列基线与其它当前状态。
 
 ## 6. REST API（`/api/v1`）
 
@@ -509,8 +575,8 @@ pause│  │resume
 - 端点权限以 6.2 为准。受保护的标准 REST 使用 `Authorization: Bearer <session_token>`，token 可来自 guest/OIDC 登录或 3.6 的 `actor_token`；Integration token 不是标准 session。guest/OIDC/config 与 cover 是公开端点，actor resolve 改用 Integration token，logout 只要求非空 Bearer 值，stream 改用查询参数 ticket。
 - Server 返回领域 JSON，不返回已经排版的聊天文本。Integration Client 自行把结果转换成 AstrBot 消息链、游戏 UI、终端文本等。
 - 客户端 MUST 忽略**响应**中的未知字段。6.3 中带 JSON body 的 Room 控制端点与 6.4 的 Integration 端点采用严格 JSON 解码：未知字段、类型不符、多个 JSON 值均返回 HTTP 400 `bad_request`；Room 控制 JSON 解码器最多读取 1 MiB。
-- 6.3 的五个 Room 写端点支持 `Idempotency-Key`：`POST queue`、`DELETE queue/{entry_id}`、`POST playback`、`POST radio`、`DELETE radio`。Integration actor session 调用这些端点时此 header **必填**；普通 guest/OIDC session 可选。key 最长 200 bytes，应使用外部平台 event/message ID 派生的稳定值。
-- 去重作用域是 `(actor_id, integration_id, key, HTTP method, escaped path)`。同一作用域和逐字节相同的 request body 在 24 小时内重放缓存的非 5xx status/body，并返回 `Idempotency-Replayed: true`；同 key 不同 body 返回 409 `idempotency_conflict`；首个请求仍处理中返回 409 `request_in_progress`。5xx 不缓存，可安全重试。
+- 6.3 的六个 Room 写端点支持 `Idempotency-Key`：`POST queue`、`DELETE queue`、`DELETE queue/{entry_id}`、`POST playback`、`POST radio`、`DELETE radio`。Integration actor session 调用这些端点时此 header **必填**；普通 guest/OIDC session 可选。key 最长 200 bytes，应使用外部平台 event/message ID 派生的稳定值。
+- 去重作用域是 `(actor_id, integration_id, key, HTTP method, escaped path)`。同一作用域和逐字节相同的 request body 在 24 小时内重放缓存的非 5xx status/body，并返回 `Idempotency-Replayed: true`；同 key 不同 body 返回 409 `idempotency_conflict`；首个请求仍处理中返回 409 `request_in_progress`。5xx 不缓存，可安全重试。`DELETE .../queue` 即使不用同一 key 重复调用也保持语义幂等：待播队列仍为空且请求成功。
 - REST 错误统一使用以下 envelope，客户端按 `error.code` 分支，不按 `message` 分支：
 
 ```json
@@ -545,9 +611,9 @@ pause│  │resume
 | `GET /api/v1/integrations/{id}/subjects` | `room_admin` | 该 Integration 的全部 external subject→Principal 链接，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/subjects` | `room_admin` | 链接/解绑 external subject 与 Principal |
 | `GET /api/v1/principals?q=&limit=` | `room_admin` | 按 ID 或名称可选搜索 Principal；默认/上限 100，稳定排序；不返回 OIDC subject |
-| `GET /api/v1/rooms` | `listener` | 房间目录；每项含 `id/name/policy/guest_access/listener_count/now_playing`；`guest_access` 只公开 mode 与动态码周期，不公开静态密码或当前码；绝不含 `stream_url` |
-| `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 建/改房间名称、访问模式及 policy；访问配置热更新 |
-| `GET /api/v1/rooms/{id}/access-code` | `room_admin`，或当前 scope 映射到该 Room 的 Integration actor | 返回当前动态验证码与有效期；`Cache-Control: no-store` |
+| `GET /api/v1/rooms` / `GET /api/v1/rooms/{id}` | `listener` | 房间目录/单房间信息；字段合同见下文；绝不含静态密码、当前动态码或 `stream_url` |
+| `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 建/改房间名称、访问模式、`trusted_roles` 及 policy；访问配置热更新 |
+| `GET /api/v1/rooms/{id}/access-code` | `room_admin`，或当前 scope 映射到该 Room 的 Integration actor | 返回当前动态验证码与有效期，供分享给走 guest fallback 的用户；`Cache-Control: no-store` |
 | `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
 | `GET /api/v1/rooms/{id}/grants` | `room_admin` | 该 Room 的全部显式 `controller` grants，稳定排序 |
 | `PUT/DELETE /api/v1/rooms/{id}/grants/{principal_id}` | `room_admin` | 授予/撤销该 Principal 的 Room `controller` capability |
@@ -556,6 +622,7 @@ pause│  │resume
 | `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability；Room 不存在为 404 |
 | `GET /api/v1/rooms/{id}/state` | 标准 session | 无副作用完整状态快照 |
 | `POST /api/v1/rooms/{id}/queue` | `requester` | 单条或 1–100 条原子入队 |
+| `DELETE /api/v1/rooms/{id}/queue` | controller | 原子清空待播队列；保留 current 与 radio；空队列也成功 |
 | `DELETE /api/v1/rooms/{id}/queue/{entry_id}` | 所有者 / controller | 移除待播条目 |
 | `PATCH /api/v1/rooms/{id}/queue/{entry_id}` | controller | 移动待播条目 |
 | `POST /api/v1/rooms/{id}/playback/{op}` | controller | `pause/resume/skip/seek` |
@@ -572,15 +639,84 @@ pause│  │resume
 | `GET /api/v1/rooms/{id}/players` | `room_admin` | Room 持久分配与当前在线状态；离线 Player 仍在列表 |
 | `PUT/DELETE /api/v1/rooms/{id}/players/{player_id}` | `room_admin` | 分配/解除持久 Player；允许离线分配，在线时立即进入/离开 Room |
 
-**Room 访问配置：**
+**Room 管理 JSON 与访问配置：**
 
-- `guest_access_mode` 取 `open | static_password | rotating_code`。创建时省略该字段会按兼容规则推断：非空 `guest_password` 为 `static_password`，否则为 `open`。
-- `static_password` 必须携带非空 `guest_password`，服务端只保存 bcrypt hash。显式 `open`/`rotating_code` 不接受非空 `guest_password`。
-- `rotating_code` 的 `guest_code_period_seconds` 默认 `86400`（24 小时），范围为 `60..2592000`（1 分钟至 30 天）。PATCH 省略字段即保留原值；仅携带 `guest_password` 的旧式 PATCH 仍按非空→静态、空→开放解释。
-- 动态码使用与 external binding code 相同的 12 字符无歧义 Base32 alphabet，展示为 `XXXX-XXXX-XXXX`；输入忽略大小写、连字符与 Unicode 空白。它由服务端 `secret_key`、Room ID/创建时间、周期和 UTC 时间 counter 经域隔离 HMAC-SHA256 派生，不落库、不需要轮换任务。
-- 周期切换后的前 15 秒接受上一周期码；之后只接受当前码。周期变化和访问配置热更新只影响后续 join，不踢出已经加入的连接。
-- 错误入房凭据按 `(room_id, source_ip)` 限制为 10 分钟窗口内 10 次；正确凭据清空失败桶，超过阈值返回 `rate_limited`。
-- `GET /api/v1/rooms/{id}/access-code` 响应：
+rotating-code Room 的创建请求示例：
+
+```json
+{
+  "id": "lobby",
+  "name": "大厅",
+  "guest_access_mode": "rotating_code",
+  "guest_code_period_seconds": 86400,
+  "trusted_roles": ["vip", "staff"],
+  "policy": "{\"max_queue\":500}"
+}
+```
+
+- create 的 `name` 必填；`id` 可省略，服务端从 name 生成 slug。PATCH 可携带 `name`、`guest_access_mode`、`guest_password`、`guest_code_period_seconds`、`trusted_roles`、`policy` 中的任意子集，所有省略字段保持不变。`policy` 在 create/PATCH **请求**中是包含 JSON 对象文本的字符串；省略时创建为 `{}`。
+- `guest_access_mode` 取 `open | static_password | rotating_code`。创建时省略该字段：非空 `guest_password` 推断为 `static_password`，否则为 `open`。
+- `static_password` 创建或更换密码时必须携带非空、只写的 `guest_password`；服务端只保存 bcrypt hash，任何响应都不返回密码。显式 `open`/`rotating_code` 不接受非空 `guest_password`。PATCH 省略字段即保留；只携带 `guest_password` 时，非空切为静态密码、空串切为开放。
+- `rotating_code` 的 `guest_code_period_seconds` 默认 `86400`（24 小时），范围为 `60..2592000`（1 分钟至 30 天）。动态码使用与 external binding code 相同的 12 字符无歧义 Base32 alphabet，展示为 `XXXX-XXXX-XXXX`；输入忽略大小写、连字符与 Unicode 空白。它由服务端 `secret_key`、Room ID/创建时间、周期和 UTC 时间 counter 经域隔离 HMAC-SHA256 派生，不落库、不需要轮换任务。
+- `trusted_roles` 是免 guest credential 的身份 role 数组；省略时创建为空数组、PATCH 时保留，显式 `[]` 清空。每项 trim 后必须为 1–64 字节的 role 名：首字符为 ASCII 字母或数字，后续还可含 `_`、`-`、`.`。服务端去重并稳定排序。`listener` 与 `requester` **禁止**出现，因为它们会让普通 guest 普遍绕过房间保护；其它命中当前身份的 role 均按 4.2 免密。
+- 周期切换后的前 15 秒接受上一周期码；之后只接受当前码。访问配置热更新只影响后续 join，不踢出已经加入的连接。错误 guest credential 按 `(room_id, source_ip)` 限制为 10 分钟窗口内 10 次；身份免密路径不计入探测次数，正确凭据清空失败桶，超过阈值返回 `rate_limited`。
+
+`POST /api/v1/rooms` 成功返回 HTTP 201；`PATCH /api/v1/rooms/{id}` 成功返回 HTTP 200。两者响应形状相同，且 `code_period_seconds` 仅在 rotating mode 出现：
+
+```json
+{
+  "room": {
+    "id": "lobby",
+    "name": "大厅",
+    "guest_access": {
+      "mode": "rotating_code",
+      "code_period_seconds": 86400,
+      "trusted_roles": ["staff", "vip"]
+    }
+  }
+}
+```
+
+`GET /api/v1/rooms` 返回 `{"rooms":[room_info, ...]}`；`GET /api/v1/rooms/{id}` 返回 `{"room":room_info}`。`room_info` 的完整顶层字段如下：
+
+```json
+{
+  "id": "lobby",
+  "name": "大厅",
+  "policy": {"max_queue": 500},
+  "guest_access": {
+    "mode": "rotating_code",
+    "code_period_seconds": 86400,
+    "trusted_roles": ["staff", "vip"]
+  },
+  "listener_count": 12,
+  "now_playing": {
+    "title": "海阔天空",
+    "artist": "Beyond",
+    "duration_ms": 326000,
+    "cover_url": "/api/v1/cover/ncm%3A347230",
+    "position_ms": 30210,
+    "updated_at": 1720000000123,
+    "playing": true,
+    "rate": 1
+  }
+}
+```
+
+`policy` 在查询**响应**中是 JSON 对象，不是字符串。`now_playing` 空闲时为 `null`；它和 `guest_access` 都不泄露 `stream_url`、密码 hash、静态密码或当前动态码。`guest_access.trusted_roles` 始终是数组；`code_period_seconds` 只在 rotating mode 出现。
+
+Room create/PATCH/list/get 的错误合同：
+
+| HTTP / `error.code` | 条件 |
+|---|---|
+| 400 / `bad_request` | create 缺 name、JSON/访问模式/周期/password/trusted role/policy 非法 |
+| 401 / `unauthorized` | session 缺失、过期、吊销，或 Principal 不可用 |
+| 403 / `forbidden` | list/get 缺 `listener`，或 create/PATCH 缺 `room_admin` |
+| 404 / `not_found` | get/PATCH 的 Room 不存在 |
+| 409 / `conflict` | create 的 Room ID 已存在或其它持久化冲突 |
+| 500 / `internal` | 目录快照、热更新或存储发生未分类服务端错误 |
+
+`GET /api/v1/rooms/{id}/access-code` 响应：
 
 ```json
 {
@@ -594,7 +730,7 @@ pause│  │resume
 }
 ```
 
-普通 session 只有当前 `room_admin` 可读取。Integration actor 只有在其签发 scope **当前**映射到路径 Room 时可读取；Integration 停用、token 轮换、scope 解绑/改绑或 actor session 过期都会立即阻断。响应和 audit detail 均不记录其它秘密，验证码正文不进入 audit。
+普通 session 只有当前 `room_admin` 可读取。Integration actor 只有在其签发 scope **当前**映射到路径 Room 时可读取；Integration 停用、token 轮换、scope 解绑/改绑或 actor session 过期都会立即阻断。该端点用于把动态码安全地展示或分享给需要走 guest fallback 的用户；same-room Integration actor 自己入房不需要提交该码。响应和 audit detail 均不记录其它秘密，验证码正文不进入 audit。
 
 **Provider、歌单、媒体与出流：**
 
@@ -627,7 +763,7 @@ pause│  │resume
 
 ### 6.3 无状态 Room 合同（合同 A）
 
-这些路径都不建立 WS 连接或 Room listener，不要求 `room.join`，也不检查房间访客密码。`controller` 的定义是全局 `room_admin` **OR** 此 Principal 在此 Room 的 `controller` grant（3.4）。
+这些路径都不建立 WS 连接或 Room listener，不要求 `room.join`，也不接收或检查 guest credential；WS admission 的 same-room Integration、`trusted_roles` 等免密判定在这里同样不参与授权。REST 保持无状态，只认证标准 Bearer session，再按操作检查 requester/controller。`controller` 的定义是全局 `room_admin` **OR** 此 Principal 在此 Room 的 `controller` grant（3.4）。
 
 **状态响应：**
 
@@ -654,7 +790,7 @@ pause│  │resume
 }
 ```
 
-- 四个字段的完整形状与 4.1 的 WS 快照相同；区别是 REST 顶层直接使用 `queue` 数组与 `radio` 值，没有 `queue.changed`/`radio.changed` 的 data 包装。
+- 四个字段的领域形状与 4.1 相同；REST 顶层 `queue` 是一次性完整数组，不携带 WS 的 revision/part envelope，`radio` 也直接是值。
 - `playback.current` 非空时包含按本次调用 identity 签发的 `stream_url`；队列条目仍不含 `stream_url`。
 - `listeners` 只反映已加入的普通 WS listener（不含 Headless Player）。查询本身无副作用，重复查询不会把调用者加入列表。
 
@@ -663,6 +799,7 @@ pause│  │resume
 | 方法与路径 | JSON body | 权限 | HTTP 200 body |
 |---|---|---|---|
 | `POST /api/v1/rooms/{id}/queue` | `{"track_ref":"ncm:..."}` 或 `{"track_refs":["...", ...]}`，严格二选一；数组 1–100 | `requester` | `{"entry_ids":["e_...", ...]}`，顺序与请求一致 |
+| `DELETE /api/v1/rooms/{id}/queue` | 无 | controller | `{}` |
 | `DELETE /api/v1/rooms/{id}/queue/{entry_id}` | 无 | 条目所有者 / controller | `{}` |
 | `PATCH /api/v1/rooms/{id}/queue/{entry_id}` | `{"to_index":0}`；零基、非负且须落在当前待播队列范围 | controller | `{}` |
 | `POST /api/v1/rooms/{id}/playback/pause` | 无（空对象也可） | controller | `{}` |
@@ -673,6 +810,7 @@ pause│  │resume
 | `DELETE /api/v1/rooms/{id}/radio` | 无 | controller | `{}` |
 
 - 单条与批量入队都会先解析全部 Track，再由 Room actor 整批预校验并追加；任一 ref、Provider、总量或身份限额失败时一条不加。
+- clear 只清空 pending queue；正在播放的 `playback.current` 与 radio 绑定保持不变。空队列 clear 仍返回成功，因此调用在状态语义上幂等；WS 订阅者以收到的 revisioned `queue.patch` 为准。
 - 每个成功命令都经与 WS 相同的领域服务进入同一个 Room actor；其状态变化随后广播给该 Room 的 WS listeners。
 - `{id}`、`{entry_id}`、`{track_ref}` 嵌入 URL 时按路径段转义；不要把 `bili:...?p=...` 的 `?` 当作 URL 查询起点。
 
@@ -846,7 +984,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |
 | `internal` | 500 | 服务端内部错误 |
-| `rate_limited` | 429 | 同一来源 IP 在 10 分钟内已有 10 次非空错误管理员口令探测；窗口内后续带口令的 guest 认证被限制，无口令访客不受限 |
+| `rate_limited` | 429 | 同一来源 IP 的管理员口令或 Room guest credential 错误探测超过窗口阈值；不携带管理员口令的普通 guest 登录、Room 身份免密路径不计入相应探测 |
 
 ## 8. 明确不做的
 
@@ -870,9 +1008,9 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 1. 连接 WebSocket /ws/v1
 2. 校时：3–5 轮 ping/pong（§2.1），得 offset
 3. auth：guest name/password，或 {"session_token": "..."}（OIDC/actor token 均可）
-4. room.join（§4.2）→ 等 room.joined；`password` 按 Room 当前访问模式填写。映射到该 Room 的 Integration actor 可先读 `GET .../access-code`
-5. 接收四条状态快照（§4.1）：playback / queue / radio / listeners
-6. 进入事件循环：四类 *.changed 广播覆盖本地副本
+4. room.join（§4.2）→ 等 room.joined；普通 guest 按 Room 当前模式填写 `password`，免密身份可省略。same-room Integration actor 无需先读取 access code；该码用于分享给走 fallback 的 guest
+5. 分别接收 playback / revisioned queue.snapshot / radio / listeners 当前状态；按 type 分派，不依赖固定消息条数
+6. 进入事件循环：playback/radio/listeners 用最新完整状态覆盖；queue.patch 收齐后按 revision 原子应用，mismatch 立即 queue.sync
 ```
 
 只做一次性命令/查询的 REST Client 无需建立 WS、校时或 join；需要实时订阅时才执行上述流程。
@@ -917,7 +1055,7 @@ Agent 不调用 `room.join`。管理员可以在 Agent 离线前先创建 Player
 ### 9.4 断线与重连
 
 - 普通 WS 连接和 Room listener 关系是内存态：断线即离房。普通 session 持久化且可在过期/吊销前复用；Integration `actor_token` 只有效 5 分钟，过期后须重新 resolve。
-- 普通 WS 重连后 MUST 重新校时、以仍有效的 session token 认证并 join 以取得全量快照；token 已失效则先重新登录/resolve。
+- 普通 WS 重连后 MUST 重新校时、以仍有效的 session token 认证并 join，以取得新的 revisioned `queue.snapshot` 基线与其它当前状态；token 已失效则先重新登录/resolve。
 - Headless Agent 重连后 MUST 用 Player key 重新认证并发送 `player.hello`；服务端按持久 Room 分配自动加入，不得发送 `room.join`。
 - 服务端会主动断开发送缓冲满、Player 停用/删除、key 轮换或同 ID 被新连接替代的连接。客户端 SHOULD 指数退避重连（如 1s/2s/5s/10s/30s 封顶），稳定运行后重置退避。
 
