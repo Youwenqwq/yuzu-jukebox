@@ -97,6 +97,23 @@ func (s *Server) queueAdd(w http.ResponseWriter, r *http.Request) {
 	}{EntryIDs: entryIDs})
 }
 
+func (s *Server) queueClear(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.controlIdentity(w, r)
+	if !ok {
+		return
+	}
+	roomID, ok := controlPathValue(w, r, "id")
+	if !ok {
+		return
+	}
+
+	if err := s.controls.QueueClear(r.Context(), roomID, identity); err != nil {
+		writeControlErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
 func (s *Server) queueRemove(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.controlIdentity(w, r)
 	if !ok {

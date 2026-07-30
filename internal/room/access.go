@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/shortcode"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -28,17 +31,20 @@ const (
 )
 
 var (
-	ErrInvalidAccessMode   = errors.New("invalid room access mode")
-	ErrInvalidCodePeriod   = errors.New("room code period must be between 60 and 2592000 seconds")
-	ErrStaticPasswordEmpty = errors.New("static room password required")
-	ErrAccessCodeDisabled  = errors.New("rotating room code is not enabled")
-	ErrAccessCodeKeyAbsent = errors.New("server secret_key is required for rotating room codes")
+	ErrInvalidAccessMode    = errors.New("invalid room access mode")
+	ErrInvalidCodePeriod    = errors.New("room code period must be between 60 and 2592000 seconds")
+	ErrStaticPasswordEmpty  = errors.New("static room password required")
+	ErrAccessCodeDisabled   = errors.New("rotating room code is not enabled")
+	ErrAccessCodeKeyAbsent  = errors.New("server secret_key is required for rotating room codes")
+	ErrInvalidTrustedRole   = errors.New("invalid trusted room role")
+	ErrForbiddenTrustedRole = errors.New("listener and requester cannot be trusted room roles")
 )
 
 type AccessConfig struct {
 	Mode              AccessMode
 	PasswordHash      string
 	CodePeriodSeconds int64
+	TrustedRoles      []string
 }
 
 type AccessCode struct {
@@ -61,7 +67,50 @@ func newRoomAccess(roomID string, createdAt int64, key []byte, config AccessConf
 	return a
 }
 
+// NormalizeTrustedRoles validates trusted identity roles and returns a
+// deduplicated, stable representation suitable for persistence.
+func NormalizeTrustedRoles(roles []string) ([]string, error) {
+	normalized := make([]string, 0, len(roles))
+	seen := make(map[string]struct{}, len(roles))
+	for _, rawRole := range roles {
+		role := strings.TrimSpace(rawRole)
+		if !validRoleName(role) {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidTrustedRole, rawRole)
+		}
+		if role == auth.RoleListener || role == auth.RoleRequester {
+			return nil, fmt.Errorf("%w: %s", ErrForbiddenTrustedRole, role)
+		}
+		if _, ok := seen[role]; ok {
+			continue
+		}
+		seen[role] = struct{}{}
+		normalized = append(normalized, role)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func validRoleName(role string) bool {
+	if len(role) == 0 || len(role) > 64 {
+		return false
+	}
+	for i := range len(role) {
+		c := role[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			continue
+		}
+		if i > 0 && (c == '_' || c == '-' || c == '.') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func ValidateAccessConfig(config AccessConfig, hasCodeKey bool) error {
+	if _, err := NormalizeTrustedRoles(config.TrustedRoles); err != nil {
+		return err
+	}
 	if config.CodePeriodSeconds == 0 {
 		config.CodePeriodSeconds = DefaultCodePeriodSeconds
 	}
@@ -93,18 +142,26 @@ func (a *roomAccess) store(config AccessConfig) {
 	if config.Mode != AccessModeStaticPassword {
 		config.PasswordHash = ""
 	}
+	roles, err := NormalizeTrustedRoles(config.TrustedRoles)
+	if err != nil {
+		roles = []string{}
+	}
+	config.TrustedRoles = roles
 	copy := config
 	a.config.Store(&copy)
 }
 
 func (a *roomAccess) load() AccessConfig {
-	return *a.config.Load()
+	config := *a.config.Load()
+	config.TrustedRoles = append([]string(nil), config.TrustedRoles...)
+	return config
 }
 
 func (a *roomAccess) set(config AccessConfig) error {
 	if err := ValidateAccessConfig(config, len(a.key) > 0); err != nil {
 		return err
 	}
+	config.TrustedRoles, _ = NormalizeTrustedRoles(config.TrustedRoles)
 	a.store(config)
 	return nil
 }

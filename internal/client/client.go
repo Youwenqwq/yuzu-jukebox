@@ -48,6 +48,11 @@ type Client struct {
 	pmu     sync.Mutex
 	pending map[string]chan Message
 
+	qmu            sync.Mutex
+	queue          queueReplica
+	queueRoomID    string
+	queueResyncing bool
+
 	events   chan Message
 	offsetMs int64 // server_now = local_now + offsetMs
 	synced   bool
@@ -101,12 +106,13 @@ func (c *Client) readPump() {
 			}
 			c.pmu.Unlock()
 		}
+		c.handleQueueMessage(m)
 		// 广播类消息（ack 之外的 ref 消息也按事件处理）
 		c.events <- m
 	}
 }
 
-// Events 返回广播事件流（playback.changed / queue.changed / listeners.changed 等）。
+// Events 返回广播事件流（playback.changed / queue.snapshot / queue.patch 等）。
 func (c *Client) Events() <-chan Message { return c.events }
 
 // call 发送请求并等待对应 ref 的响应。
@@ -241,12 +247,19 @@ func (c *Client) AuthPlayer(ctx context.Context, playerKey string) (Identity, er
 
 // Join 加入房间。成功后快照经 Events() 推送。
 func (c *Client) Join(ctx context.Context, roomID, password string) error {
+	previousRoom := c.setQueueRoom(roomID)
 	_, err := c.call(ctx, "room.join", map[string]any{"room_id": roomID, "password": password})
+	if err != nil {
+		c.setQueueRoom(previousRoom)
+	}
 	return err
 }
 
 func (c *Client) Leave(ctx context.Context, roomID string) error {
 	_, err := c.call(ctx, "room.leave", map[string]any{"room_id": roomID})
+	if err == nil {
+		c.resetQueueRoom("")
+	}
 	return err
 }
 
@@ -283,6 +296,12 @@ func (c *Client) QueueMove(ctx context.Context, roomID, entryID string, toIndex 
 	return err
 }
 
+// QueueClear 清空指定房间的待播队列。
+func (c *Client) QueueClear(ctx context.Context, roomID string) error {
+	_, err := c.call(ctx, "queue.clear", map[string]any{"room_id": roomID})
+	return err
+}
+
 // PlaybackOp 发送播放控制操作（pause/resume/skip/seek）。
 func (c *Client) PlaybackOp(ctx context.Context, op, roomID string, positionMs int64) error {
 	data := map[string]any{"room_id": roomID}
@@ -309,21 +328,27 @@ func (c *Client) RadioStop(ctx context.Context, roomID string) error {
 
 // ---------- 房间状态（客户端视图） ----------
 
+type Contributor struct {
+	Role string `json:"role"`
+	Name string `json:"name"`
+}
+
 type QueueEntry struct {
-	EntryID       string `json:"entry_id"`
-	TrackRef      string `json:"track_ref"`
-	Title         string `json:"title"`
-	Artist        string `json:"artist"`
-	DurationMs    int64  `json:"duration_ms"`
-	Album         string `json:"album,omitempty"`
-	CoverURL      string `json:"cover_url,omitempty"`
-	SourceURL     string `json:"source_url,omitempty"`
-	RequestedBy   string `json:"requested_by"`
-	RequesterName string `json:"requester_name"`
-	AddedAt       int64  `json:"added_at"`
-	StreamURL     string `json:"stream_url,omitempty"`
-	SizeBytes     int64  `json:"size_bytes,omitempty"`
-	BitrateKbps   int    `json:"bitrate_kbps,omitempty"`
+	EntryID       string        `json:"entry_id"`
+	TrackRef      string        `json:"track_ref"`
+	Title         string        `json:"title"`
+	Artist        string        `json:"artist"`
+	DurationMs    int64         `json:"duration_ms"`
+	Album         string        `json:"album,omitempty"`
+	CoverURL      string        `json:"cover_url,omitempty"`
+	SourceURL     string        `json:"source_url,omitempty"`
+	Contributors  []Contributor `json:"contributors,omitempty"`
+	RequestedBy   string        `json:"requested_by"`
+	RequesterName string        `json:"requester_name"`
+	AddedAt       int64         `json:"added_at"`
+	StreamURL     string        `json:"stream_url,omitempty"`
+	SizeBytes     int64         `json:"size_bytes,omitempty"`
+	BitrateKbps   int           `json:"bitrate_kbps,omitempty"`
 }
 
 type Playback struct {
@@ -347,15 +372,6 @@ func ParsePlayback(m Message) (Playback, error) {
 	var p Playback
 	err := json.Unmarshal(m.Data, &p)
 	return p, err
-}
-
-// ParseQueue 解析 queue.changed 事件数据。
-func ParseQueue(m Message) ([]QueueEntry, error) {
-	var d struct {
-		Queue []QueueEntry `json:"queue"`
-	}
-	err := json.Unmarshal(m.Data, &d)
-	return d.Queue, err
 }
 
 // RadioInfo 电台绑定状态（radio.changed 事件 data.radio；null 表示未绑定）。
@@ -385,17 +401,20 @@ type Listener struct {
 }
 
 type Snapshot struct {
-	Playback  Playback     `json:"playback"`
-	Queue     []QueueEntry `json:"queue"`
-	Radio     *RadioInfo   `json:"radio"`
-	Listeners []Listener   `json:"listeners"`
+	Playback      Playback     `json:"playback"`
+	Queue         []QueueEntry `json:"queue"`
+	QueueRevision uint64       `json:"queue_revision,omitempty"`
+	Radio         *RadioInfo   `json:"radio"`
+	Listeners     []Listener   `json:"listeners"`
 }
 
 // AwaitSnapshot 在 Join 之后调用，收齐服务端按序推送的快照消息。
 func (c *Client) AwaitSnapshot(timeout time.Duration) (*Snapshot, error) {
 	snap := &Snapshot{}
 	var gotPlayback, gotQueue, gotRadio, gotListeners bool
-	deadline := time.After(timeout)
+	var queueParts queueSnapshotCollector
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	for !(gotPlayback && gotQueue && gotRadio && gotListeners) {
 		select {
 		case m, ok := <-c.events:
@@ -404,13 +423,26 @@ func (c *Client) AwaitSnapshot(timeout time.Duration) (*Snapshot, error) {
 			}
 			switch m.Type {
 			case "playback.changed":
-				if pb, err := ParsePlayback(m); err == nil {
-					snap.Playback = pb
-					gotPlayback = true
+				pb, err := ParsePlayback(m)
+				if err != nil {
+					return nil, fmt.Errorf("parse playback snapshot: %w", err)
 				}
-			case "queue.changed":
-				snap.Queue, _ = ParseQueue(m)
-				gotQueue = true
+				snap.Playback = pb
+				gotPlayback = true
+			case "queue.snapshot":
+				part, err := ParseQueueSnapshot(m)
+				if err != nil {
+					return nil, fmt.Errorf("parse queue snapshot: %w", err)
+				}
+				items, revision, done, err := queueParts.add(part)
+				if err != nil {
+					return nil, fmt.Errorf("assemble queue snapshot: %w", err)
+				}
+				if done {
+					snap.Queue = items
+					snap.QueueRevision = revision
+					gotQueue = true
+				}
 			case "radio.changed":
 				snap.Radio = ParseRadio(m)
 				gotRadio = true
@@ -418,12 +450,18 @@ func (c *Client) AwaitSnapshot(timeout time.Duration) (*Snapshot, error) {
 				var d struct {
 					Listeners []Listener `json:"listeners"`
 				}
-				if json.Unmarshal(m.Data, &d) == nil {
-					snap.Listeners = d.Listeners
-					gotListeners = true
+				if err := json.Unmarshal(m.Data, &d); err != nil {
+					return nil, fmt.Errorf("parse listeners snapshot: %w", err)
+				}
+				snap.Listeners = d.Listeners
+				gotListeners = true
+			case "error":
+				var eventErr ErrorMsg
+				if json.Unmarshal(m.Data, &eventErr) == nil && eventErr.Code == "queue_snapshot_failed" {
+					return nil, eventErr
 				}
 			}
-		case <-deadline:
+		case <-deadline.C:
 			return nil, fmt.Errorf("timeout waiting for room snapshot")
 		}
 	}
@@ -514,6 +552,13 @@ func restRoomQueueAdd(ctx context.Context, server, actorToken, roomID string, bo
 func RESTRoomQueueRemove(ctx context.Context, server, actorToken, roomID, entryID string) error {
 	return restCall(ctx, server, http.MethodDelete,
 		"/api/v1/rooms/"+url.PathEscape(roomID)+"/queue/"+url.PathEscape(entryID),
+		actorToken, nil, &struct{}{})
+}
+
+// RESTRoomQueueClear 清空指定房间的待播队列。
+func RESTRoomQueueClear(ctx context.Context, server, actorToken, roomID string) error {
+	return restCall(ctx, server, http.MethodDelete,
+		"/api/v1/rooms/"+url.PathEscape(roomID)+"/queue",
 		actorToken, nil, &struct{}{})
 }
 
@@ -912,8 +957,9 @@ type RoomNowPlaying struct {
 }
 
 type RoomAccessInfo struct {
-	Mode              string `json:"mode"`
-	CodePeriodSeconds int64  `json:"code_period_seconds,omitempty"`
+	Mode              string   `json:"mode"`
+	CodePeriodSeconds int64    `json:"code_period_seconds,omitempty"`
+	TrustedRoles      []string `json:"trusted_roles"`
 }
 
 type RoomAccessCode struct {
@@ -938,6 +984,14 @@ func RESTListRooms(ctx context.Context, server, token string) ([]RoomInfo, error
 	}
 	err := restCall(ctx, server, "GET", "/api/v1/rooms", token, nil, &out)
 	return out.Rooms, err
+}
+
+func RESTGetRoom(ctx context.Context, server, token, roomID string) (RoomInfo, error) {
+	var out struct {
+		Room RoomInfo `json:"room"`
+	}
+	err := restCall(ctx, server, "GET", "/api/v1/rooms/"+url.PathEscape(roomID), token, nil, &out)
+	return out.Room, err
 }
 
 type ProviderInfo struct {
@@ -1066,11 +1120,12 @@ func RESTSearch(ctx context.Context, server, token, provider, query string) ([]T
 }
 
 type RoomCreateRequest struct {
-	ID                     string `json:"id"`
-	Name                   string `json:"name"`
-	GuestPassword          string `json:"guest_password,omitempty"`
-	GuestAccessMode        string `json:"guest_access_mode,omitempty"`
-	GuestCodePeriodSeconds int64  `json:"guest_code_period_seconds,omitempty"`
+	ID                     string   `json:"id"`
+	Name                   string   `json:"name"`
+	GuestPassword          string   `json:"guest_password,omitempty"`
+	GuestAccessMode        string   `json:"guest_access_mode,omitempty"`
+	GuestCodePeriodSeconds int64    `json:"guest_code_period_seconds,omitempty"`
+	TrustedRoles           []string `json:"trusted_roles,omitempty"`
 }
 
 // RESTCreateRoom creates a persistent Room with the requested guest access mode.
@@ -1079,9 +1134,10 @@ func RESTCreateRoom(ctx context.Context, server, token string, request RoomCreat
 }
 
 type RoomAccessUpdate struct {
-	Mode              string  `json:"guest_access_mode"`
-	GuestPassword     *string `json:"guest_password,omitempty"`
-	CodePeriodSeconds *int64  `json:"guest_code_period_seconds,omitempty"`
+	Mode              string    `json:"guest_access_mode,omitempty"`
+	GuestPassword     *string   `json:"guest_password,omitempty"`
+	CodePeriodSeconds *int64    `json:"guest_code_period_seconds,omitempty"`
+	TrustedRoles      *[]string `json:"trusted_roles,omitempty"`
 }
 
 func RESTUpdateRoomAccess(

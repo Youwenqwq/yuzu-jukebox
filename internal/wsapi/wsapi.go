@@ -296,20 +296,25 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		if !c.requireAuth(ref) {
 			return
 		}
-		r, err := c.server.control.GetRoom(d.RoomID)
+		admission, err := c.server.control.AdmitRoom(
+			context.Background(), d.RoomID, c.Identity(), d.Password,
+		)
+		if admission.CredentialChecked {
+			matched := err == nil
+			if !c.server.accessProbes.allow(d.RoomID, c.remote, matched) {
+				c.replyErr(ref, "rate_limited", "too many incorrect room access attempts; try again later")
+				return
+			}
+		}
 		if err != nil {
-			c.replyErr(ref, "not_found", "room not found")
+			if errors.Is(err, room.ErrRoomNotFound) {
+				c.replyErr(ref, "not_found", "room not found")
+			} else {
+				c.replyResult(ref, err)
+			}
 			return
 		}
-		matched := r.CheckAccessCredential(d.Password)
-		if !c.server.accessProbes.allow(d.RoomID, c.remote, matched) {
-			c.replyErr(ref, "rate_limited", "too many incorrect room access attempts; try again later")
-			return
-		}
-		if !matched {
-			c.replyErr(ref, "forbidden", "invalid room access credential")
-			return
-		}
+		r := admission.Room
 		if c.room != nil {
 			c.room.Leave(c)
 		}
@@ -328,6 +333,19 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		c.room.Leave(c)
 		c.room = nil
 		c.Send(map[string]any{"type": "room.left", "ref": ref, "data": map[string]any{}})
+
+	case "queue.sync":
+		var d struct {
+			RoomID string `json:"room_id"`
+		}
+		if err := json.Unmarshal(data, &d); err != nil {
+			c.replyErr(ref, "bad_request", "invalid queue.sync payload")
+			return
+		}
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
+			return
+		}
+		c.replyResult(ref, c.room.SyncQueue(c))
 
 	case "queue.add":
 		var d struct {
@@ -398,6 +416,21 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		}
 		c.replyResult(ref, c.server.control.QueueMove(
 			context.Background(), d.RoomID, c.Identity(), d.EntryID, d.ToIndex,
+		))
+
+	case "queue.clear":
+		var d struct {
+			RoomID string `json:"room_id"`
+		}
+		if err := json.Unmarshal(data, &d); err != nil {
+			c.replyErr(ref, "bad_request", "invalid queue.clear payload")
+			return
+		}
+		if !c.requireAuth(ref) || !c.requireRoom(ref, d.RoomID) {
+			return
+		}
+		c.replyResult(ref, c.server.control.QueueClear(
+			context.Background(), d.RoomID, c.Identity(),
 		))
 
 	case "radio.play":

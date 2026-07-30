@@ -38,6 +38,47 @@ func (s *Service) GetRoom(roomID string) (*room.Room, error) {
 	return s.rooms.Get(roomID)
 }
 
+// RoomAdmission is the result of a join admission decision. CredentialChecked
+// is true only for the final guest-credential path, allowing transports to
+// rate-limit credential probes without counting trusted identity bypasses.
+type RoomAdmission struct {
+	Room              *room.Room
+	CredentialChecked bool
+}
+
+// AdmitRoom resolves the live Room and applies the complete identity-aware
+// admission contract before falling back to its configured guest credential.
+func (s *Service) AdmitRoom(
+	ctx context.Context,
+	roomID string,
+	principal auth.Identity,
+	credential string,
+) (RoomAdmission, error) {
+	if err := ctx.Err(); err != nil {
+		return RoomAdmission{}, err
+	}
+	r, err := s.GetRoom(roomID)
+	if err != nil {
+		return RoomAdmission{}, err
+	}
+	config := r.AccessConfig()
+	if config.Mode == room.AccessModeOpen {
+		return RoomAdmission{Room: r}, nil
+	}
+	bypass, err := s.authorizer.BypassesRoomCredential(ctx, roomID, principal, config.TrustedRoles)
+	if err != nil {
+		return RoomAdmission{Room: r}, err
+	}
+	if bypass {
+		return RoomAdmission{Room: r}, nil
+	}
+	admission := RoomAdmission{Room: r, CredentialChecked: true}
+	if !r.CheckAccessCredential(credential) {
+		return admission, forbidden("invalid room access credential")
+	}
+	return admission, nil
+}
+
 // RoomCapabilities is the caller's effective room-scoped capability set.
 type RoomCapabilities struct {
 	Controller bool `json:"controller"`
@@ -141,6 +182,15 @@ func (s *Service) QueueMove(ctx context.Context, roomID string, principal auth.I
 		return classify(ErrInvalidArgument, err)
 	}
 	return err
+}
+
+// QueueClear clears the pending queue for an authorized controller.
+func (s *Service) QueueClear(ctx context.Context, roomID string, principal auth.Identity) error {
+	r, err := s.controlledRoom(ctx, roomID, principal)
+	if err != nil {
+		return err
+	}
+	return r.ClearQueue()
 }
 
 func (s *Service) Pause(ctx context.Context, roomID string, principal auth.Identity) error {

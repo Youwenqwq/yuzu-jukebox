@@ -140,9 +140,11 @@ type actKind int
 const (
 	actJoin actKind = iota
 	actLeave
+	actQueueSync
 	actAdd
 	actRemove
 	actMove
+	actClear
 	actPause
 	actResume
 	actSeek
@@ -228,6 +230,7 @@ func newPersistentRoom(row store.Room, codeKey []byte, st *store.Store, authm *a
 	}
 	config := AccessConfig{
 		Mode: mode, PasswordHash: row.PasswordHash, CodePeriodSeconds: row.CodePeriodSeconds,
+		TrustedRoles: row.TrustedRoles,
 	}
 	return &Room{
 		ID: row.ID, Name: row.Name, policyRaw: row.PolicyJSON,
@@ -284,6 +287,11 @@ func (r *Room) Join(c ClientConn) {
 	}
 }
 
+// SyncQueue serializes a fresh revisioned queue baseline through the actor.
+func (r *Room) SyncQueue(c ClientConn) error {
+	return r.call(action{kind: actQueueSync, client: c})
+}
+
 func (r *Room) Leave(c ClientConn) {
 	select {
 	case r.inbound <- action{kind: actLeave, client: c}:
@@ -318,6 +326,11 @@ func (r *Room) RemoveFor(id auth.Identity, entryID string) error {
 }
 func (r *Room) Move(entryID string, to int) error {
 	return r.call(action{kind: actMove, entryID: entryID, toIndex: to})
+}
+
+// ClearQueue atomically clears the pending queue. Playback and radio binding are unchanged.
+func (r *Room) ClearQueue() error {
+	return r.call(action{kind: actClear})
 }
 func (r *Room) Pause() error             { return r.call(action{kind: actPause}) }
 func (r *Room) Resume() error            { return r.call(action{kind: actResume}) }
@@ -373,6 +386,7 @@ func (r *Room) Snapshot(id auth.Identity) (Snapshot, error) {
 func (r *Room) Run(ctx context.Context) {
 	defer close(r.done)
 	queue := r.loadQueue()
+	var queueRevision uint64
 	var playback *Playback
 	var radio *radioState
 	clients := map[string]ClientConn{}
@@ -394,10 +408,13 @@ func (r *Room) Run(ctx context.Context) {
 		return pb.PositionMs
 	}
 
-	persistQueue := func() {
-		rows := make([]store.QueueRow, len(queue))
-		for i, e := range queue {
-			contrib, _ := json.Marshal(e.Contributors)
+	queueRows := func(next []QueueEntry) ([]store.QueueRow, error) {
+		rows := make([]store.QueueRow, len(next))
+		for i, e := range next {
+			contrib, err := json.Marshal(e.Contributors)
+			if err != nil {
+				return nil, err
+			}
 			rows[i] = store.QueueRow{
 				EntryID: e.EntryID, TrackRef: e.TrackRef, Title: e.Title,
 				Artist: e.Artist, DurationMs: e.DurationMs,
@@ -407,8 +424,7 @@ func (r *Room) Run(ctx context.Context) {
 				RequesterName: e.RequesterName,
 			}
 		}
-		// DB 写入很快，actor 内同步执行换取简单的一致性
-		_ = r.st.ReplaceQueue(ctx, r.ID, rows)
+		return rows, nil
 	}
 
 	// broadcast 只推送给声明了对应 interest 的连接。
@@ -444,16 +460,82 @@ func (r *Room) Run(ctx context.Context) {
 		return pb
 	}
 
+	queueEntrySnapshot := func(entry QueueEntry) QueueEntry {
+		entry = cloneEntry(entry)
+		if entry.CoverURL != "" {
+			entry.CoverURL = "/api/v1/cover/" + url.PathEscape(entry.TrackRef)
+		}
+		return entry
+	}
+
 	queueSnapshot := func() []QueueEntry {
 		q := make([]QueueEntry, len(queue))
 		for i, entry := range queue {
-			entry = cloneEntry(entry)
-			if entry.CoverURL != "" {
-				entry.CoverURL = "/api/v1/cover/" + url.PathEscape(entry.TrackRef)
-			}
-			q[i] = entry
+			q[i] = queueEntrySnapshot(entry)
 		}
 		return q
+	}
+
+	sendQueueSnapshot := func(c ClientConn) error {
+		messages, err := QueueSnapshotMessages(queueRevision, queueSnapshot())
+		if err != nil {
+			return err
+		}
+		for _, message := range messages {
+			c.Send(message)
+		}
+		return nil
+	}
+
+	wireQueuePatchOps := func(ops []QueuePatchOp) []QueuePatchOp {
+		wire := make([]QueuePatchOp, len(ops))
+		for i, op := range ops {
+			wire[i] = op
+			if op.Item != nil {
+				item := queueEntrySnapshot(*op.Item)
+				wire[i].Item = &item
+			}
+		}
+		return wire
+	}
+
+	commitQueue := func(next []QueueEntry, ops []QueuePatchOp) error {
+		nextRevision := queueRevision + 1
+		messages, err := QueuePatchMessages(queueRevision, nextRevision, wireQueuePatchOps(ops))
+		if err != nil {
+			return err
+		}
+		rows, err := queueRows(next)
+		if err != nil {
+			return err
+		}
+		if err := r.st.ReplaceQueue(ctx, r.ID, rows); err != nil {
+			return err
+		}
+		queue = next
+		queueRevision = nextRevision
+		for _, message := range messages {
+			message := message
+			broadcast(InterestQueue, func(ClientConn) any { return message })
+		}
+		return nil
+	}
+
+	queueAddOps := func(entries []QueueEntry, start int) []QueuePatchOp {
+		ops := make([]QueuePatchOp, len(entries))
+		for i := range entries {
+			item := entries[i]
+			ops[i] = QueuePatchOp{Op: QueueOpAdd, Index: start + i, Item: &item}
+		}
+		return ops
+	}
+
+	queueRemoveOps := func(entries []QueueEntry) []QueuePatchOp {
+		ops := make([]QueuePatchOp, len(entries))
+		for i, entry := range entries {
+			ops[i] = QueuePatchOp{Op: QueueOpRemove, EntryID: entry.EntryID}
+		}
+		return ops
 	}
 
 	listenersSnapshot := func() []ListenerSnapshot {
@@ -491,10 +573,6 @@ func (r *Room) Run(ctx context.Context) {
 		return map[string]any{"type": "playback.changed", "data": playbackSnapshot(c.Identity())}
 	}
 
-	queueMsg := func() any {
-		return map[string]any{"type": "queue.changed", "data": map[string]any{"queue": queueSnapshot()}}
-	}
-
 	listenersMsg := func() any {
 		return map[string]any{
 			"type": "listeners.changed",
@@ -514,9 +592,9 @@ func (r *Room) Run(ctx context.Context) {
 
 	// refill 电台补充：从源取一批曲目追加到队列。
 	// 源耗尽（once 语义）或出错时停止电台。
-	refill := func() {
+	refill := func() error {
 		if radio == nil {
-			return
+			return nil
 		}
 		seed := provider.TrackRef("")
 		if playback != nil && playback.Current != nil {
@@ -528,18 +606,25 @@ func (r *Room) Run(ctx context.Context) {
 		if err != nil {
 			log.Printf("[room %s] radio %s: %v (stopping)", r.ID, radio.spec, err)
 			stopRadio()
-			return
-		}
-		for _, t := range tracks {
-			queue = append(queue, EntryFromTrack(t, "radio"))
+			return nil
 		}
 		if len(tracks) > 0 {
-			persistQueue()
-			broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
+			entries := make([]QueueEntry, len(tracks))
+			for i, track := range tracks {
+				entries[i] = EntryFromTrack(track, "radio")
+			}
+			start := len(queue)
+			next := make([]QueueEntry, start+len(entries))
+			copy(next, queue)
+			copy(next[start:], entries)
+			if err := commitQueue(next, queueAddOps(entries, start)); err != nil {
+				return err
+			}
 		}
 		if exhausted {
 			stopRadio()
 		}
+		return nil
 	}
 
 	// scheduleEnd 按剩余时长设置自然结束 timer
@@ -576,45 +661,73 @@ func (r *Room) Run(ctx context.Context) {
 	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充。
 	// 毒化条目（时长未知，如元数据缺失的历史遗留）直接丢弃——
 	// 它们会让 scheduleEnd 永不触发，队列永久停滞。
-	advance := func(reason string) {
+	advance := func(reason string) error {
+		if len(queue) == 0 && radio != nil {
+			if err := refill(); err != nil {
+				return err
+			}
+		}
+
 		now := nowMs()
+		if len(queue) == 0 {
+			finishCurrent(reason, now)
+			playback = &Playback{Rate: 1.0}
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+			}
+			broadcast(InterestPlayback, playbackMsg)
+			return nil
+		}
+
+		removeCount := 0
+		var next QueueEntry
+		hasNext := false
+		for removeCount < len(queue) && removeCount < 100 {
+			candidate := queue[removeCount]
+			removeCount++
+			if candidate.DurationMs > 0 {
+				next = candidate
+				hasNext = true
+				break
+			}
+		}
+		removed := append([]QueueEntry(nil), queue[:removeCount]...)
+		remaining := append([]QueueEntry(nil), queue[removeCount:]...)
+		if err := commitQueue(remaining, queueRemoveOps(removed)); err != nil {
+			return err
+		}
+
 		finishCurrent(reason, now)
-		dropped := 0
-		for {
-			if len(queue) == 0 && radio != nil {
-				refill()
+		for _, entry := range removed {
+			if entry.DurationMs <= 0 {
+				log.Printf("room %s: dropping entry %s (%s): zero/unknown duration", r.ID, entry.EntryID, entry.TrackRef)
 			}
-			if len(queue) == 0 || dropped >= 100 {
-				// dropped 上限：防止病态电台源持续产出 0 时长曲目导致死循环
-				playback = &Playback{Rate: 1.0}
-				if timer != nil {
-					timer.Stop()
-					timer = nil
-				}
-				broadcast(InterestPlayback, playbackMsg)
-				return
+		}
+		if !hasNext {
+			// 每次最多丢弃 100 条，防止病态电台源持续产出无时长条目。
+			playback = &Playback{Rate: 1.0}
+			if timer != nil {
+				timer.Stop()
+				timer = nil
 			}
-			next := queue[0]
-			queue = queue[1:]
-			persistQueue()
-			if next.DurationMs <= 0 {
-				log.Printf("room %s: dropping entry %s (%s): zero/unknown duration", r.ID, next.EntryID, next.TrackRef)
-				dropped++
-				continue
-			}
-			playback = &Playback{
-				Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
-			}
-			// 物理层质量信息：已缓存则立即可知（Resolve 已发生）
-			if row, err := r.st.GetCacheRow(ctx, next.TrackRef); err == nil {
-				next.SizeBytes = row.SizeBytes
-				next.BitrateKbps = row.BitrateKbps
-				playback.Current = &next
-			}
-			break
+			broadcast(InterestPlayback, playbackMsg)
+			return nil
+		}
+
+		playback = &Playback{
+			Current: &next, PositionMs: 0, UpdatedAt: now, Playing: true, Rate: 1.0,
+		}
+		// 物理层质量信息：已缓存则立即可知（Resolve 已发生）
+		if row, err := r.st.GetCacheRow(ctx, next.TrackRef); err == nil {
+			next.SizeBytes = row.SizeBytes
+			next.BitrateKbps = row.BitrateKbps
+			playback.Current = &next
 		}
 		if radio != nil && len(queue) < 3 {
-			refill()
+			if err := refill(); err != nil {
+				log.Printf("room %s: persist radio refill: %v", r.ID, err)
+			}
 		}
 		// 预取当前曲目（通常 Prefetch 已做过）与下一首
 		if len(queue) > 0 {
@@ -622,12 +735,14 @@ func (r *Room) Run(ctx context.Context) {
 		}
 		scheduleEnd()
 		broadcast(InterestPlayback, playbackMsg)
-		broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
+		return nil
 	}
 
 	// 启动即恢复：重启后播放状态丢失但队列仍在，自动续播队首。
 	if len(queue) > 0 {
-		advance("resume-after-restart")
+		if err := advance("resume-after-restart"); err != nil {
+			log.Printf("room %s: resume queue: %v", r.ID, err)
+		}
 	}
 
 	for {
@@ -646,7 +761,13 @@ func (r *Room) Run(ctx context.Context) {
 					a.client.Send(playbackMsg(a.client))
 				}
 				if interest.Has(InterestQueue) {
-					a.client.Send(queueMsg())
+					if err := sendQueueSnapshot(a.client); err != nil {
+						log.Printf("room %s: queue snapshot for %s: %v", r.ID, a.client.ID(), err)
+						a.client.Send(map[string]any{
+							"type": "error",
+							"data": map[string]any{"code": "queue_snapshot_failed", "message": err.Error()},
+						})
+					}
 				}
 				if interest.Has(InterestRadio) {
 					a.client.Send(radioMsg())
@@ -654,6 +775,13 @@ func (r *Room) Run(ctx context.Context) {
 				if interest.Has(InterestListeners) {
 					broadcast(InterestListeners, func(ClientConn) any { return listenersMsg() })
 				}
+
+			case actQueueSync:
+				if _, joined := clients[a.client.ID()]; !joined || !a.client.Interests().Has(InterestQueue) {
+					a.result <- ErrForbidden
+					break
+				}
+				a.result <- sendQueueSnapshot(a.client)
 
 			case actLeave:
 				wasListener := a.client.Interests().Has(InterestListeners)
@@ -687,19 +815,26 @@ func (r *Room) Run(ctx context.Context) {
 				}
 				wasEmpty := len(queue) == 0
 				firstAdded := len(queue)
-				queue = append(queue, entries...)
-				for i := firstAdded; i < len(queue); i++ {
-					queue[i].RequesterName = a.actor.Name
+				next := make([]QueueEntry, firstAdded+n)
+				copy(next, queue)
+				for i, entry := range entries {
+					entry = cloneEntry(entry)
+					entry.RequesterName = a.actor.Name
+					next[firstAdded+i] = entry
 				}
-				persistQueue()
+				added := next[firstAdded:]
+				if err := commitQueue(next, queueAddOps(added, firstAdded)); err != nil {
+					a.result <- err
+					break
+				}
 				if playback == nil || playback.Current == nil {
-					advance("") // 空闲时自动开播（内部会广播 queue + playback）
-				} else {
-					broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
-					if wasEmpty {
-						// 追加前队列为空：新条目即队首候补，预热缓存
-						go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
+					// 自动开播是独立的内部队列变化；失败时保留已成功提交的点歌。
+					if err := advance(""); err != nil {
+						log.Printf("room %s: auto-advance after add: %v", r.ID, err)
 					}
+				} else if wasEmpty {
+					// 追加前队列为空：新条目即队首候补，预热缓存
+					go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
 				}
 				a.result <- nil
 
@@ -719,33 +854,45 @@ func (r *Room) Run(ctx context.Context) {
 					a.result <- ErrForbidden
 					break
 				}
-				queue = append(queue[:idx], queue[idx+1:]...)
-				persistQueue()
-				broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
-				a.result <- nil
+				removed := queue[idx]
+				next := make([]QueueEntry, 0, len(queue)-1)
+				next = append(next, queue[:idx]...)
+				next = append(next, queue[idx+1:]...)
+				err := commitQueue(next, []QueuePatchOp{{Op: QueueOpRemove, EntryID: removed.EntryID}})
+				a.result <- err
 
 			case actMove:
 				if a.toIndex < 0 || a.toIndex >= len(queue) {
 					a.result <- ErrInvalidQueueIndex
 					break
 				}
-				found := false
-				for i, e := range queue {
-					if e.EntryID == a.entryID {
-						queue = append(queue[:i], queue[i+1:]...)
-						rest := append([]QueueEntry{}, queue[a.toIndex:]...)
-						queue = append(append(queue[:a.toIndex], e), rest...)
-						found = true
+				idx := -1
+				for i, entry := range queue {
+					if entry.EntryID == a.entryID {
+						idx = i
 						break
 					}
 				}
-				if !found {
+				if idx < 0 {
 					a.result <- ErrEntryNotFound
 					break
 				}
-				persistQueue()
-				broadcast(InterestQueue, func(ClientConn) any { return queueMsg() })
-				a.result <- nil
+				moved := queue[idx]
+				without := make([]QueueEntry, 0, len(queue)-1)
+				without = append(without, queue[:idx]...)
+				without = append(without, queue[idx+1:]...)
+				next := make([]QueueEntry, 0, len(queue))
+				next = append(next, without[:a.toIndex]...)
+				next = append(next, moved)
+				next = append(next, without[a.toIndex:]...)
+				err := commitQueue(next, []QueuePatchOp{{
+					Op: QueueOpMove, EntryID: moved.EntryID, ToIndex: a.toIndex,
+				}})
+				a.result <- err
+
+			case actClear:
+				err := commitQueue([]QueueEntry{}, []QueuePatchOp{{Op: QueueOpClear}})
+				a.result <- err
 
 			case actPause:
 				if playback == nil || playback.Current == nil || !playback.Playing {
@@ -792,14 +939,15 @@ func (r *Room) Run(ctx context.Context) {
 				a.result <- nil
 
 			case actSkip:
-				advance("skipped")
-				a.result <- nil
+				a.result <- advance("skipped")
 
 			case actTimerEnd:
 				if a.timerID != timerSeq {
 					break // 过期 timer，忽略
 				}
-				advance("finished")
+				if err := advance("finished"); err != nil {
+					log.Printf("room %s: timer advance: %v", r.ID, err)
+				}
 
 			case actRadioPlay:
 				sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -812,9 +960,14 @@ func (r *Room) Run(ctx context.Context) {
 				radio = &radioState{src: src, spec: a.source, shuffle: a.shuffle, once: a.once}
 				broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
 				if playback == nil || playback.Current == nil {
-					advance("") // 空闲时电台立即开播
+					err = advance("") // 空闲时电台立即开播
 				} else if len(queue) < 3 {
-					refill()
+					err = refill()
+				}
+				if err != nil {
+					stopRadio()
+					a.result <- err
+					break
 				}
 				a.result <- nil
 

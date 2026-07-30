@@ -69,6 +69,7 @@ type Room struct {
 	PasswordHash      string
 	AccessMode        string
 	CodePeriodSeconds int64
+	TrustedRoles      []string
 	PolicyJSON        string
 	CreatedAt         int64
 }
@@ -83,20 +84,37 @@ func (s *Store) CreateRoom(ctx context.Context, r Room) error {
 	if r.CodePeriodSeconds == 0 {
 		r.CodePeriodSeconds = 86400
 	}
-	_, err := s.db.ExecContext(ctx,
+	trustedRoles := r.TrustedRoles
+	if trustedRoles == nil {
+		trustedRoles = []string{}
+	}
+	trustedRolesJSON, err := json.Marshal(trustedRoles)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO rooms
-		 (id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds, policy_json, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		r.ID, r.Name, r.PasswordHash, r.AccessMode, r.CodePeriodSeconds, r.PolicyJSON, r.CreatedAt)
+		 (id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds, trusted_roles_json, policy_json, created_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		r.ID, r.Name, r.PasswordHash, r.AccessMode, r.CodePeriodSeconds, string(trustedRolesJSON), r.PolicyJSON, r.CreatedAt)
 	return err
 }
 
 func (s *Store) UpdateRoom(ctx context.Context, r Room) error {
-	_, err := s.db.ExecContext(ctx,
+	trustedRoles := r.TrustedRoles
+	if trustedRoles == nil {
+		trustedRoles = []string{}
+	}
+	trustedRolesJSON, err := json.Marshal(trustedRoles)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`UPDATE rooms
-		 SET name = ?, guest_password_hash = ?, guest_access_mode = ?, guest_code_period_seconds = ?
+		 SET name = ?, guest_password_hash = ?, guest_access_mode = ?, guest_code_period_seconds = ?,
+		     trusted_roles_json = ?
 		 WHERE id = ?`,
-		r.Name, r.PasswordHash, r.AccessMode, r.CodePeriodSeconds, r.ID)
+		r.Name, r.PasswordHash, r.AccessMode, r.CodePeriodSeconds, string(trustedRolesJSON), r.ID)
 	return err
 }
 
@@ -107,22 +125,16 @@ func (s *Store) UpdateRoomPolicy(ctx context.Context, id, policyJSON string) err
 }
 
 func (s *Store) GetRoom(ctx context.Context, id string) (Room, error) {
-	var r Room
-	err := s.db.QueryRowContext(ctx,
+	return scanRoom(s.db.QueryRowContext(ctx,
 		`SELECT id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds,
-		        policy_json, created_at
-		 FROM rooms WHERE id = ?`, id).
-		Scan(
-			&r.ID, &r.Name, &r.PasswordHash, &r.AccessMode, &r.CodePeriodSeconds,
-			&r.PolicyJSON, &r.CreatedAt,
-		)
-	return r, err
+		        trusted_roles_json, policy_json, created_at
+		 FROM rooms WHERE id = ?`, id))
 }
 
 func (s *Store) ListRooms(ctx context.Context) ([]Room, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, name, guest_password_hash, guest_access_mode, guest_code_period_seconds,
-		        policy_json, created_at
+		        trusted_roles_json, policy_json, created_at
 		 FROM rooms ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -130,16 +142,36 @@ func (s *Store) ListRooms(ctx context.Context) ([]Room, error) {
 	defer rows.Close()
 	var out []Room
 	for rows.Next() {
-		var r Room
-		if err := rows.Scan(
-			&r.ID, &r.Name, &r.PasswordHash, &r.AccessMode, &r.CodePeriodSeconds,
-			&r.PolicyJSON, &r.CreatedAt,
-		); err != nil {
+		r, err := scanRoom(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+type roomScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRoom(row roomScanner) (Room, error) {
+	var r Room
+	var trustedRolesJSON string
+	err := row.Scan(
+		&r.ID, &r.Name, &r.PasswordHash, &r.AccessMode, &r.CodePeriodSeconds,
+		&trustedRolesJSON, &r.PolicyJSON, &r.CreatedAt,
+	)
+	if err != nil {
+		return Room{}, err
+	}
+	if err := json.Unmarshal([]byte(trustedRolesJSON), &r.TrustedRoles); err != nil {
+		return Room{}, fmt.Errorf("decode room trusted roles: %w", err)
+	}
+	if r.TrustedRoles == nil {
+		r.TrustedRoles = []string{}
+	}
+	return r, nil
 }
 
 // ---------- 全局主体与 Room 授权 ----------

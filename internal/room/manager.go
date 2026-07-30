@@ -86,6 +86,7 @@ type DirectoryRoom struct {
 	PolicyRaw         string
 	AccessMode        AccessMode
 	CodePeriodSeconds int64
+	TrustedRoles      []string
 	ListenerCount     int
 	NowPlaying        *NowPlayingSummary
 }
@@ -102,6 +103,7 @@ func (m *Manager) Directory() []DirectoryRoom {
 		out = append(out, DirectoryRoom{
 			ID: r.ID, Name: r.Name, PolicyRaw: r.PolicyRaw(),
 			AccessMode: access.Mode, CodePeriodSeconds: access.CodePeriodSeconds,
+			TrustedRoles:  access.TrustedRoles,
 			ListenerCount: snapshot.ListenerCount, NowPlaying: snapshot.NowPlaying,
 		})
 	}

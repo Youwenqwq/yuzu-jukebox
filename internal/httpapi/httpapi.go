@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
+	mux.HandleFunc("GET /api/v1/rooms/{id}", s.getRoom)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/access-code", s.getRoomAccessCode)
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}", s.deleteRoom)
 	mux.HandleFunc("GET /api/v1/rooms/{id}/grants", s.listRoomGrants)
@@ -123,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/rooms/{id}/players/{player_id}", s.bindRoomPlayer)
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/players/{player_id}", s.unbindRoomPlayer)
 	mux.HandleFunc("POST /api/v1/rooms/{id}/queue", s.idempotent(s.queueAdd))
+	mux.HandleFunc("DELETE /api/v1/rooms/{id}/queue", s.idempotent(s.queueClear))
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/queue/{entry_id}", s.idempotent(s.queueRemove))
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}/queue/{entry_id}", s.idempotent(s.queueMove))
 	mux.HandleFunc("POST /api/v1/rooms/{id}/playback/{op}", s.idempotent(s.playbackControl))
@@ -349,33 +351,62 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+type roomInfoResponse struct {
+	ID            string                  `json:"id"`
+	Name          string                  `json:"name"`
+	Policy        json.RawMessage         `json:"policy"`
+	GuestAccess   roomAccessResponse      `json:"guest_access"`
+	ListenerCount int                     `json:"listener_count"`
+	NowPlaying    *room.NowPlayingSummary `json:"now_playing"`
+}
+
+func roomInfoFromDirectory(rm room.DirectoryRoom) roomInfoResponse {
+	policy := json.RawMessage(rm.PolicyRaw)
+	if len(policy) == 0 {
+		policy = json.RawMessage(`{}`)
+	}
+	return roomInfoResponse{
+		ID: rm.ID, Name: rm.Name, Policy: policy,
+		GuestAccess: accessResponse(room.AccessConfig{
+			Mode: rm.AccessMode, CodePeriodSeconds: rm.CodePeriodSeconds,
+			TrustedRoles: rm.TrustedRoles,
+		}),
+		ListenerCount: rm.ListenerCount, NowPlaying: rm.NowPlaying,
+	}
+}
+
 func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
 		return
 	}
-	type roomInfo struct {
-		ID            string                  `json:"id"`
-		Name          string                  `json:"name"`
-		Policy        json.RawMessage         `json:"policy"`
-		GuestAccess   roomAccessResponse      `json:"guest_access"`
-		ListenerCount int                     `json:"listener_count"`
-		NowPlaying    *room.NowPlayingSummary `json:"now_playing"`
-	}
-	out := []roomInfo{}
+	out := make([]roomInfoResponse, 0)
 	for _, rm := range s.rooms.Directory() {
-		pol := json.RawMessage(rm.PolicyRaw)
-		if len(pol) == 0 {
-			pol = json.RawMessage(`{}`)
-		}
-		out = append(out, roomInfo{
-			ID: rm.ID, Name: rm.Name, Policy: pol,
-			GuestAccess: accessResponse(room.AccessConfig{
-				Mode: rm.AccessMode, CodePeriodSeconds: rm.CodePeriodSeconds,
-			}),
-			ListenerCount: rm.ListenerCount, NowPlaying: rm.NowPlaying,
-		})
+		out = append(out, roomInfoFromDirectory(rm))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})
+}
+
+func (s *Server) getRoom(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
+		return
+	}
+	rm, err := s.rooms.Get(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "room not found")
+		return
+	}
+	summary, err := rm.DirectorySnapshot()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	access := rm.AccessConfig()
+	writeJSON(w, http.StatusOK, map[string]any{"room": roomInfoFromDirectory(room.DirectoryRoom{
+		ID: rm.ID, Name: rm.Name, PolicyRaw: rm.PolicyRaw(),
+		AccessMode: access.Mode, CodePeriodSeconds: access.CodePeriodSeconds,
+		TrustedRoles:  access.TrustedRoles,
+		ListenerCount: summary.ListenerCount, NowPlaying: summary.NowPlaying,
+	})})
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
@@ -384,12 +415,13 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ID                     string `json:"id"`
-		Name                   string `json:"name"`
-		GuestPassword          string `json:"guest_password"`
-		GuestAccessMode        string `json:"guest_access_mode"`
-		GuestCodePeriodSeconds int64  `json:"guest_code_period_seconds"`
-		Policy                 string `json:"policy"`
+		ID                     string   `json:"id"`
+		Name                   string   `json:"name"`
+		GuestPassword          string   `json:"guest_password"`
+		GuestAccessMode        string   `json:"guest_access_mode"`
+		GuestCodePeriodSeconds int64    `json:"guest_code_period_seconds"`
+		TrustedRoles           []string `json:"trusted_roles"`
+		Policy                 string   `json:"policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "name required")
@@ -399,7 +431,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		body.ID = slugify(body.Name)
 	}
 	access, err := createRoomAccessConfig(
-		body.GuestAccessMode, body.GuestPassword, body.GuestCodePeriodSeconds,
+		body.GuestAccessMode, body.GuestPassword, body.GuestCodePeriodSeconds, body.TrustedRoles,
 	)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -416,7 +448,8 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	row := store.Room{
 		ID: body.ID, Name: body.Name, PasswordHash: access.PasswordHash,
 		AccessMode: string(access.Mode), CodePeriodSeconds: access.CodePeriodSeconds,
-		PolicyJSON: policy, CreatedAt: nowMs(),
+		TrustedRoles: access.TrustedRoles,
+		PolicyJSON:   policy, CreatedAt: nowMs(),
 	}
 	if err := s.st.CreateRoom(r.Context(), row); err != nil {
 		writeErr(w, http.StatusConflict, "conflict", err.Error())
@@ -436,11 +469,12 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := r.PathValue("id")
 	var body struct {
-		Name                   *string `json:"name"`
-		GuestPassword          *string `json:"guest_password"`
-		GuestAccessMode        *string `json:"guest_access_mode"`
-		GuestCodePeriodSeconds *int64  `json:"guest_code_period_seconds"`
-		Policy                 *string `json:"policy"`
+		Name                   *string   `json:"name"`
+		GuestPassword          *string   `json:"guest_password"`
+		GuestAccessMode        *string   `json:"guest_access_mode"`
+		GuestCodePeriodSeconds *int64    `json:"guest_code_period_seconds"`
+		TrustedRoles           *[]string `json:"trusted_roles"`
+		Policy                 *string   `json:"policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
@@ -456,7 +490,7 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 		name = *body.Name
 	}
 	access, err := updateRoomAccessConfig(
-		row, body.GuestAccessMode, body.GuestPassword, body.GuestCodePeriodSeconds,
+		row, body.GuestAccessMode, body.GuestPassword, body.GuestCodePeriodSeconds, body.TrustedRoles,
 	)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -481,6 +515,7 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	row.PasswordHash = access.PasswordHash
 	row.AccessMode = string(access.Mode)
 	row.CodePeriodSeconds = access.CodePeriodSeconds
+	row.TrustedRoles = access.TrustedRoles
 	if err := s.st.UpdateRoom(r.Context(), row); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return

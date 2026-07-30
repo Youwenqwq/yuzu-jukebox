@@ -36,6 +36,31 @@ func (a *Authorizer) IsController(ctx context.Context, roomID string, principal 
 	return a.grants.HasRoomGrant(ctx, roomID, principal.ID, CapabilityController)
 }
 
+// BypassesRoomCredential applies protected-Room identity admission in strict
+// privilege order: global/Room controller, same-Room Integration actor, then a
+// configured trusted role. It never broadens an Integration actor across Rooms.
+func (a *Authorizer) BypassesRoomCredential(
+	ctx context.Context,
+	roomID string,
+	principal auth.Identity,
+	trustedRoles []string,
+) (bool, error) {
+	controller, err := a.IsController(ctx, roomID, principal)
+	if err != nil || controller {
+		return controller, err
+	}
+	if principal.IntegrationID != "" && principal.IntegrationRoomID != "" &&
+		principal.IntegrationRoomID == roomID {
+		return true, nil
+	}
+	for _, role := range trustedRoles {
+		if principal.HasRole(role) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (a *Authorizer) RequireController(ctx context.Context, roomID string, principal auth.Identity) error {
 	allowed, err := a.IsController(ctx, roomID, principal)
 	if err != nil {

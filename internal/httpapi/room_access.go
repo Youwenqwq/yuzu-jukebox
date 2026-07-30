@@ -14,9 +14,10 @@ import (
 type roomAccessResponse struct {
 	Mode              room.AccessMode `json:"mode"`
 	CodePeriodSeconds int64           `json:"code_period_seconds,omitempty"`
+	TrustedRoles      []string        `json:"trusted_roles"`
 }
 
-func createRoomAccessConfig(modeValue, password string, periodSeconds int64) (room.AccessConfig, error) {
+func createRoomAccessConfig(modeValue, password string, periodSeconds int64, trustedRoles []string) (room.AccessConfig, error) {
 	mode := room.AccessModeOpen
 	var err error
 	if modeValue != "" {
@@ -30,7 +31,13 @@ func createRoomAccessConfig(modeValue, password string, periodSeconds int64) (ro
 	if periodSeconds == 0 {
 		periodSeconds = room.DefaultCodePeriodSeconds
 	}
-	config := room.AccessConfig{Mode: mode, CodePeriodSeconds: periodSeconds}
+	normalizedRoles, err := room.NormalizeTrustedRoles(trustedRoles)
+	if err != nil {
+		return room.AccessConfig{}, err
+	}
+	config := room.AccessConfig{
+		Mode: mode, CodePeriodSeconds: periodSeconds, TrustedRoles: normalizedRoles,
+	}
 	switch mode {
 	case room.AccessModeOpen, room.AccessModeRotatingCode:
 		if password != "" {
@@ -54,6 +61,7 @@ func updateRoomAccessConfig(
 	modeValue *string,
 	password *string,
 	periodSeconds *int64,
+	trustedRoles *[]string,
 ) (room.AccessConfig, error) {
 	mode := room.AccessMode(row.AccessMode)
 	if mode == "" {
@@ -68,6 +76,7 @@ func updateRoomAccessConfig(
 	}
 	config := room.AccessConfig{
 		Mode: mode, PasswordHash: row.PasswordHash, CodePeriodSeconds: period,
+		TrustedRoles: append([]string(nil), row.TrustedRoles...),
 	}
 	if modeValue != nil {
 		parsed, err := room.ParseAccessMode(*modeValue)
@@ -79,6 +88,14 @@ func updateRoomAccessConfig(
 	if periodSeconds != nil {
 		config.CodePeriodSeconds = *periodSeconds
 	}
+	if trustedRoles != nil {
+		config.TrustedRoles = append([]string(nil), (*trustedRoles)...)
+	}
+	normalizedRoles, err := room.NormalizeTrustedRoles(config.TrustedRoles)
+	if err != nil {
+		return room.AccessConfig{}, err
+	}
+	config.TrustedRoles = normalizedRoles
 
 	if password != nil {
 		if modeValue == nil {
@@ -114,7 +131,9 @@ func updateRoomAccessConfig(
 }
 
 func accessResponse(config room.AccessConfig) roomAccessResponse {
-	response := roomAccessResponse{Mode: config.Mode}
+	response := roomAccessResponse{
+		Mode: config.Mode, TrustedRoles: append([]string{}, config.TrustedRoles...),
+	}
 	if config.Mode == room.AccessModeRotatingCode {
 		response.CodePeriodSeconds = config.CodePeriodSeconds
 	}
