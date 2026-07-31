@@ -21,10 +21,10 @@ func TestQueueRequesterNameRoundTripAndDefault(t *testing.T) {
 		EntryID: "e1", TrackRef: "local:t1", Title: "Track", Artist: "Artist",
 		DurationMs: 60_000, RequestedBy: "u1", RequesterName: "Alice", AddedAt: 123,
 	}
-	if err := st.ReplaceQueue(ctx, "r1", []QueueRow{want}); err != nil {
+	if err := st.ReplaceQueue(ctx, "r1", "", []QueueRow{want}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := st.LoadQueue(ctx, "r1")
+	rows, _, err := st.LoadQueue(ctx, "r1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestQueueRequesterNameRoundTripAndDefault(t *testing.T) {
 		"r1", 1, "e2", "local:t2", "Legacy", "", 60_000, "u2", 456); err != nil {
 		t.Fatal(err)
 	}
-	rows, err = st.LoadQueue(ctx, "r1")
+	rows, _, err = st.LoadQueue(ctx, "r1")
 	if err != nil {
 		t.Fatal(err)
 	}
