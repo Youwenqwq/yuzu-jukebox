@@ -18,6 +18,9 @@ import (
 
 const immutableCacheControl = "public, max-age=31536000, immutable"
 
+// maxDeletionsPerRound 单轮删除的迭代上限，仅用于兜底。
+const maxDeletionsPerRound = 256
+
 type Publisher struct {
 	cfg    Config
 	state  *State
@@ -119,7 +122,7 @@ func (p *Publisher) runStorageLifecycle(ctx context.Context) {
 				log.Printf("[edgeone] inventory: %v", err)
 			}
 		case <-deleteTicker.C:
-			if err := p.DeleteOnce(ctx); err != nil && !errors.Is(err, ErrNoWork) && ctx.Err() == nil {
+			if err := p.drainDeletions(ctx); err != nil && !errors.Is(err, ErrNoWork) && ctx.Err() == nil {
 				log.Printf("[edgeone] delete: %v", err)
 			}
 		}
@@ -315,11 +318,35 @@ func (p *Publisher) DeleteOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	deletion, err := p.core.ClaimDeletion(ctx, p.cfg.Owner, 600)
+	return p.deleteOnce(ctx, NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client))
+}
+
+// drainDeletions 排空一轮删除队列。一次 GC 会一口气产生几十个删除任务，
+// 每轮只做一个的话，对象会长时间停在 deleting 状态并继续占用预算，
+// 期间所有新的存储预留都会失败。ManagedConfig 与后端客户端每轮复用一次，
+// 迭代上限只是兜底，避免 Core 持续派发时这一轮永不返回。
+func (p *Publisher) drainDeletions(ctx context.Context) error {
+	managed, err := p.core.ManagedConfig(ctx)
 	if err != nil {
 		return err
 	}
 	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
+	for range maxDeletionsPerRound {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := p.deleteOnce(ctx, backend); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Publisher) deleteOnce(ctx context.Context, backend *BackendClient) error {
+	deletion, err := p.core.ClaimDeletion(ctx, p.cfg.Owner, 600)
+	if err != nil {
+		return err
+	}
 	if err := backend.Delete(ctx, deletion.Locator); err != nil {
 		reportErr := p.core.FailDeletion(ctx, deletion, err, time.Minute)
 		if reportErr != nil {

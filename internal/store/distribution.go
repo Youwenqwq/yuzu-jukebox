@@ -46,6 +46,7 @@ type DistributionStatus struct {
 	RetryWait       int64 `json:"retry_wait"`
 	CancelRequested int64 `json:"cancel_requested"`
 	Ready           int64 `json:"ready"`
+	Evicted         int64 `json:"evicted"`
 	Canceled        int64 `json:"canceled"`
 	OldestQueuedAt  int64 `json:"oldest_queued_at,omitempty"`
 }
@@ -62,13 +63,16 @@ type DistributionRequestView struct {
 	LastError         string                 `json:"last_error,omitempty"`
 	CancelRequestedAt int64                  `json:"cancel_requested_at,omitempty"`
 	CanceledAt        int64                  `json:"canceled_at,omitempty"`
+	EvictedAt         int64                  `json:"evicted_at,omitempty"`
 	Lease             *DistributionLease     `json:"lease,omitempty"`
 	Candidate         *DistributionCandidate `json:"candidate,omitempty"`
 	Progress          *DistributionAttempt   `json:"progress,omitempty"`
 }
 
 // RequestDistribution records demand for a track. Repeated cache notifications
-// and edge introspection requests do not create duplicate work.
+// and edge introspection requests do not create duplicate work. This is also the
+// only path that revives a canceled or evicted request: eviction is silent on the
+// supply side, so real demand is what brings a track back into the queue.
 func (s *Store) RequestDistribution(ctx context.Context, accelerationID, trackRef string, now int64) error {
 	result, err := s.db.ExecContext(ctx, `INSERT INTO distribution_requests
 		(acceleration_id, track_ref, requested_at, updated_at, next_attempt_at)
@@ -83,11 +87,13 @@ func (s *Store) RequestDistribution(ctx context.Context, accelerationID, trackRe
 		return err
 	}
 	if inserted == 0 {
+		// 复活时清空退避与上一轮错误：驱逐不是失败，重新被需要的曲目应当立即排队。
 		_, err = s.db.ExecContext(ctx, `UPDATE distribution_requests SET
-			updated_at = ?, next_attempt_at = CASE WHEN canceled_at > 0 THEN 0 ELSE next_attempt_at END,
-			last_error = CASE WHEN canceled_at > 0 THEN '' ELSE last_error END,
+			updated_at = ?,
+			next_attempt_at = CASE WHEN canceled_at > 0 OR evicted_at > 0 THEN 0 ELSE next_attempt_at END,
+			last_error = CASE WHEN canceled_at > 0 OR evicted_at > 0 THEN '' ELSE last_error END,
 			cancel_requested_at = CASE WHEN canceled_at > 0 THEN 0 ELSE cancel_requested_at END,
-			canceled_at = 0
+			canceled_at = 0, evicted_at = 0
 			WHERE acceleration_id = ? AND track_ref = ?`, now, accelerationID, trackRef)
 		return err
 	}
@@ -155,6 +161,16 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 
+	// 存储已过高水位且仍有对象等待物理删除时不派发新工作：publisher 会先下载完整
+	// 源再撞 507，白白浪费一次整源下载。让它空转，等回收落地后再取件。
+	blocked, err := storageBackpressureTx(ctx, tx, accelerationID, now)
+	if err != nil {
+		return DistributionLease{}, err
+	}
+	if blocked {
+		return DistributionLease{}, sql.ErrNoRows
+	}
+
 	var trackRef string
 	err = tx.QueryRowContext(ctx, `SELECT request.track_ref
 		FROM distribution_requests AS request
@@ -166,6 +182,7 @@ func (s *Store) ClaimDistribution(
 		 AND lease.track_ref = request.track_ref
 		WHERE request.acceleration_id = ? AND request.next_attempt_at <= ?
 		 AND request.cancel_requested_at = 0 AND request.canceled_at = 0
+		 AND request.evicted_at = 0
 		 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		ORDER BY request.requested_at, request.track_ref LIMIT 1`, accelerationID, now).Scan(&trackRef)
 	if err != nil {
@@ -200,6 +217,41 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 	return lease, nil
+}
+
+// storageBackpressureTx 报告资源是否正处于回收过程中：存在待物理删除的对象，且占用
+// 尚未回落到低水位。GC 的目标就是低水位，没回落说明回收还没落地——此时派发新工作，
+// publisher 会先下载完整源再撞 507 或撞上正在删除的同名对象，白白浪费一次整源下载。
+// 未配置容量预算的资源不受此约束。
+func storageBackpressureTx(ctx context.Context, tx *sql.Tx, accelerationID string, now int64) (bool, error) {
+	var budget int64
+	var low int
+	if err := tx.QueryRowContext(ctx, `SELECT storage_budget_bytes,
+		storage_low_watermark_percent FROM accelerations WHERE id = ?`,
+		accelerationID).Scan(&budget, &low); err != nil {
+		return false, err
+	}
+	if budget <= 0 {
+		return false, nil
+	}
+	var pendingDeletion int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM acceleration_deletion_jobs
+		WHERE acceleration_id = ?`, accelerationID).Scan(&pendingDeletion); err != nil {
+		return false, err
+	}
+	if pendingDeletion == 0 {
+		return false, nil
+	}
+	var accounted, reserved int64
+	if err := tx.QueryRowContext(ctx, `SELECT
+		COALESCE((SELECT SUM(size_bytes) FROM acceleration_objects
+		 WHERE acceleration_id = ? AND state <> 'missing'), 0),
+		COALESCE((SELECT SUM(size_bytes) FROM acceleration_storage_reservations
+		 WHERE acceleration_id = ? AND expires_at > ?), 0)`,
+		accelerationID, accelerationID, now).Scan(&accounted, &reserved); err != nil {
+		return false, err
+	}
+	return accounted+reserved > budget*int64(low)/100, nil
 }
 
 func (s *Store) GetDistributionLease(ctx context.Context, leaseID string) (DistributionLease, error) {
@@ -620,20 +672,22 @@ func (s *Store) DistributionStatus(ctx context.Context, accelerationID string, n
 	var status DistributionStatus
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
-		 AND candidate.track_ref IS NULL AND lease.id IS NULL
+		 AND request.evicted_at = 0 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at <= ? THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN request.cancel_requested_at = 0
 		 AND request.canceled_at = 0 AND lease.id IS NOT NULL THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
-		 AND candidate.track_ref IS NULL AND lease.id IS NULL
+		 AND request.evicted_at = 0 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at > ? THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN request.canceled_at = 0
 		 AND request.cancel_requested_at > 0 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN request.canceled_at = 0
 		 AND candidate.track_ref IS NOT NULL THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.canceled_at = 0
+		 AND request.evicted_at > 0 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN request.canceled_at > 0 THEN 1 ELSE 0 END), 0),
 		COALESCE(MIN(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
-		 AND candidate.track_ref IS NULL AND lease.id IS NULL
+		 AND request.evicted_at = 0 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at <= ? THEN request.requested_at END), 0)
 		FROM distribution_requests AS request
 		LEFT JOIN distribution_candidates AS candidate
@@ -644,7 +698,8 @@ func (s *Store) DistributionStatus(ctx context.Context, accelerationID string, n
 		 AND lease.track_ref = request.track_ref AND lease.expires_at > ?
 		WHERE request.acceleration_id = ?`, now, now, now, now, accelerationID).Scan(
 		&status.Requested, &status.Queued, &status.Leased, &status.RetryWait,
-		&status.CancelRequested, &status.Ready, &status.Canceled, &status.OldestQueuedAt,
+		&status.CancelRequested, &status.Ready, &status.Evicted, &status.Canceled,
+		&status.OldestQueuedAt,
 	)
 	return status, err
 }
@@ -711,7 +766,7 @@ func (s *Store) loadDistributionRequests(
 	state = strings.TrimSpace(state)
 	query := `SELECT request.track_ref, request.requested_at, request.updated_at,
 		request.next_attempt_at, request.attempts, request.last_error,
-		request.cancel_requested_at, request.canceled_at,
+		request.cancel_requested_at, request.canceled_at, request.evicted_at,
 		lease.id, lease.owner, lease.expires_at, lease.created_at,
 		candidate.content_version, candidate.locator, candidate.layout,
 		candidate.size_bytes, candidate.content_type, candidate.etag,
@@ -740,18 +795,22 @@ func (s *Store) loadDistributionRequests(
 	case "", "all":
 	case "queued":
 		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND request.evicted_at = 0
 		 AND candidate.track_ref IS NULL AND lease.id IS NULL AND request.next_attempt_at <= ?`
 		args = append(args, now)
 	case "leased":
 		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0 AND lease.id IS NOT NULL`
 	case "retry_wait":
 		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0
+		 AND request.evicted_at = 0
 		 AND candidate.track_ref IS NULL AND lease.id IS NULL AND request.next_attempt_at > ?`
 		args = append(args, now)
 	case "cancel_requested":
 		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at > 0`
 	case "ready":
 		query += ` AND request.canceled_at = 0 AND candidate.track_ref IS NOT NULL`
+	case "evicted":
+		query += ` AND request.canceled_at = 0 AND request.evicted_at > 0`
 	case "canceled":
 		query += ` AND request.canceled_at > 0`
 	default:
@@ -777,7 +836,7 @@ func (s *Store) loadDistributionRequests(
 		var publisherOnline bool
 		if err := rows.Scan(&view.TrackRef, &view.RequestedAt, &view.UpdatedAt,
 			&view.NextAttemptAt, &view.Attempts, &view.LastError,
-			&view.CancelRequestedAt, &view.CanceledAt,
+			&view.CancelRequestedAt, &view.CanceledAt, &view.EvictedAt,
 			&leaseID, &owner, &leaseExpires, &leaseCreated,
 			&contentVersion, &locator, &layout, &sizeBytes, &contentType, &etag,
 			&candidateCreated, &candidateUpdated, &phase, &sourceBytes,
@@ -813,6 +872,9 @@ func (s *Store) loadDistributionRequests(
 					Status: "active", StartedAt: leaseCreated.Int64,
 					UpdatedAt: progressUpdated.Int64}
 			}
+		case view.EvictedAt > 0:
+			view.State = "evicted"
+			view.PendingReason = "evicted_by_storage_policy"
 		case view.NextAttemptAt > now:
 			view.State = "retry_wait"
 			view.PendingReason = "retry_backoff"

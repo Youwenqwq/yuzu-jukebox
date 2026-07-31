@@ -923,7 +923,7 @@ credential；后续查询只返回 credential-configured/pending 布尔值。
 | `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy、水位或 enabled；启用前强制 readiness |
 | `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且不再拥有媒体或进行中工作的资源 |
 | `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、当前 inventory scan、累计与最近 24 小时指标 |
-| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued|leased|retry_wait|cancel_requested|ready|canceled` 请求；queued 返回 `pending_reason` |
+| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued\|leased\|retry_wait\|cancel_requested\|ready\|evicted\|canceled` 请求；queued 返回 `pending_reason` |
 | `GET /api/v1/accelerations/{id}/requests/{track_ref...}` | 查询单个请求的 lease、phase、进度、重试和取消状态 |
 | `DELETE /api/v1/accelerations/{id}/requests/{track_ref...}` | 幂等取消；未认领任务立即 canceled，live lease 进入 cancel_requested |
 | `POST /api/v1/accelerations/{id}/inventory/refresh` | HTTP 202；创建或复用当前完整 inventory scan |
@@ -966,11 +966,24 @@ candidate 失效并创建删除 job。adapter 通过
 `POST /internal/v1/accelerations/deletions/claim` 领取 job，调用供应商 API 删除后再
 complete；失败必须调用 fail 并给出有限 retry delay。
 
+驱逐是缓存策略的正常结果，不是待重试的失败：GC 使 candidate 失效时，对应请求必须同时
+进入 `evicted`，退出可认领集合与 `queued`/`retry_wait` 统计。只有真实需求——缓存就绪回调
+或边缘 introspect——才会把它复活成 `queued`。若驱逐不写回需求侧，请求会在 candidate 被删
+的同一瞬间从 `ready` 翻回 `queued`，publisher 随即重传刚被回收的对象，形成与预算无关的
+无限重传循环。加速资源是有预算的缓存，不是本地缓存的镜像；活跃曲目集大于预算时，稳态
+就应当是"部分曲目常驻 `evicted`、播放走源站 fallback"，而不是队列永不收敛。
+
+回收在途期间——存在待删除 job 且占用尚未回落到低水位——Core 不派发新的 lease。否则
+publisher 会先下载完整源再撞 507 或撞上处于 `deleting` 状态的同名 locator（409
+`acceleration_storage_reserved`），每个失败周期浪费一次整源下载。
+
 Core 以持久 inventory scan task 调度外部观测。adapter 先调用
 `POST /internal/v1/accelerations/inventory/claim` 认领 scan，再向
 `POST /internal/v1/accelerations/inventory` 分页提交同一 `scan_id`；所有页面进入独立
 staging generation，只有最后一批 `complete:true` 才在事务中原子更新 observed bytes、
-managed/observed/orphan/missing 对象数和 `observed_at`。扫描失败必须调用
+managed/observed/orphan/missing 对象数和 `observed_at`。快照描述的是 `observed_at` 时刻的
+存储状态，分页扫描本身耗时可观，因此只有在 `observed_at` 之前就已落库的对象才由本次扫描
+判决 missing；扫描窗口内完成的上传不在快照里属于预期，不得据此标记 missing。扫描失败必须调用
 `POST /internal/v1/accelerations/inventory/{id}/fail`；失败或不完整 generation 不得覆盖
 上一份完整快照。unknown locator 只作为 opaque orphan 记账，不会被 Core 解释成供应商
 key。`storage.stale` 表示最后完整 `observed_at` 已超过资源的 freshness window；它不把

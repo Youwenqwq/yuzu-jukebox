@@ -152,7 +152,7 @@ func TestPublisherRejectsOversizedObject(t *testing.T) {
 	}
 }
 func TestPublisherReconcilesInventoryAndDeletesObjects(t *testing.T) {
-	fake := &publisherTransport{}
+	fake := &publisherTransport{pendingDeletions: 1}
 	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -172,8 +172,30 @@ func TestPublisherReconcilesInventoryAndDeletesObjects(t *testing.T) {
 		t.Fatalf("inventory report = %d objects, complete=%v", fake.inventoryObjects, fake.inventoryComplete)
 	}
 	if fake.deletedLocator != "media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/object" ||
-		!fake.deletionCompleted {
-		t.Fatalf("deletion = %q, completed=%v", fake.deletedLocator, fake.deletionCompleted)
+		fake.completedDeletions != 1 {
+		t.Fatalf("deletion = %q, completed=%d", fake.deletedLocator, fake.completedDeletions)
+	}
+}
+
+func TestPublisherDrainsDeletionQueueInOneRound(t *testing.T) {
+	fake := &publisherTransport{pendingDeletions: 12}
+	state, err := OpenState(filepath.Join(t.TempDir(), "publisher.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Close() })
+	publisher := newPublisher(testPublisherConfig(), state,
+		&http.Client{Transport: fake, Timeout: time.Minute})
+	if err := publisher.drainDeletions(context.Background()); !errors.Is(err, ErrNoWork) {
+		t.Fatalf("drain deletions = %v, want ErrNoWork", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.completedDeletions != 12 {
+		t.Fatalf("completed deletions = %d, want the whole queue drained", fake.completedDeletions)
+	}
+	if fake.managedConfigs != 1 {
+		t.Fatalf("managed config fetches = %d, want one per round", fake.managedConfigs)
 	}
 }
 
@@ -196,10 +218,13 @@ type publisherTransport struct {
 	completed          Candidate
 	failRetrySeconds   int
 	maxObjectBytes     int64
+	managedConfigs     int
 	inventoryObjects   int
 	inventoryComplete  bool
+	pendingDeletions   int
+	claimedDeletions   int
 	deletedLocator     string
-	deletionCompleted  bool
+	completedDeletions int
 	cancelRequested    bool
 	cancelConfirmed    bool
 }
@@ -207,7 +232,10 @@ type publisherTransport struct {
 func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	switch {
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/publisher/config":
+		f.mu.Lock()
+		f.managedConfigs++
 		maxObjectBytes := f.maxObjectBytes
+		f.mu.Unlock()
 		if maxObjectBytes == 0 {
 			maxObjectBytes = 1 << 20
 		}
@@ -248,9 +276,18 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 		f.mu.Unlock()
 		return jsonHTTPResponse(request, http.StatusNoContent, nil)
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/deletions/claim":
+		f.mu.Lock()
+		if f.pendingDeletions <= 0 {
+			f.mu.Unlock()
+			return jsonHTTPResponse(request, http.StatusNoContent, nil)
+		}
+		f.pendingDeletions--
+		f.claimedDeletions++
+		deletionID := "delete-" + strconv.Itoa(f.claimedDeletions)
+		f.mu.Unlock()
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
 			"deletion": map[string]any{
-				"id": "delete-1", "owner": "publisher-1",
+				"id": deletionID, "owner": "publisher-1",
 				"locator":    "media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/object",
 				"expires_at": time.Now().Add(10 * time.Minute).UnixMilli(),
 			},
@@ -266,9 +303,11 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 		f.deletedLocator = body.Locators[0]
 		f.mu.Unlock()
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"deleted": body.Locators})
-	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/deletions/delete-1/complete":
+	case request.URL.Host == "core.test" &&
+		strings.HasPrefix(request.URL.Path, "/internal/v1/accelerations/deletions/") &&
+		strings.HasSuffix(request.URL.Path, "/complete"):
 		f.mu.Lock()
-		f.deletionCompleted = true
+		f.completedDeletions++
 		f.mu.Unlock()
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"ok": true})
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/leases":

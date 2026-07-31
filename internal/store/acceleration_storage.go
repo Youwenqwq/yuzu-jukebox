@@ -293,11 +293,14 @@ func (s *Store) AppendAccelerationInventory(
 	if !complete {
 		return tx.Commit()
 	}
+	// 快照描述的是存储在 observedAt 时刻的样子，分页扫描本身要花好几秒。
+	// 扫描开始之后才落库的对象不可能出现在快照里，不由本次扫描判决，
+	// 否则并发上传会被误标 missing：既不计入 accounted_bytes 也进不了 GC 受害者集合。
 	if _, err := tx.ExecContext(ctx, `UPDATE acceleration_objects SET state = 'missing',
 		last_observed_at = ?, updated_at = ? WHERE acceleration_id = ?
-		AND state NOT IN ('deleting', 'delete_failed') AND locator NOT IN
+		AND state NOT IN ('deleting', 'delete_failed') AND created_at < ? AND locator NOT IN
 		(SELECT locator FROM acceleration_inventory_objects WHERE snapshot_id = ?)`,
-		observedAt, now, accelerationID, snapshotID); err != nil {
+		observedAt, now, accelerationID, observedAt, snapshotID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO acceleration_objects
@@ -511,6 +514,15 @@ func enqueueStorageGCTx(
 		return err
 	}
 	for _, item := range victims {
+		// 先把驱逐写回需求侧，再删 candidate：关联要经过 candidate，顺序反了就丢了。
+		// 被驱逐的请求退出可认领集合，只有真实需求（播放或缓存就绪）才会重新唤醒它。
+		if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
+			evicted_at = ?, updated_at = ? WHERE acceleration_id = ? AND track_ref IN
+			(SELECT track_ref FROM distribution_candidates
+			 WHERE acceleration_id = ? AND locator = ?)`,
+			now, now, accelerationID, accelerationID, item.locator); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM distribution_candidates
 			WHERE acceleration_id = ? AND locator = ?`, accelerationID, item.locator); err != nil {
 			return err
