@@ -48,9 +48,13 @@ func (s *Server) distributionIntrospect(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	if err := s.distribution.Request(r.Context(), acceleration.ID, ref); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "request distribution")
-		return
+	// 仅待播模式下需求完全由房间队列视界导出：边缘的播放不登记新需求，否则播过的
+	// 曲目会重新流回需求集，恰好是这个模式要关掉的行为。
+	if acceleration.CacheMode == store.CacheModePrefetchAndHeat {
+		if err := s.distribution.Request(r.Context(), acceleration.ID, ref); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", "request distribution")
+			return
+		}
 	}
 	candidate, ready, err := s.distribution.Candidate(r.Context(), acceleration.ID, ref)
 	if err != nil {

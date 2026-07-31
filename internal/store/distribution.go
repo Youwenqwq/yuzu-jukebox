@@ -184,7 +184,9 @@ func (s *Store) ClaimDistribution(
 		 AND request.cancel_requested_at = 0 AND request.canceled_at = 0
 		 AND request.evicted_at = 0
 		 AND candidate.track_ref IS NULL AND lease.id IS NULL
-		ORDER BY request.requested_at, request.track_ref LIMIT 1`, accelerationID, now).Scan(&trackRef)
+		ORDER BY CASE WHEN request.pinned_until > ? THEN 0 ELSE 1 END,
+		 request.requested_at, request.track_ref LIMIT 1`,
+		accelerationID, now, now).Scan(&trackRef)
 	if err != nil {
 		return DistributionLease{}, err
 	}

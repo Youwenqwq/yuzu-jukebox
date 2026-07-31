@@ -72,6 +72,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	healthMonitor := distribution.NewHealthMonitor(st)
 	go healthMonitor.Run(ctx)
 	go runAccelerationInventoryScheduler(ctx, st)
+	go runAccelerationPinSweeper(ctx, distributionService)
 	c.SetReadyHook(func(ref provider.TrackRef) {
 		if err := distributionService.RequestCacheReady(context.Background(), ref); err != nil {
 			log.Printf("[distribution] request %s failed: %v", ref, err)
@@ -152,6 +153,30 @@ func runAccelerationInventoryScheduler(ctx context.Context, st *store.Store) {
 			return
 		case now := <-ticker.C:
 			schedule(now)
+		}
+	}
+}
+
+// runAccelerationPinSweeper 周期性地把房间预取视界登记为加速需求并钉住。
+//
+// 用轮询而不是让房间 actor 推送：钉住是 deadline 形状的，房间崩溃或通知丢失时会自行
+// 过期，所以定期重刷是最省事也最不会泄漏的形态，而且分发层不必反向依赖房间层。
+// 扫描周期必须显著短于 distribution.PinTTL，单次失败不能让正在播放的对象失去保护。
+func runAccelerationPinSweeper(ctx context.Context, service *distribution.Service) {
+	sweep := func() {
+		if err := service.PinPrefetchHorizon(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[distribution] pin prefetch horizon: %v", err)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
 		}
 	}
 }

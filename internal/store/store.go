@@ -629,6 +629,32 @@ func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]Trac
 	return out, rows.Err()
 }
 
+// RoomPrefetchHorizon 返回所有房间从队列游标起前 depth 条曲目的 track_ref，按紧迫度
+// 升序去重（越靠近正在播放的位置越紧迫）。room_queue 的队首就是游标：房间在播时是
+// 当前曲目本身，空闲时是下一首要放的。
+func (s *Store) RoomPrefetchHorizon(ctx context.Context, depth int) ([]string, error) {
+	if depth <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT track_ref FROM
+		(SELECT track_ref, ROW_NUMBER() OVER (PARTITION BY room_id ORDER BY ord) AS position
+		 FROM room_queue)
+		WHERE position <= ? GROUP BY track_ref ORDER BY MIN(position), track_ref`, depth)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
 // DeleteRoom 删除房间及其队列与播放历史。
 func (s *Store) DeleteRoom(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)

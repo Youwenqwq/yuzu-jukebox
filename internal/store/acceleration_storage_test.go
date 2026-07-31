@@ -390,7 +390,134 @@ func TestClaimBlockedWhileReclaimInFlight(t *testing.T) {
 	}
 }
 
+// 待播优先于热度常驻：钉住的对象不进 GC 受害者集合，宁可让预留失败也不删掉
+// 马上要放的那一首。
+func TestPinnedObjectSurvivesGarbageCollection(t *testing.T) {
+	st := openAccelerationStore(t, 1000, 95, 70, CacheModePrefetchAndHeat, 70)
+	ctx := context.Background()
+	publishStorageTestCandidate(t, st, "local:pinned", "lease-pinned", "object-pinned", 400, 100)
+	publishStorageTestCandidate(t, st, "local:cold", "lease-cold", "object-cold", 400, 200)
+
+	if err := st.PinAccelerationDemand(ctx, "managed", []string{"local:pinned"}, 900_000, 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RequestDistribution(ctx, "managed", "local:incoming", 301); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := st.ClaimDistribution(ctx, "managed", "publisher", "lease-incoming", 302, 20_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ReserveAccelerationStorage(ctx, lease.ID, lease.Owner,
+		"object-incoming", 200, 303); !errors.Is(err, ErrAccelerationStorageFull) {
+		t.Fatalf("reserve over high watermark = %v, want storage full", err)
+	}
+
+	// GC 只能拿没钉住的那个开刀，即使它更晚被访问。
+	deletion, err := st.ClaimAccelerationDeletion(ctx, "managed", "publisher", time.Minute, 304)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletion.Locator != "object-cold" {
+		t.Fatalf("deletion = %#v, want the unpinned object", deletion)
+	}
+	if _, err := st.ClaimAccelerationDeletion(ctx, "managed", "publisher",
+		time.Minute, 305); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("second deletion = %v, want none (pinned object must survive)", err)
+	}
+	if state := accelerationObjectState(t, st, "object-pinned"); state != "ready" {
+		t.Fatalf("pinned object state = %q, want ready", state)
+	}
+}
+
+// 视界内的曲目优先认领：马上要放的那一首不能排在几十条陈年请求后面。
+func TestPinnedRequestIsClaimedBeforeOlderQueue(t *testing.T) {
+	st := openManagedAccelerationStore(t, 1000, 95, 70)
+	ctx := context.Background()
+	if err := st.RequestDistribution(ctx, "managed", "local:old", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RequestDistribution(ctx, "managed", "local:upcoming", 200); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PinAccelerationDemand(ctx, "managed", []string{"local:upcoming"}, 900_000, 300); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := st.ClaimDistribution(ctx, "managed", "publisher", "lease-1", 301, 20_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.TrackRef != "local:upcoming" {
+		t.Fatalf("claimed %q, want the pinned track ahead of the older request", lease.TrackRef)
+	}
+}
+
+// 待播不能扫穿热集：钉住按紧迫度累计，越过份额上限后停止。
+func TestPinShareCapBoundsPinnedFootprint(t *testing.T) {
+	st := openAccelerationStore(t, 1000, 95, 70, CacheModePrefetchAndHeat, 20)
+	ctx := context.Background()
+	publishStorageTestCandidate(t, st, "local:first", "lease-first", "object-first", 150, 100)
+	publishStorageTestCandidate(t, st, "local:second", "lease-second", "object-second", 150, 200)
+
+	// 上限 = 1000 × 20% = 200：第一条进得去，第二条累计到 300 越界。
+	if err := st.PinAccelerationDemand(ctx, "managed",
+		[]string{"local:first", "local:second"}, 900_000, 300); err != nil {
+		t.Fatal(err)
+	}
+	if pinned := accelerationObjectPin(t, st, "object-first"); pinned == 0 {
+		t.Fatal("most urgent object was not pinned")
+	}
+	if pinned := accelerationObjectPin(t, st, "object-second"); pinned != 0 {
+		t.Fatalf("object beyond the share cap was pinned until %d, want unpinned", pinned)
+	}
+}
+
+// 仅待播模式下没有热集需要保护，份额上限不生效。
+func TestPrefetchOnlyModeIgnoresShareCap(t *testing.T) {
+	st := openAccelerationStore(t, 1000, 95, 70, CacheModePrefetch, 20)
+	ctx := context.Background()
+	publishStorageTestCandidate(t, st, "local:first", "lease-first", "object-first", 150, 100)
+	publishStorageTestCandidate(t, st, "local:second", "lease-second", "object-second", 150, 200)
+
+	if err := st.PinAccelerationDemand(ctx, "managed",
+		[]string{"local:first", "local:second"}, 900_000, 300); err != nil {
+		t.Fatal(err)
+	}
+	for _, locator := range []string{"object-first", "object-second"} {
+		if pinned := accelerationObjectPin(t, st, locator); pinned == 0 {
+			t.Fatalf("%s not pinned; prefetch-only mode may use the whole budget", locator)
+		}
+	}
+}
+
+func accelerationObjectPin(t *testing.T, st *Store, locator string) int64 {
+	t.Helper()
+	var pinnedUntil int64
+	if err := st.db.QueryRowContext(context.Background(), `SELECT pinned_until
+		FROM acceleration_objects WHERE acceleration_id = ? AND locator = ?`,
+		"managed", locator).Scan(&pinnedUntil); err != nil {
+		t.Fatal(err)
+	}
+	return pinnedUntil
+}
+
+func accelerationObjectState(t *testing.T, st *Store, locator string) string {
+	t.Helper()
+	var state string
+	if err := st.db.QueryRowContext(context.Background(), `SELECT state
+		FROM acceleration_objects WHERE acceleration_id = ? AND locator = ?`,
+		"managed", locator).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
 func openManagedAccelerationStore(t *testing.T, budget int64, high, low int) *Store {
+	t.Helper()
+	return openAccelerationStore(t, budget, high, low, CacheModePrefetchAndHeat, DefaultPrefetchSharePercent)
+}
+
+func openAccelerationStore(t *testing.T, budget int64, high, low int, mode string, share int) *Store {
 	t.Helper()
 	st, err := Open(filepath.Join(t.TempDir(), "storage.db"), nil)
 	if err != nil {
@@ -406,6 +533,8 @@ func openManagedAccelerationStore(t *testing.T, budget int64, high, low int) *St
 		LeaseTTLSeconds: 600, MaxObjectBytes: budget,
 		StorageBudgetBytes: budget, StorageHighWatermarkPercent: high,
 		StorageLowWatermarkPercent: low,
+		CacheMode:                  mode, PrefetchSharePercent: share,
+		PrefetchHorizon: DefaultPrefetchHorizon,
 	}, publisherHash, deliveryHash, "backend-token"); err != nil {
 		t.Fatal(err)
 	}

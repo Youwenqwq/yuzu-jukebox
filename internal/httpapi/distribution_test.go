@@ -48,7 +48,8 @@ func TestDistributionInternalAPI(t *testing.T) {
 	dist := distribution.New(st)
 	_, err = st.CreateAcceleration(context.Background(), store.Acceleration{
 		ID: "edgeone-main", Name: "EdgeOne", Kind: "edgeone",
-		PublishOnCacheReady: true, ControlBaseURL: "https://control.test/yuzu-edge",
+		CacheMode: store.CacheModePrefetchAndHeat, PrefetchHorizon: store.DefaultPrefetchHorizon,
+		PrefetchSharePercent: store.DefaultPrefetchSharePercent, ControlBaseURL: "https://control.test/yuzu-edge",
 		BackendBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
 		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
 	}, distribution.HashCredential("publisher-secret"), distribution.HashCredential("delivery-secret"), "backend-secret")
@@ -56,9 +57,11 @@ func TestDistributionInternalAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = st.UpdateAcceleration(context.Background(), "edgeone-main", store.AccelerationUpdate{
-		Name: "EdgeOne", Enabled: true, PublishOnCacheReady: true,
-		ControlBaseURL: "https://control.test/yuzu-edge",
-		BackendBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
+		Name: "EdgeOne", Enabled: true, CacheMode: store.CacheModePrefetchAndHeat,
+		PrefetchHorizon:      store.DefaultPrefetchHorizon,
+		PrefetchSharePercent: store.DefaultPrefetchSharePercent,
+		ControlBaseURL:       "https://control.test/yuzu-edge",
+		BackendBaseURL:       "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
 		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
 		StorageBudgetBytes: 850 << 20, StorageHighWatermarkPercent: 95,
 		StorageLowWatermarkPercent: 85,

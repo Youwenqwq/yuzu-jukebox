@@ -472,6 +472,79 @@ func (s *Store) TouchAccelerationObject(
 	return err
 }
 
+// PinAccelerationDemand 把预取视界写成钉住集合。trackRefs 必须按紧迫度升序传入。
+// 请求侧记紧迫度（影响认领顺序），对象侧记不可驱逐（GC 跳过）。
+//
+// prefetch_and_heat 模式下对象钉住按紧迫度累计体积，越过 prefetch_share_percent 后
+// 停止钉住——待播优先级高于热度常驻，但不能扫穿它：一次点满几十首的队列如果全部
+// 钉住，整个热集会被冲光，然后热集又要重传一遍，抖动只是换了个方向回来。越过上限
+// 的部分退化成普通请求，最坏情况是那一首走源站 fallback。
+// prefetch 模式下没有热集需要保护，待播可以用满预算。
+//
+// 钉住不做显式清理：它是 deadline 形状的，离开视界的曲目等钉住到期后自然落回热度池，
+// 而不是一离开就被回收——刚放完的曲目按定义是缓存里最热的东西。
+func (s *Store) PinAccelerationDemand(
+	ctx context.Context,
+	accelerationID string,
+	trackRefs []string,
+	pinnedUntil, now int64,
+) error {
+	if len(trackRefs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var budget int64
+	var sharePercent int
+	var cacheMode string
+	if err := tx.QueryRowContext(ctx, `SELECT storage_budget_bytes,
+		prefetch_share_percent, cache_mode FROM accelerations WHERE id = ?`,
+		accelerationID).Scan(&budget, &sharePercent, &cacheMode); err != nil {
+		return err
+	}
+	shareLimit := int64(-1)
+	if budget > 0 && cacheMode == "prefetch_and_heat" {
+		shareLimit = budget * int64(sharePercent) / 100
+	}
+	var pinnedBytes int64
+	for _, ref := range trackRefs {
+		if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET pinned_until = ?
+			WHERE acceleration_id = ? AND track_ref = ?`,
+			pinnedUntil, accelerationID, ref); err != nil {
+			return err
+		}
+		var locator string
+		var size int64
+		err := tx.QueryRowContext(ctx, `SELECT object.locator, object.size_bytes
+			FROM distribution_candidates AS candidate
+			JOIN acceleration_objects AS object
+			 ON object.acceleration_id = candidate.acceleration_id
+			 AND object.locator = candidate.locator
+			WHERE candidate.acceleration_id = ? AND candidate.track_ref = ?`,
+			accelerationID, ref).Scan(&locator, &size)
+		if errors.Is(err, sql.ErrNoRows) {
+			// 还没发布：只有请求侧的紧迫度，没有对象可钉。
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if shareLimit >= 0 && pinnedBytes+size > shareLimit {
+			continue
+		}
+		pinnedBytes += size
+		if _, err := tx.ExecContext(ctx, `UPDATE acceleration_objects
+			SET pinned_until = ?, updated_at = ? WHERE acceleration_id = ? AND locator = ?`,
+			pinnedUntil, now, accelerationID, locator); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func enqueueStorageGCTx(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -489,10 +562,12 @@ func enqueueStorageGCTx(
 	if targetBytes < 0 {
 		targetBytes = 0
 	}
+	// 钉住的对象不进受害者集合：正在播放或马上要放的曲目不能被回收。凑不够目标
+	// 就凑不够——调用方会拿到 507，这比删掉马上要放的那一首正确。
 	rows, err := tx.QueryContext(ctx, `SELECT locator, size_bytes FROM acceleration_objects
 		WHERE acceleration_id = ? AND state IN ('ready', 'orphan', 'delete_failed')
-		AND locator <> ? ORDER BY CASE WHEN state = 'orphan' THEN 0 ELSE 1 END,
-		last_accessed_at, locator`, accelerationID, excludeLocator)
+		AND locator <> ? AND pinned_until <= ? ORDER BY CASE WHEN state = 'orphan' THEN 0 ELSE 1 END,
+		last_accessed_at, locator`, accelerationID, excludeLocator, now)
 	if err != nil {
 		return err
 	}
