@@ -503,7 +503,9 @@ type QueueRow struct {
 }
 
 // ReplaceQueue 全量重写某房间的队列（队列规模小，重写最不易错）。
-func (s *Store) ReplaceQueue(ctx context.Context, roomID string, rows []QueueRow) error {
+// rows 以当前曲目打头（currentEntryID 非空时），其后是待播条目；游标与队列在
+// 同一事务中落库，避免出现「游标指向已不存在的条目」的中间态。
+func (s *Store) ReplaceQueue(ctx context.Context, roomID, currentEntryID string, rows []QueueRow) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -515,34 +517,43 @@ func (s *Store) ReplaceQueue(ctx context.Context, roomID string, rows []QueueRow
 	for i, r := range rows {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO room_queue (room_id, ord, entry_id, track_ref, title, artist, duration_ms,
-			 album, cover_url, source_url, contributors_json, requested_by, requester_name, added_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 album, cover_url, source_url, contributors_json, requested_by, requester_name, added_at, is_current)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			roomID, i, r.EntryID, r.TrackRef, r.Title, r.Artist, r.DurationMs,
-			r.Album, r.CoverURL, r.SourceURL, r.ContributorsJSON, r.RequestedBy, r.RequesterName, r.AddedAt); err != nil {
+			r.Album, r.CoverURL, r.SourceURL, r.ContributorsJSON, r.RequestedBy, r.RequesterName, r.AddedAt,
+			currentEntryID != "" && r.EntryID == currentEntryID); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, error) {
+// LoadQueue 返回房间的持久队列以及当前曲目的 entry id。currentEntryID 为空表示
+// 房间此刻没有在播曲目，rows 全部是待播条目。
+func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT entry_id, track_ref, title, artist, duration_ms, album, cover_url, source_url, contributors_json,
-		        requested_by, requester_name, added_at FROM room_queue WHERE room_id = ? ORDER BY ord`, roomID)
+		        requested_by, requester_name, added_at, is_current FROM room_queue WHERE room_id = ? ORDER BY ord`, roomID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []QueueRow
+	var currentEntryID string
 	for rows.Next() {
 		var r QueueRow
+		var isCurrent bool
 		if err := rows.Scan(&r.EntryID, &r.TrackRef, &r.Title, &r.Artist, &r.DurationMs,
-			&r.Album, &r.CoverURL, &r.SourceURL, &r.ContributorsJSON, &r.RequestedBy, &r.RequesterName, &r.AddedAt); err != nil {
-			return nil, err
+			&r.Album, &r.CoverURL, &r.SourceURL, &r.ContributorsJSON, &r.RequestedBy, &r.RequesterName,
+			&r.AddedAt, &isCurrent); err != nil {
+			return nil, "", err
+		}
+		if isCurrent {
+			currentEntryID = r.EntryID
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, currentEntryID, rows.Err()
 }
 
 // ---------- 播放历史 ----------
@@ -614,6 +625,32 @@ func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]Trac
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RoomPrefetchHorizon 返回所有房间从队列游标起前 depth 条曲目的 track_ref，按紧迫度
+// 升序去重（越靠近正在播放的位置越紧迫）。room_queue 的队首就是游标：房间在播时是
+// 当前曲目本身，空闲时是下一首要放的。
+func (s *Store) RoomPrefetchHorizon(ctx context.Context, depth int) ([]string, error) {
+	if depth <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT track_ref FROM
+		(SELECT track_ref, ROW_NUMBER() OVER (PARTITION BY room_id ORDER BY ord) AS position
+		 FROM room_queue)
+		WHERE position <= ? GROUP BY track_ref ORDER BY MIN(position), track_ref`, depth)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
 	}
 	return out, rows.Err()
 }

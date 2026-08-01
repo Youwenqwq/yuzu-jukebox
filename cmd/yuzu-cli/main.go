@@ -58,7 +58,7 @@ func init() {
 		"acceleration requests": {
 			usage:  "acceleration requests <acceleration_id> [state] [-limit 50]",
 			desc:   "列出外部加速任务",
-			detail: "列出 queued、leased、retry_wait、cancel_requested、ready 或 canceled 任务及等待原因。\n\n需要 media_admin 角色。",
+			detail: "列出 queued、leased、retry_wait、cancel_requested、ready、evicted 或 canceled 任务及等待原因。\n\n需要 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
 					return errUsage("acceleration requests")

@@ -13,12 +13,27 @@ var (
 	ErrAccelerationNoCredential = errors.New("acceleration credential is not configured")
 )
 
+// 缓存模式决定边缘的需求集合从哪里来。
+//
+// CacheModePrefetch 只取房间队列视界：工作集 = 房间数 × prefetch_horizon，有上界，
+// 不可能抖动，其余曲目回源。预算不足以当缓存用时这是正确的模式。
+// CacheModePrefetchAndHeat 在视界之外还接受缓存就绪事件，让播放过的曲目常驻。
+const (
+	CacheModePrefetch        = "prefetch"
+	CacheModePrefetchAndHeat = "prefetch_and_heat"
+
+	DefaultPrefetchHorizon      = 2
+	DefaultPrefetchSharePercent = 20
+)
+
 type Acceleration struct {
 	ID                          string
 	Name                        string
 	Kind                        string
 	Enabled                     bool
-	PublishOnCacheReady         bool
+	CacheMode                   string
+	PrefetchHorizon             int
+	PrefetchSharePercent        int
 	ControlBaseURL              string
 	BackendBaseURL              string
 	PublisherTokenHash          []byte
@@ -46,7 +61,9 @@ type Acceleration struct {
 type AccelerationUpdate struct {
 	Name                        string
 	Enabled                     bool
-	PublishOnCacheReady         bool
+	CacheMode                   string
+	PrefetchHorizon             int
+	PrefetchSharePercent        int
 	ControlBaseURL              string
 	BackendBaseURL              string
 	LeaseTTLSeconds             int
@@ -99,6 +116,14 @@ func (s *Store) CreateAcceleration(
 	publisherHash, deliveryHash []byte,
 	backendToken string,
 ) (Acceleration, error) {
+	// 缓存策略的两个字段带 CHECK 约束，零值会被数据库拒绝。这里补默认值，让零值
+	// 结构体可用；prefetch_horizon 的 0 是合法取值（关闭待播钉住），不覆盖。
+	if acceleration.CacheMode == "" {
+		acceleration.CacheMode = CacheModePrefetchAndHeat
+	}
+	if acceleration.PrefetchSharePercent <= 0 || acceleration.PrefetchSharePercent > 100 {
+		acceleration.PrefetchSharePercent = DefaultPrefetchSharePercent
+	}
 	if acceleration.StorageBudgetBytes == 0 {
 		acceleration.StorageBudgetBytes = 850 << 20
 	}
@@ -120,15 +145,16 @@ func (s *Store) CreateAcceleration(
 		return Acceleration{}, err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO accelerations
-		(id, name, kind, enabled, publish_on_cache_ready, control_base_url,
+		(id, name, kind, enabled, cache_mode, prefetch_horizon, prefetch_share_percent, control_base_url,
 		 backend_base_url, publisher_token_hash, delivery_token_hash, backend_token,
 		 lease_ttl_seconds, upload_rate_bytes_per_second, max_object_bytes,
 		 storage_budget_bytes, storage_high_watermark_percent,
 		 storage_low_watermark_percent, inventory_interval_seconds,
 		 inventory_stale_after_seconds, created_at, updated_at)
-		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		acceleration.ID, acceleration.Name, acceleration.Kind,
-		acceleration.PublishOnCacheReady, acceleration.ControlBaseURL,
+		acceleration.CacheMode, acceleration.PrefetchHorizon,
+		acceleration.PrefetchSharePercent, acceleration.ControlBaseURL,
 		acceleration.BackendBaseURL, publisherHash, deliveryHash, encryptedBackend,
 		acceleration.LeaseTTLSeconds, acceleration.UploadRateBytesPerSecond,
 		acceleration.MaxObjectBytes, acceleration.StorageBudgetBytes,
@@ -162,9 +188,11 @@ func (s *Store) ListAccelerations(ctx context.Context) ([]Acceleration, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListCacheReadyAccelerations(ctx context.Context) ([]Acceleration, error) {
+// ListHeatModeAccelerations 返回开启了热度常驻的资源。仅待播模式的资源不接受
+// 缓存就绪事件——它的需求完全由房间队列视界导出。
+func (s *Store) ListHeatModeAccelerations(ctx context.Context) ([]Acceleration, error) {
 	rows, err := s.db.QueryContext(ctx, accelerationSelect+
-		` WHERE enabled = 1 AND publish_on_cache_ready = 1 ORDER BY id`)
+		` WHERE enabled = 1 AND cache_mode = 'prefetch_and_heat' ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +230,8 @@ func (s *Store) UpdateAcceleration(ctx context.Context, id string, update Accele
 		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE accelerations SET
-		name = ?, enabled = ?, publish_on_cache_ready = ?, control_base_url = ?,
+		name = ?, enabled = ?, cache_mode = ?, prefetch_horizon = ?,
+		prefetch_share_percent = ?, control_base_url = ?,
 		backend_base_url = ?, lease_ttl_seconds = ?, upload_rate_bytes_per_second = ?,
 		max_object_bytes = ?, storage_budget_bytes = ?,
 		storage_high_watermark_percent = ?, storage_low_watermark_percent = ?,
@@ -212,8 +241,8 @@ func (s *Store) UpdateAcceleration(ctx context.Context, id string, update Accele
 		health_error = CASE WHEN ? THEN ? ELSE health_error END,
 		last_health_at = CASE WHEN ? THEN ? ELSE last_health_at END,
 		updated_at = ? WHERE id = ?`,
-		update.Name, update.Enabled, update.PublishOnCacheReady,
-		update.ControlBaseURL, update.BackendBaseURL, update.LeaseTTLSeconds,
+		update.Name, update.Enabled, update.CacheMode, update.PrefetchHorizon,
+		update.PrefetchSharePercent, update.ControlBaseURL, update.BackendBaseURL, update.LeaseTTLSeconds,
 		update.UploadRateBytesPerSecond, update.MaxObjectBytes,
 		update.StorageBudgetBytes, update.StorageHighWatermarkPercent,
 		update.StorageLowWatermarkPercent, update.InventoryIntervalSeconds,
@@ -457,8 +486,8 @@ func (s *Store) AccelerationReadyFor(
 	return len(problems) == 0, problems, nil
 }
 
-const accelerationSelect = `SELECT id, name, kind, enabled, publish_on_cache_ready,
-	control_base_url, backend_base_url, publisher_token_hash,
+const accelerationSelect = `SELECT id, name, kind, enabled, cache_mode,
+	prefetch_horizon, prefetch_share_percent, control_base_url, backend_base_url, publisher_token_hash,
 	publisher_pending_token_hash, delivery_token_hash, delivery_pending_token_hash,
 	backend_token, backend_pending_token, lease_ttl_seconds,
 	upload_rate_bytes_per_second, max_object_bytes, storage_budget_bytes,
@@ -479,7 +508,8 @@ func (s *Store) scanAcceleration(row accelerationScanner) (Acceleration, error) 
 	var lastHealth sql.NullInt64
 	err := row.Scan(
 		&acceleration.ID, &acceleration.Name, &acceleration.Kind, &acceleration.Enabled,
-		&acceleration.PublishOnCacheReady, &acceleration.ControlBaseURL,
+		&acceleration.CacheMode, &acceleration.PrefetchHorizon,
+		&acceleration.PrefetchSharePercent, &acceleration.ControlBaseURL,
 		&acceleration.BackendBaseURL, &publisherHash, &publisherPendingHash,
 		&deliveryHash, &deliveryPendingHash, &encryptedBackend, &encryptedPendingBackend,
 		&acceleration.LeaseTTLSeconds, &acceleration.UploadRateBytesPerSecond,

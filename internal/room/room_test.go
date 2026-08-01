@@ -48,14 +48,18 @@ func mkEntry(ref, requestedBy string) QueueEntry {
 }
 
 // queueRefs 返回待播队列（不含正在播放的条目）的 track_ref，按队列顺序。
+// 当前曲目现在也保留在 room_queue 中，由 current_entry_id 标记，这里跳过它。
 func queueRefs(t *testing.T, st *store.Store) []string {
 	t.Helper()
-	rows, err := st.LoadQueue(context.Background(), "r1")
+	rows, currentEntryID, err := st.LoadQueue(context.Background(), "r1")
 	if err != nil {
 		t.Fatalf("LoadQueue: %v", err)
 	}
 	refs := []string{}
 	for _, row := range rows {
+		if row.EntryID == currentEntryID {
+			continue
+		}
 		refs = append(refs, row.TrackRef)
 	}
 	return refs
@@ -199,12 +203,83 @@ func TestAddSnapshotsRequesterName(t *testing.T) {
 	if err := r.AddFor(id, mkEntry("local:queued", id.ID)); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := st.LoadQueue(context.Background(), "r1")
+	rows, currentEntryID, err := st.LoadQueue(context.Background(), "r1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows[0].RequesterName != id.Name {
-		t.Fatalf("persisted queue = %#v, want requester_name %q", rows, id.Name)
+	// 当前曲目留在队列里（游标指向它），其后是刚点的待播条目。
+	if len(rows) != 2 || rows[0].EntryID != currentEntryID ||
+		rows[1].TrackRef != "local:queued" || rows[1].RequesterName != id.Name {
+		t.Fatalf("persisted queue = %#v (current %q), want current + queued by %q",
+			rows, currentEntryID, id.Name)
+	}
+}
+
+// 当前曲目保留在 room_queue 中（游标标记），因此重启后应当从它本身续播，
+// 而不是像以前那样把它当成已出队、直接跳到下一首。
+func TestRestartResumesCurrentTrackInsteadOfSkippingIt(t *testing.T) {
+	r, st := newTestRoom(t, "")
+	if err := r.AddFor(guest, mkEntry("local:playing", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AddFor(guest, mkEntry("local:next", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := r.Snapshot(guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Playback.Current == nil || before.Playback.Current.TrackRef != "local:playing" {
+		t.Fatalf("playback before restart = %#v, want local:playing", before.Playback)
+	}
+	if len(before.Queue) != 1 || before.Queue[0].TrackRef != "local:next" {
+		t.Fatalf("queue before restart = %#v, want only local:next", before.Queue)
+	}
+
+	// 用同一个 store 重新起一个 actor，模拟进程重启。
+	restarted := New("r1", "room", "", "", st, r.authm, r.cache, r.reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go restarted.Run(ctx)
+
+	after, err := restarted.Snapshot(guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Playback.Current == nil || after.Playback.Current.TrackRef != "local:playing" {
+		t.Fatalf("playback after restart = %#v, want local:playing resumed", after.Playback)
+	}
+	if after.Playback.Current.EntryID != before.Playback.Current.EntryID {
+		t.Fatalf("resumed entry id = %q, want %q",
+			after.Playback.Current.EntryID, before.Playback.Current.EntryID)
+	}
+	if len(after.Queue) != 1 || after.Queue[0].TrackRef != "local:next" {
+		t.Fatalf("queue after restart = %#v, want only local:next", after.Queue)
+	}
+}
+
+// 正在播放的曲目必须对 SQL 可见：加速层要靠它钉住正在流式传输的对象。
+func TestCurrentTrackStaysQueryableInQueue(t *testing.T) {
+	r, st := newTestRoom(t, "")
+	if err := r.AddFor(guest, mkEntry("local:playing", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AddFor(guest, mkEntry("local:next", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	rows, currentEntryID, err := st.LoadQueue(context.Background(), "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].TrackRef != "local:playing" || rows[1].TrackRef != "local:next" {
+		t.Fatalf("persisted queue = %#v, want current followed by upcoming", rows)
+	}
+	if currentEntryID != rows[0].EntryID {
+		t.Fatalf("cursor = %q, want it to point at the playing entry %q", currentEntryID, rows[0].EntryID)
+	}
+	// 预取视界就是这条查询：游标位置起的前 N 条。
+	if refs := queueRefs(t, st); len(refs) != 1 || refs[0] != "local:next" {
+		t.Fatalf("upcoming refs = %#v, want only local:next", refs)
 	}
 }
 

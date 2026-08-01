@@ -395,7 +395,7 @@ func (r *Room) Snapshot(id auth.Identity) (Snapshot, error) {
 // Run 是 actor 主循环。阻塞直到 ctx 取消（进程退出或房间被删除）。
 func (r *Room) Run(ctx context.Context) {
 	defer close(r.done)
-	queue := r.loadQueue()
+	queue, resumed := r.loadQueue()
 	var queueRevision uint64
 	var playback *Playback
 	var radio *radioState
@@ -509,17 +509,31 @@ func (r *Room) Run(ctx context.Context) {
 		return wire
 	}
 
-	commitQueue := func(next []QueueEntry, ops []QueuePatchOp) error {
+	// persistQueue 把「当前曲目 + 待播队列」整体落库。当前曲目保留在 room_queue 中
+	// 并由 current_entry_id 标记游标，这样它对 SQL 可见（加速层可以钉住正在流式
+	// 传输的对象），重启也能从它本身续播。线上的 queue 表示不变，仍只含待播条目。
+	persistQueue := func(current *QueueEntry, next []QueueEntry) error {
+		entries, currentEntryID := next, ""
+		if current != nil {
+			currentEntryID = current.EntryID
+			entries = append([]QueueEntry{*current}, next...)
+		}
+		rows, err := queueRows(entries)
+		if err != nil {
+			return err
+		}
+		return r.st.ReplaceQueue(ctx, r.ID, currentEntryID, rows)
+	}
+
+	// commitQueueWithCurrent 在切歌时使用：此刻游标要指向新曲目，而 playback
+	// 尚未推进（推进前先落库，失败时房间状态保持不变）。
+	commitQueueWithCurrent := func(current *QueueEntry, next []QueueEntry, ops []QueuePatchOp) error {
 		nextRevision := queueRevision + 1
 		messages, err := QueuePatchMessages(queueRevision, nextRevision, wireQueuePatchOps(ops))
 		if err != nil {
 			return err
 		}
-		rows, err := queueRows(next)
-		if err != nil {
-			return err
-		}
-		if err := r.st.ReplaceQueue(ctx, r.ID, rows); err != nil {
+		if err := persistQueue(current, next); err != nil {
 			return err
 		}
 		queue = next
@@ -529,6 +543,15 @@ func (r *Room) Run(ctx context.Context) {
 			broadcast(InterestQueue, func(ClientConn) any { return message })
 		}
 		return nil
+	}
+
+	// commitQueue 用于不改变当前曲目的队列变更（增删移清）。
+	commitQueue := func(next []QueueEntry, ops []QueuePatchOp) error {
+		var current *QueueEntry
+		if playback != nil {
+			current = playback.Current
+		}
+		return commitQueueWithCurrent(current, next, ops)
 	}
 
 	queueAddOps := func(entries []QueueEntry, start int) []QueuePatchOp {
@@ -684,6 +707,10 @@ func (r *Room) Run(ctx context.Context) {
 
 		now := nowMs()
 		if len(queue) == 0 {
+			// 先清掉游标再记历史：落库失败时房间状态保持不变。
+			if err := persistQueue(nil, nil); err != nil {
+				return err
+			}
 			finishCurrent(reason, now)
 			playback = &Playback{Rate: 1.0}
 			if timer != nil {
@@ -708,7 +735,11 @@ func (r *Room) Run(ctx context.Context) {
 		}
 		removed := append([]QueueEntry(nil), queue[:removeCount]...)
 		remaining := append([]QueueEntry(nil), queue[removeCount:]...)
-		if err := commitQueue(remaining, queueRemoveOps(removed)); err != nil {
+		var nextCurrent *QueueEntry
+		if hasNext {
+			nextCurrent = &next
+		}
+		if err := commitQueueWithCurrent(nextCurrent, remaining, queueRemoveOps(removed)); err != nil {
 			return err
 		}
 
@@ -743,7 +774,7 @@ func (r *Room) Run(ctx context.Context) {
 				log.Printf("room %s: persist radio refill: %v", r.ID, err)
 			}
 		}
-		// 预取当前曲目（通常 Prefetch 已做过）与下一首
+		// queue 此刻已不含当前曲目，队首就是下一首：提前把它拉进本地缓存。
 		if len(queue) > 0 {
 			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
 		}
@@ -752,8 +783,22 @@ func (r *Room) Run(ctx context.Context) {
 		return nil
 	}
 
-	// 启动即恢复：重启后播放状态丢失但队列仍在，自动续播队首。
-	if len(queue) > 0 {
+	// 启动即恢复：重启后播放状态丢失，但当前曲目留在队列里（由 current_entry_id
+	// 标记），所以可以从它本身续播，而不是像以前那样跳过它从下一首开始。
+	// 时长未知的条目会让 scheduleEnd 永不触发，交给 advance 按毒化条目丢弃。
+	switch {
+	case resumed != nil && resumed.DurationMs > 0:
+		now := nowMs()
+		playback = &Playback{
+			Current: resumed, PositionMs: -policy.startLeadMs(), UpdatedAt: now, Playing: true, Rate: 1.0,
+		}
+		go r.cache.Prefetch(provider.TrackRef(resumed.TrackRef))
+		if len(queue) > 0 {
+			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
+		}
+		scheduleEnd()
+		broadcast(InterestPlayback, playbackMsg)
+	case resumed != nil || len(queue) > 0:
 		if err := advance("resume-after-restart"); err != nil {
 			log.Printf("room %s: resume queue: %v", r.ID, err)
 		}
@@ -1038,12 +1083,14 @@ func (r *Room) streamURL(id auth.Identity, trackRef string) string {
 	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + ticket
 }
 
-func (r *Room) loadQueue() []QueueEntry {
+// loadQueue 读取持久队列，并按 current_entry_id 把当前曲目从待播队列中切分出来。
+// 返回的队列与线上表示一致：只含待播条目。
+func (r *Room) loadQueue() ([]QueueEntry, *QueueEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows, err := r.st.LoadQueue(ctx, r.ID)
+	rows, currentEntryID, err := r.st.LoadQueue(ctx, r.ID)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	out := make([]QueueEntry, len(rows))
 	for i, row := range rows {
@@ -1060,7 +1107,18 @@ func (r *Room) loadQueue() []QueueEntry {
 			RequesterName: row.RequesterName,
 		}
 	}
-	return out
+	if currentEntryID == "" {
+		return out, nil
+	}
+	for i := range out {
+		if out[i].EntryID != currentEntryID {
+			continue
+		}
+		current := out[i]
+		return append([]QueueEntry(nil), out[i+1:]...), &current
+	}
+	// 游标指向的条目已不在队列里（异常漂移）：整队按待播处理，宁可重播一首也不丢队列。
+	return out, nil
 }
 
 // NewEntryID 生成队列条目 ID。

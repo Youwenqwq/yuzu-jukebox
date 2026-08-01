@@ -181,7 +181,8 @@ func createDistributionTestAcceleration(t *testing.T, st *Store) {
 	edgeHash[0] = 2
 	_, err := st.CreateAcceleration(context.Background(), Acceleration{
 		ID: "edgeone", Name: "EdgeOne", Kind: "edgeone",
-		PublishOnCacheReady: true, ControlBaseURL: "https://control.test/yuzu-edge",
+		CacheMode: CacheModePrefetchAndHeat, PrefetchHorizon: DefaultPrefetchHorizon,
+		PrefetchSharePercent: DefaultPrefetchSharePercent, ControlBaseURL: "https://control.test/yuzu-edge",
 		BackendBaseURL: "https://control.test/yuzu-blob", LeaseTTLSeconds: 600,
 		UploadRateBytesPerSecond: 187500, MaxObjectBytes: 23 << 20,
 	}, publisherHash, edgeHash, "signer-token")

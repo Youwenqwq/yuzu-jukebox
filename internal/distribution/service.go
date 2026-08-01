@@ -54,12 +54,52 @@ func (s *Service) Request(ctx context.Context, accelerationID string, ref provid
 }
 
 func (s *Service) RequestCacheReady(ctx context.Context, ref provider.TrackRef) error {
-	accelerations, err := s.st.ListCacheReadyAccelerations(ctx)
+	accelerations, err := s.st.ListHeatModeAccelerations(ctx)
 	if err != nil {
 		return err
 	}
 	for _, acceleration := range accelerations {
 		if err := s.Request(ctx, acceleration.ID, ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PinTTL 是钉住的有效期。它要显著长于扫描周期，单次扫描失败不能让正在播放的对象
+// 立刻失去保护；也不能太长，否则离开视界的曲目会长期占着份额上限。
+const PinTTL = 2 * time.Minute
+
+// PinPrefetchHorizon 把每个资源自己的预取视界登记为加速需求并钉住。视界内的曲目
+// 优先被认领，且在 TTL 内不会被 GC 驱逐；离开视界后钉住自然过期，曲目落回热度池——
+// 刚放完的曲目按定义是缓存里最热的，不该一放完就被回收。
+//
+// 这条路径同时负责复活被驱逐的曲目：RequestDistribution 会清掉 evicted_at，所以
+// 马上要放的歌即使刚被回收过也会重新排队。
+func (s *Service) PinPrefetchHorizon(ctx context.Context) error {
+	accelerations, err := s.st.ListAccelerations(ctx)
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	for _, acceleration := range accelerations {
+		if !acceleration.Enabled || acceleration.PrefetchHorizon <= 0 {
+			continue
+		}
+		refs, err := s.st.RoomPrefetchHorizon(ctx, acceleration.PrefetchHorizon)
+		if err != nil {
+			return err
+		}
+		if len(refs) == 0 {
+			continue
+		}
+		for _, ref := range refs {
+			if err := s.st.RequestDistribution(ctx, acceleration.ID, ref, now.UnixMilli()); err != nil {
+				return err
+			}
+		}
+		if err := s.st.PinAccelerationDemand(ctx, acceleration.ID, refs,
+			now.Add(PinTTL).UnixMilli(), now.UnixMilli()); err != nil {
 			return err
 		}
 	}

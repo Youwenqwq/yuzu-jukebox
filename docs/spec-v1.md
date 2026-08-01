@@ -537,7 +537,7 @@ server: ← {"type":"player.command","data":{"op":"set_volume","value":37}}
 
 ## 5. 房间状态机
 
-### 5.1 状态字段（权威，存于房间 actor 内，不落库）
+### 5.1 状态字段（权威，存于房间 actor 内）
 
 ```go
 PlaybackState {
@@ -551,6 +551,16 @@ Queue []QueueEntry
 ```
 
 不变量：**任何时刻任意观察者由这五元组算出的播放位置一致**；系统内不存在"当前进度"这种需要持续刷新的字段。
+
+`Current` 与 `Queue` 是 actor 的内存表示：`Queue` 只含待播条目，`Current` 单独经
+`playback.changed` 下发。持久层的切分点不同——`room_queue` 同时保存当前曲目与待播条目，
+由 `is_current` 标记游标。两者的差异只存在于存储层，线上格式不受影响：
+`queue.snapshot` / `queue.patch` 携带的始终是待播条目。
+
+当前曲目落库有两个后果。其一，正在流式传输的曲目对 SQL 可见，加速层可以按
+「游标起的前 N 条」导出预取视界并钉住这些对象，而不必去问房间 actor 要运行时状态。
+其二，重启从当前曲目本身续播，而不是把它当作已出队、跳到下一首。`PositionMs` 仍是
+运行时状态，所以续播从曲目开头开始。
 
 ### 5.2 状态迁移
 
@@ -923,7 +933,7 @@ credential；后续查询只返回 credential-configured/pending 布尔值。
 | `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy、水位或 enabled；启用前强制 readiness |
 | `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且不再拥有媒体或进行中工作的资源 |
 | `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、当前 inventory scan、累计与最近 24 小时指标 |
-| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued|leased|retry_wait|cancel_requested|ready|canceled` 请求；queued 返回 `pending_reason` |
+| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued\|leased\|retry_wait\|cancel_requested\|ready\|evicted\|canceled` 请求；queued 返回 `pending_reason` |
 | `GET /api/v1/accelerations/{id}/requests/{track_ref...}` | 查询单个请求的 lease、phase、进度、重试和取消状态 |
 | `DELETE /api/v1/accelerations/{id}/requests/{track_ref...}` | 幂等取消；未认领任务立即 canceled，live lease 进入 cancel_requested |
 | `POST /api/v1/accelerations/{id}/inventory/refresh` | HTTP 202；创建或复用当前完整 inventory scan |
@@ -932,11 +942,34 @@ credential；后续查询只返回 credential-configured/pending 布尔值。
 | `POST /api/v1/accelerations/{id}/credentials/{purpose}/activate` | 验证并切换 pending token |
 
 创建/更新的供应商无关字段为 `control_base_url`、`backend_base_url`、
-`publish_on_cache_ready`、`lease_ttl_seconds`、`upload_rate_bytes_per_second`、
+`cache_mode`、`prefetch_horizon`、`prefetch_share_percent`、`lease_ttl_seconds`、
+`upload_rate_bytes_per_second`、
 `max_object_bytes`、`storage_budget_bytes`、`storage_high_watermark_percent`、
 `storage_low_watermark_percent`、`inventory_interval_seconds` 与
 `inventory_stale_after_seconds`。默认容量是 850 MiB，高/低水位是 95%/85%；
 inventory 默认每 900 秒调度，超过 1800 秒没有完整观测即标记 stale。
+
+加速资源是一个有自己预算的缓存，不是本地缓存的镜像。`cache_mode` 决定它的需求集合
+从哪里来：
+
+| 模式 | 需求集合 | 工作集 | 份额上限 |
+|---|---|---|---|
+| `prefetch` | 仅房间队列视界 | 房间数 × `prefetch_horizon`，**有上界** | 不生效，可用满预算 |
+| `prefetch_and_heat` | 视界 + 缓存就绪事件 | 无界（播过多少首就有多少） | `prefetch_share_percent` |
+
+`prefetch` 模式下需求有上界，因此不可能抖动；视界之外的曲目走源站 fallback。当预算
+显著小于活跃曲目集时这是正确的模式——`prefetch_and_heat` 只有在预算能装下热集时才有
+额外收益，否则会退化成"驱逐即重排"的重传循环。
+
+`prefetch_horizon` 是从每个房间队列游标起算的曲目数，默认 2（当前曲目 + 下一首），
+0 表示关闭待播钉住。视界内的曲目在请求侧获得认领优先级、在对象侧不可被 GC 驱逐。
+钉住是 deadline 形状的：房间游标停止推进或进程崩溃时自行过期，不会永久占位；曲目
+离开视界后钉住自然到期、落回热度池，而不是一放完就被回收。
+
+`prefetch_share_percent` 是待播能占的预算上限，默认 20%，它同时是热度曲目的保底份额。
+待播优先级高于热度常驻，但必须有上限——一次点满几十首的队列如果全部钉住，整个热集会被
+冲光然后重传一遍，抖动只是换了个方向。**该值必须不大于 `storage_low_watermark_percent`**：
+GC 的回收目标是低水位，而被钉住的部分它动不了，份额一旦越过低水位，GC 永远够不到目标。
 
 `purpose` 仅允许 `publisher|delivery|backend`。pending publisher/delivery token
 在切换窗口内可认证；backend activate 前必须通过受保护的 backend health。启用要求端点、
@@ -966,11 +999,26 @@ candidate 失效并创建删除 job。adapter 通过
 `POST /internal/v1/accelerations/deletions/claim` 领取 job，调用供应商 API 删除后再
 complete；失败必须调用 fail 并给出有限 retry delay。
 
+驱逐是缓存策略的正常结果，不是待重试的失败：GC 使 candidate 失效时，对应请求必须同时
+进入 `evicted`，退出可认领集合与 `queued`/`retry_wait` 统计。只有真实需求——缓存就绪回调、
+边缘 introspect 或进入预取视界——才会把它复活成 `queued`。若驱逐不写回需求侧，请求会在
+candidate 被删的同一瞬间从 `ready` 翻回 `queued`，publisher 随即重传刚被回收的对象，形成
+与预算无关的无限重传循环。
+
+GC 的受害者集合排除被钉住的对象。凑不够低水位就凑不够——调用方会拿到 507，这比删掉
+马上要放的那一首正确。认领顺序同样按钉住优先，否则马上要放的曲目会排在陈年请求之后。
+
+回收在途期间——存在待删除 job 且占用尚未回落到低水位——Core 不派发新的 lease。否则
+publisher 会先下载完整源再撞 507 或撞上处于 `deleting` 状态的同名 locator（409
+`acceleration_storage_reserved`），每个失败周期浪费一次整源下载。
+
 Core 以持久 inventory scan task 调度外部观测。adapter 先调用
 `POST /internal/v1/accelerations/inventory/claim` 认领 scan，再向
 `POST /internal/v1/accelerations/inventory` 分页提交同一 `scan_id`；所有页面进入独立
 staging generation，只有最后一批 `complete:true` 才在事务中原子更新 observed bytes、
-managed/observed/orphan/missing 对象数和 `observed_at`。扫描失败必须调用
+managed/observed/orphan/missing 对象数和 `observed_at`。快照描述的是 `observed_at` 时刻的
+存储状态，分页扫描本身耗时可观，因此只有在 `observed_at` 之前就已落库的对象才由本次扫描
+判决 missing；扫描窗口内完成的上传不在快照里属于预期，不得据此标记 missing。扫描失败必须调用
 `POST /internal/v1/accelerations/inventory/{id}/fail`；失败或不完整 generation 不得覆盖
 上一份完整快照。unknown locator 只作为 opaque orphan 记账，不会被 Core 解释成供应商
 key。`storage.stale` 表示最后完整 `observed_at` 已超过资源的 freshness window；它不把
@@ -1012,7 +1060,8 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 ## 8. 明确不做的
 
 - 投票切歌、DJ 模式（policy_json 可扩展，不实现逻辑）
-- 播放进度持久化（重启后当前曲目丢失；队列保留在 DB，房间启动时自动续播队首）
+- 曲内播放进度持久化（当前曲目本身保留在 DB 的队列游标里，重启从它的开头续播；
+  `position_ms` 不落库）
 - 队列事件的增量 diff 下发
 - 账号密码登录（guest + 全局管理员口令 + OIDC 已覆盖当前认证需求）
 

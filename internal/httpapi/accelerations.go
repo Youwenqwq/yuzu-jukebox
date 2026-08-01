@@ -28,7 +28,9 @@ type accelerationView struct {
 	Name                        string `json:"name"`
 	Kind                        string `json:"kind"`
 	Enabled                     bool   `json:"enabled"`
-	PublishOnCacheReady         bool   `json:"publish_on_cache_ready"`
+	CacheMode                   string `json:"cache_mode"`
+	PrefetchHorizon             int    `json:"prefetch_horizon"`
+	PrefetchSharePercent        int    `json:"prefetch_share_percent"`
 	ControlBaseURL              string `json:"control_base_url"`
 	BackendBaseURL              string `json:"backend_base_url"`
 	LeaseTTLSeconds             int    `json:"lease_ttl_seconds"`
@@ -59,7 +61,9 @@ type createAccelerationRequest struct {
 	Kind                        string `json:"kind"`
 	ControlBaseURL              string `json:"control_base_url"`
 	BackendBaseURL              string `json:"backend_base_url"`
-	PublishOnCacheReady         *bool  `json:"publish_on_cache_ready"`
+	CacheMode                   string `json:"cache_mode"`
+	PrefetchHorizon             *int   `json:"prefetch_horizon"`
+	PrefetchSharePercent        *int   `json:"prefetch_share_percent"`
 	LeaseTTLSeconds             int    `json:"lease_ttl_seconds"`
 	UploadRateBytesPerSecond    *int64 `json:"upload_rate_bytes_per_second"`
 	MaxObjectBytes              int64  `json:"max_object_bytes"`
@@ -73,7 +77,9 @@ type createAccelerationRequest struct {
 type updateAccelerationRequest struct {
 	Name                        *string `json:"name"`
 	Enabled                     *bool   `json:"enabled"`
-	PublishOnCacheReady         *bool   `json:"publish_on_cache_ready"`
+	CacheMode                   *string `json:"cache_mode"`
+	PrefetchHorizon             *int    `json:"prefetch_horizon"`
+	PrefetchSharePercent        *int    `json:"prefetch_share_percent"`
 	ControlBaseURL              *string `json:"control_base_url"`
 	BackendBaseURL              *string `json:"backend_base_url"`
 	LeaseTTLSeconds             *int    `json:"lease_ttl_seconds"`
@@ -89,8 +95,10 @@ type updateAccelerationRequest struct {
 func accelerationResponse(acceleration store.Acceleration) accelerationView {
 	return accelerationView{
 		ID: acceleration.ID, Name: acceleration.Name, Kind: acceleration.Kind,
-		Enabled: acceleration.Enabled, PublishOnCacheReady: acceleration.PublishOnCacheReady,
-		ControlBaseURL: acceleration.ControlBaseURL, BackendBaseURL: acceleration.BackendBaseURL,
+		Enabled: acceleration.Enabled, CacheMode: acceleration.CacheMode,
+		PrefetchHorizon:      acceleration.PrefetchHorizon,
+		PrefetchSharePercent: acceleration.PrefetchSharePercent,
+		ControlBaseURL:       acceleration.ControlBaseURL, BackendBaseURL: acceleration.BackendBaseURL,
 		LeaseTTLSeconds:             acceleration.LeaseTTLSeconds,
 		UploadRateBytesPerSecond:    acceleration.UploadRateBytesPerSecond,
 		MaxObjectBytes:              acceleration.MaxObjectBytes,
@@ -168,9 +176,17 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	publishOnReady := true
-	if body.PublishOnCacheReady != nil {
-		publishOnReady = *body.PublishOnCacheReady
+	cacheMode := strings.TrimSpace(body.CacheMode)
+	if cacheMode == "" {
+		cacheMode = store.CacheModePrefetchAndHeat
+	}
+	prefetchHorizon := store.DefaultPrefetchHorizon
+	if body.PrefetchHorizon != nil {
+		prefetchHorizon = *body.PrefetchHorizon
+	}
+	prefetchShare := store.DefaultPrefetchSharePercent
+	if body.PrefetchSharePercent != nil {
+		prefetchShare = *body.PrefetchSharePercent
 	}
 	if body.LeaseTTLSeconds == 0 {
 		body.LeaseTTLSeconds = 600
@@ -206,6 +222,11 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration limits")
 		return
 	}
+	if err := validateAccelerationCachePolicy(cacheMode, prefetchHorizon, prefetchShare,
+		body.StorageLowWatermarkPercent); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	publisherToken, publisherHash, err := distribution.NewCredential("publisher")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to create publisher credential")
@@ -223,7 +244,8 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 	}
 	acceleration, err := s.st.CreateAcceleration(r.Context(), store.Acceleration{
 		ID: body.ID, Name: body.Name, Kind: body.Kind,
-		PublishOnCacheReady: publishOnReady, ControlBaseURL: controlURL,
+		CacheMode: cacheMode, PrefetchHorizon: prefetchHorizon,
+		PrefetchSharePercent: prefetchShare, ControlBaseURL: controlURL,
 		BackendBaseURL: backendURL, LeaseTTLSeconds: body.LeaseTTLSeconds,
 		UploadRateBytesPerSecond: uploadRate, MaxObjectBytes: body.MaxObjectBytes,
 		StorageBudgetBytes:          body.StorageBudgetBytes,
@@ -270,8 +292,10 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	}
 	update := store.AccelerationUpdate{
 		Name: current.Name, Enabled: current.Enabled,
-		PublishOnCacheReady: current.PublishOnCacheReady,
-		ControlBaseURL:      current.ControlBaseURL, BackendBaseURL: current.BackendBaseURL,
+		CacheMode:            current.CacheMode,
+		PrefetchHorizon:      current.PrefetchHorizon,
+		PrefetchSharePercent: current.PrefetchSharePercent,
+		ControlBaseURL:       current.ControlBaseURL, BackendBaseURL: current.BackendBaseURL,
 		LeaseTTLSeconds:             current.LeaseTTLSeconds,
 		UploadRateBytesPerSecond:    current.UploadRateBytesPerSecond,
 		MaxObjectBytes:              current.MaxObjectBytes,
@@ -284,8 +308,14 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	if body.Name != nil {
 		update.Name = strings.TrimSpace(*body.Name)
 	}
-	if body.PublishOnCacheReady != nil {
-		update.PublishOnCacheReady = *body.PublishOnCacheReady
+	if body.CacheMode != nil {
+		update.CacheMode = strings.TrimSpace(*body.CacheMode)
+	}
+	if body.PrefetchHorizon != nil {
+		update.PrefetchHorizon = *body.PrefetchHorizon
+	}
+	if body.PrefetchSharePercent != nil {
+		update.PrefetchSharePercent = *body.PrefetchSharePercent
 	}
 	if body.ControlBaseURL != nil {
 		update.ControlBaseURL = strings.TrimSpace(*body.ControlBaseURL)
@@ -330,6 +360,11 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid acceleration configuration")
 		return
 	}
+	if err := validateAccelerationCachePolicy(update.CacheMode, update.PrefetchHorizon,
+		update.PrefetchSharePercent, update.StorageLowWatermarkPercent); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	if update.ControlBaseURL, update.BackendBaseURL, err = validateAccelerationURLs(update.ControlBaseURL, update.BackendBaseURL); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -338,7 +373,9 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 	var healthDetail string
 	if !current.Enabled && update.Enabled {
 		current.Name = update.Name
-		current.PublishOnCacheReady = update.PublishOnCacheReady
+		current.CacheMode = update.CacheMode
+		current.PrefetchHorizon = update.PrefetchHorizon
+		current.PrefetchSharePercent = update.PrefetchSharePercent
 		current.ControlBaseURL = update.ControlBaseURL
 		current.BackendBaseURL = update.BackendBaseURL
 		current.LeaseTTLSeconds = update.LeaseTTLSeconds
@@ -662,6 +699,32 @@ func (s *Server) accelerationInventoryStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"storage": storageStatus, "scan": scan})
+}
+
+// validateAccelerationCachePolicy 校验缓存模式与两个预取参数。
+//
+// prefetch_share_percent 必须不大于低水位：GC 的回收目标是低水位，而被钉住的部分
+// 它动不了。份额上限一旦越过低水位，GC 永远够不到目标，资源会陷入永久的存储压力。
+func validateAccelerationCachePolicy(mode string, horizon, sharePercent, lowWatermark int) error {
+	if mode != store.CacheModePrefetch && mode != store.CacheModePrefetchAndHeat {
+		return fmt.Errorf("cache_mode must be %q or %q",
+			store.CacheModePrefetch, store.CacheModePrefetchAndHeat)
+	}
+	if horizon < 0 || horizon > 20 {
+		return errors.New("prefetch_horizon must be between 0 and 20")
+	}
+	if mode == store.CacheModePrefetch && horizon == 0 {
+		return errors.New("prefetch_horizon must be at least 1 in prefetch mode; " +
+			"the queue horizon is the only demand source, so 0 would cache nothing")
+	}
+	if sharePercent < 1 || sharePercent > 100 {
+		return errors.New("prefetch_share_percent must be between 1 and 100")
+	}
+	if mode == store.CacheModePrefetchAndHeat && sharePercent > lowWatermark {
+		return errors.New("prefetch_share_percent must not exceed storage_low_watermark_percent; " +
+			"pinned objects are not reclaimable, so a larger share makes the low watermark unreachable")
+	}
+	return nil
 }
 
 func validateAccelerationURLs(controlRaw, backendRaw string) (string, string, error) {
