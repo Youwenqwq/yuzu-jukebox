@@ -713,6 +713,10 @@ func validateAccelerationCachePolicy(mode string, horizon, sharePercent, lowWate
 	if horizon < 0 || horizon > 20 {
 		return errors.New("prefetch_horizon must be between 0 and 20")
 	}
+	if mode == store.CacheModePrefetch && horizon == 0 {
+		return errors.New("prefetch_horizon must be at least 1 in prefetch mode; " +
+			"the queue horizon is the only demand source, so 0 would cache nothing")
+	}
 	if sharePercent < 1 || sharePercent > 100 {
 		return errors.New("prefetch_share_percent must be between 1 and 100")
 	}

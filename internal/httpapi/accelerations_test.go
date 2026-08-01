@@ -249,3 +249,37 @@ func authenticatedJSONRequest(
 	handler.ServeHTTP(recorder, request)
 	return recorder
 }
+
+func TestValidateAccelerationCachePolicy(t *testing.T) {
+	const low = 65
+	cases := []struct {
+		name    string
+		mode    string
+		horizon int
+		share   int
+		wantErr bool
+	}{
+		{"默认配置", store.CacheModePrefetchAndHeat, 2, 20, false},
+		{"份额等于低水位可用", store.CacheModePrefetchAndHeat, 2, low, false},
+		// 钉住的对象 GC 动不了，份额越过低水位后回收目标永远够不到。
+		{"份额越过低水位", store.CacheModePrefetchAndHeat, 2, low + 1, true},
+		// 仅待播模式没有热集要保护，份额是死值，不做这条交叉校验。
+		{"仅待播模式不校验份额", store.CacheModePrefetch, 2, 100, false},
+		// 视界是仅待播模式唯一的需求来源，为 0 等于什么都不缓存。
+		{"仅待播模式视界为零", store.CacheModePrefetch, 0, 20, true},
+		{"混合模式视界为零合法", store.CacheModePrefetchAndHeat, 0, 20, false},
+		{"视界超上限", store.CacheModePrefetchAndHeat, 21, 20, true},
+		{"视界为负", store.CacheModePrefetchAndHeat, -1, 20, true},
+		{"份额为零", store.CacheModePrefetchAndHeat, 2, 0, true},
+		{"未知模式", "heat_only", 2, 20, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAccelerationCachePolicy(tc.mode, tc.horizon, tc.share, low)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validate(%q, %d, %d, %d) = %v, wantErr %v",
+					tc.mode, tc.horizon, tc.share, low, err, tc.wantErr)
+			}
+		})
+	}
+}
