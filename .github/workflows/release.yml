@@ -1,0 +1,29 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        run: |
+          for c in yuzu-server yuzu-cli yuzu-agent yuzu-edgeone; do
+            GOOS=linux GOARCH=${{ matrix.arch }} go build -trimpath -o dist/${c}-linux-${{ matrix.arch }} ./cmd/$c
+          done
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
