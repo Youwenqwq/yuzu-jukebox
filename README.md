@@ -185,4 +185,4 @@ Agent 自动断线重连、同步播放进度，始终绑定到已分配的房�
 
 ## License
 
-MIT
+[AGPL-3.0](LICENSE)

@@ -185,4 +185,4 @@ For low-bandwidth public servers, an optional [EdgeOne CDN offload](docs/edgeone
 
 ## License
 
-MIT
+[AGPL-3.0](LICENSE)
