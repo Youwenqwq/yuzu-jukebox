@@ -352,7 +352,7 @@ func init() {
 			},
 		},
 		"search": {
-			usage: "search <关键词> [-provider local|ncm]",
+			usage: "search <关键词> [-provider local|ncm|bili]",
 			desc:  "搜索曲目",
 			detail: `在指定 provider 上搜索曲目，输出 track_ref / 标题 / 艺术家 / 时长。
 track_ref 用于 add 点歌。
