@@ -4,10 +4,11 @@
 
 Music jukebox server: multi-room, multi-provider, queue-based playback with real-time WebSocket push. Written in Go, standard library `net/http`, SQLite backend.
 
-Three binaries:
+Four binaries:
 - `yuzu-server` — the HTTP+WS server
 - `yuzu-cli` — CLI control and administration client
 - `yuzu-agent` — MPV-based headless playback renderer (player plane)
+- `yuzu-edgeone` — optional EdgeOne publisher adapter (media CDN offload)
 
 ## Directory Layout
 
@@ -16,6 +17,7 @@ cmd/
   yuzu-server/      — main() entry, loads config, assembles deps via app.New()
   yuzu-cli/         — CLI client
   yuzu-agent/       — headless player (MPV)
+  yuzu-edgeone/     — EdgeOne publisher adapter (optional, CDN offload)
 internal/
   app/              — dependency assembly (app.New), returns http.Handler + store
   auth/             — session management, guest/OIDC auth, ticket auth, roles
@@ -24,14 +26,17 @@ internal/
   control/           — shared room command/query service and room-scoped authorization
   config/           — Config struct, JSON deserialization, defaults
   credmon/          — hot-reload credential monitor for providers
+  distribution/     — acceleration service: leases, candidates, capacity & GC governance
+  edgeonepublisher/ — EdgeOne adapter: upload, inventory, deletion client
   httpapi/          — REST handlers: /api/v1/*, /stream/v1/*, /api/v1/cover/*
+  shortcode/        — Crockford Base32 short-code helpers
   wsapi/            — WebSocket handler: /ws/v1
   provider/         — Track provider abstraction + registry
     local/          — local media file provider
     ncm/            — NeteaseCloudMusicApi provider
     bili/           — bilibili-api provider
   room/             — room actor: queue, playback state machine, radio mode, broadcast
-  store/            — SQLite via sqlx, goose migrations
+  store/            — SQLite via database/sql + modernc, goose migrations
 data/
   yuzu.db          — SQLite database
   cache/           — audio cache files
@@ -54,22 +59,16 @@ Cover       ←→ /api/v1/cover/{ref}  (proxy to provider cover, unauthenticate
 
 ### Authentication Flow
 
-1. Guest: `POST /api/v1/auth/guest` with password (optional admin password) → session_token
-2. OIDC: `POST /api/v1/auth/oidc` with id_token → session_token
-3. Session token used as `Authorization: Bearer <token>` for REST
-4. Stream: ticket-based auth in query param (for `<audio>` tags, no headers)
-5. Cover: **no auth required** (for `<img>` tags)
-6. Integration: a long-lived hashed machine credential resolves an external scope/subject to a 5-minute actor session
-7. Authorization always reloads the current Principal and Room grant; Integration credentials do not carry Yuzu roles
+Authoritative contract: [docs/spec-v1.md](docs/spec-v1.md) §3 (auth) and §4.6 (stream tickets). Quick reference:
+- Guest/OIDC login issues a `session_token` used as `Authorization: Bearer <token>` for REST; WS accepts the same token to establish a connection identity.
+- Streams use ticket auth in the query param (for `<audio>` tags, no headers); covers need **no auth** (for `<img>` tags).
+- An Integration credential only calls `POST /api/v1/integrations/actors/resolve` to map an external scope/subject to a 5-minute actor session; it carries no Yuzu roles, and authorization always reloads the current Principal and Room grant.
 
 ### Room → Playback Flow
 
-1. Client joins room via WS (`room.join` with room_id + optional password)
-2. Server pushes 5 snapshots: `room.joined`, `playback.changed`, `queue.changed`, `radio.changed`, `listeners.changed`
-3. Client adds to queue (`queue.add` with track_ref)
-4. Room actor: dequeue → Resolve track → cache → push to renderer
-5. Current track gets a signed `stream_url` with ticket
-6. Next track: pre-resolved when current enters PLAYING state
+Authoritative sequencing: [docs/spec-v1.md](docs/spec-v1.md) §4 (room session) and §5 (state machine). Quick reference:
+- After WS `room.join`, the server pushes current state: `playback.changed`, revisioned `queue.snapshot`/`queue.patch`, `radio.changed`, `listeners.changed`.
+- The current track arrives via `playback.changed` with an identity-bound `stream_url` (ticket); the next track is pre-resolved and pre-cached when the current one enters PLAYING.
 
 ## Code Conventions
 
@@ -101,7 +100,7 @@ Cover       ←→ /api/v1/cover/{ref}  (proxy to provider cover, unauthenticate
 
 ### WS Handler Initialization
 ```go
-ws := wsapi.NewServer(authm, rooms, reg)
+ws := wsapi.NewServer(authm, playerAuth, controlService, playerBindings)
 // mount via mux.Handle("/ws/v1", sws)
 ```
 
@@ -138,17 +137,24 @@ All fields optional if not needed. `secret_key` auto-generated on first run.
 
 ## Database
 
-- **Driver**: `github.com/jmoiron/sqlx` (sqlite3)
+- **Driver**: `database/sql` + `modernc.org/sqlite` (pure Go, no CGO; WAL, busy_timeout, foreign_keys pragmas)
 - **Migrations**: goose, in `internal/store/migrations/`
-- **Key tables**: `sessions`, `principals/users`, `integrations`, `external_scope_rooms`, `external_identity_links`, `room_principal_grants`, `idempotency_records`, `rooms`, `room_queue`, `playlists`, `playlist_items`, `credentials`
+- **Key tables** (grouped):
+  - Identity/sessions/credentials: `users`, `sessions`, `credentials`
+  - Rooms/queue/media: `rooms`, `room_queue`, `play_history`, `media_files`, `media_cache`, `audit_log`
+  - Playlists: `playlists`, `playlist_items`
+  - Integrations/grants: `integrations`, `external_scope_rooms`, `external_identity_links`, `external_binding_codes`, `room_principal_grants`, `idempotency_records`
+  - Players: `players`, `room_player_bindings`, `room_output_state`
+  - Acceleration: `accelerations`, `distribution_*`, `acceleration_*`
 - **Secrets**: provider credentials use AES-GCM with `secret_key`; Integration tokens are high-entropy bearer credentials stored only as hashes and shown once.
 
 ## Build & Run
 
 ```bash
-go build ./cmd/yuzu-server           # → bin/yuzu-server
-go build ./cmd/yuzu-cli              # → bin/yuzu-cli
-go build ./cmd/yuzu-agent            # → bin/yuzu-agent
+go build -o bin/yuzu-server  ./cmd/yuzu-server
+go build -o bin/yuzu-cli     ./cmd/yuzu-cli
+go build -o bin/yuzu-agent   ./cmd/yuzu-agent
+go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone   # optional: EdgeOne media offload
 ./bin/yuzu-server -config config.json
 ```
 
@@ -167,13 +173,17 @@ go build ./cmd/yuzu-agent            # → bin/yuzu-agent
 | `media_admin` | Manage media, upload, provider credentials |
 | Room grant `controller` | Control playback, radio and queue ordering in one Room; not a global role |
 
-## Planned Identity Follow-ups
+## Identity Follow-ups
 
-Keep these separate from Integration credential lifecycle work:
+Keep these separate from Integration credential lifecycle work.
 
-1. **OIDC self-service IM binding (priority)** — authenticated OIDC users generate a short-lived, one-time code and redeem it from the target IM subject through a trusted Integration, proving ownership without an administrator copying Principal IDs.
-2. **Principal lifecycle administration** — add first-party disable/enable, link/grant inspection, and bulk external-access revocation. The persisted `active` flag already enforces disabled Principals, but no complete admin workflow exists yet.
-3. **OIDC role refresh/revocation strategy** — roles currently refresh when OIDC login updates the Principal; IdP-side removal is not pushed immediately. Choose webhook/SCIM/periodic refresh later rather than implying real-time revocation.
+Done:
+1. **OIDC self-service external-subject binding** — implemented (spec-v1 §3.7; `POST /api/v1/auth/external-binding-codes` + `POST /api/v1/integrations/bindings/redeem`; migration 0008).
+2. **Principal and grant administration queries** — implemented: principal list (`GET /api/v1/principals`), Integration scope/subject binding management, and Room controller grant/revoke.
+
+Still planned:
+1. **Principal lifecycle administration** — first-party disable/enable and bulk external-access revocation have no admin endpoints yet; the persisted `active` flag already enforces disabled Principals, but no complete admin workflow exists.
+2. **OIDC role refresh/revocation strategy** — roles refresh when OIDC login updates the Principal; IdP-side removal is not pushed immediately. Choose webhook/SCIM/periodic refresh later rather than implying real-time revocation.
 
 ## Agent Caveats
 

@@ -3,10 +3,12 @@
 自托管的多房间音乐点唱机——从多个来源点歌、跨房间同步播放，
 通过 CLI、WebUI 或聊天机器人控制一切。
 
+> **开发阶段说明**：当前版本仍处于开发阶段，基本功能已经可用，可搭配 [yuzu-jukebox-webui](https://github.com/Youwenqwq/yuzu-jukebox-webui) 使用；接口定义可能随时变更，不建议用于生产环境。
+
 ## 能做什么？
 
 - **多房间播放** — 每个房间独立队列、独立播放状态、独立听众
-- **多来源支持** — 本地文件、网易云音乐、Bilibili 搜索与播放
+- **多来源支持** — 本地文件、网易云音乐，更多来源开发中...
 - **实时同步** — WebSocket 推送播放状态，所有客户端百毫秒级对齐
 - **无头播放** — `yuzu-agent` 装在任何有 MPV 的机器上，充当房间音箱
 - **聊天机器人集成** — 通过 Integration API 接入 Discord/Telegram/IM Bot
@@ -42,15 +44,15 @@ yuzu-agent     Web browser
 
 | 层 | 技术 |
 |---|------|
-| 服务端 | Go 1.22+，`net/http` 标准库，WebSocket |
+| 服务端 | Go 1.26+，`net/http` 标准库，WebSocket |
 | 数据库 | SQLite（WAL 模式，goose 迁移） |
 | 播放代理 | MPV（JSON IPC） |
 | 认证 | Guest、OIDC（Zitadel）、会话令牌、流票据鉴权 |
-| Provider | NeteaseCloudMusicApi、bilibili-api（sidecar 进程） |
+| Provider | NeteaseCloudMusicApi（sidecar 进程）；Bilibili 暂不可用 |
 
 ## 快速开始
 
-**前置条件：** Go 1.22+。播放代理需要 [MPV](https://mpv.io/)。
+**前置条件：** Go 1.26+。播放代理需要 [MPV](https://mpv.io/)。
 
 ```bash
 # 构建
@@ -68,12 +70,11 @@ go build -o bin/yuzu-cli    ./cmd/yuzu-cli
 {
   "addr": ":8080",
   "admin_password": "change-me",
-  "ncm": { "enabled": true, "base_url": "http://127.0.0.1:3000", "level": "exhigh" },
-  "bili": { "enabled": true, "base_url": "http://127.0.0.1:3002" }
+  "ncm": { "enabled": true, "base_url": "http://127.0.0.1:3000", "level": "exhigh" }
 }
 ```
 
-NCM 和 Bili 需要各自运行 sidecar API——见下方[外部依赖](#外部依赖)。
+NCM 需要运行 sidecar API——见下方[外部依赖](#外部依赖)。
 
 ## 基本使用
 
@@ -108,7 +109,7 @@ yuzu-cli queue lobby
 
 | 命令 | 说明 |
 |------|------|
-| `yuzu-cli search <关键词> [-provider ncm\|bili\|local]` | 搜索曲目 |
+| `yuzu-cli search <关键词> [-provider local\|ncm]` | 搜索曲目 |
 | `yuzu-cli add <房间> <track_ref>...` | 点歌入队 |
 | `yuzu-cli queue <房间>` | 查看当前播放与队列 |
 | `yuzu-cli skip <房间>` | 切歌 |
@@ -134,8 +135,8 @@ yuzu-cli player create living-room "客厅音箱"
 # 保存输出中的一次性 key！
 yuzu-cli player bind living-room lobby
 
-# 在音箱机器上：
-YUZU_PLAYER_KEY=yzp_xxx ./bin/yuzu-agent
+# 在音箱机器上（默认连 http://127.0.0.1:8080；音箱在其他机器时用 YUZU_SERVER 指定服务器）：
+YUZU_SERVER=http://<服务器地址>:8080 YUZU_PLAYER_KEY=yzp_xxx ./bin/yuzu-agent
 ```
 
 Agent 自动断线重连、同步播放进度，始终绑定到已分配的房间。
@@ -147,7 +148,7 @@ Agent 自动断线重连、同步播放进度，始终绑定到已分配的房�
 | Provider | Sidecar | 默认地址 |
 |----------|---------|---------|
 | 网易云音乐 | [NeteaseCloudMusicApi](https://github.com/neteasecloudmusicapienhanced/api-enhanced) | `http://127.0.0.1:3000` |
-| Bilibili | bilibili-api（WBI 签名 / DASH 音频选轨 / 风控） | `http://127.0.0.1:3002` |
+| Bilibili | 暂不可用 | — |
 
 在 config 中设 `"enabled": false` 即可禁用对应 Provider。
 
@@ -161,7 +162,7 @@ Agent 自动断线重连、同步播放进度，始终绑定到已分配的房�
 
 **运行环境：** Linux 服务器（x86/ARM）。Agent 可运行在任何有 MPV 的 Linux 机器上——树莓派、旧笔记本皆可。
 
-公网源站带宽较小时，可选 [EdgeOne CDN 旁路分发](docs/edgeone-distribution.md)。
+公网源站带宽较小时，可评估 [EdgeOne CDN 旁路分发](docs/edgeone-distribution.md)——**实验性功能，仍在开发中，暂不建议使用**。
 
 ## 文档
 
@@ -169,7 +170,7 @@ Agent 自动断线重连、同步播放进度，始终绑定到已分配的房�
 |------|------|
 | [docs/spec-v1.md](docs/spec-v1.md) | 协议、房间状态机、认证流程、Integration 契约 |
 | [docs/deploy.md](docs/deploy.md) | 生产环境部署指南 |
-| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN 旁路设计 |
+| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN 旁路设计（实验性） |
 | [AGENTS.md](AGENTS.md) | 代码库指南（面向贡献者与 Coding Agent） |
 
 ## 权限

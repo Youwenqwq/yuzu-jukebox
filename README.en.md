@@ -3,10 +3,12 @@
 A self-hosted multi-room music jukebox — queue up tracks from multiple sources,
 play them in sync across rooms, and control everything from CLI, Web UI, or chat bots.
 
+> **Development status**: this release is still under active development. The core features work and can be used with [yuzu-jukebox-webui](https://github.com/Youwenqwq/yuzu-jukebox-webui); the API contract may change at any time and is not recommended for production.
+
 ## What can it do?
 
 - **Multi-room playback** — each room has its own queue, playback state, and listeners
-- **Multi-provider** — search and play from local files, Netease Cloud Music, and Bilibili
+- **Multi-provider** — local files and Netease Cloud Music; Bilibili (not available yet)
 - **Real-time sync** — WebSocket-pushed playback state; all clients stay in sync within ~100ms
 - **Headless playback** — `yuzu-agent` runs on any machine with MPV and acts as a room speaker
 - **Chat bot integration** — connect Discord/Telegram/IM bots via the Integration API
@@ -42,15 +44,15 @@ yuzu-agent     Web browser
 
 | Layer | Tech |
 |-------|------|
-| Server | Go 1.22+, `net/http` (stdlib), WebSocket |
+| Server | Go 1.26+, `net/http` (stdlib), WebSocket |
 | Database | SQLite (WAL mode, goose migrations) |
 | Playback agent | MPV (JSON IPC) |
 | Auth | Guest, OIDC (Zitadel), session tokens, ticket-based stream auth |
-| Providers | NeteaseCloudMusicApi, bilibili-api (sidecar processes) |
+| Providers | NeteaseCloudMusicApi (sidecar process); Bilibili not available yet |
 
 ## Quick start
 
-**Prerequisites:** Go 1.22+. For the playback agent: [MPV](https://mpv.io/).
+**Prerequisites:** Go 1.26+. For the playback agent: [MPV](https://mpv.io/).
 
 ```bash
 # Build
@@ -68,12 +70,11 @@ Edit `config.json` to enable providers:
 {
   "addr": ":8080",
   "admin_password": "change-me",
-  "ncm": { "enabled": true, "base_url": "http://127.0.0.1:3000", "level": "exhigh" },
-  "bili": { "enabled": true, "base_url": "http://127.0.0.1:3002" }
+  "ncm": { "enabled": true, "base_url": "http://127.0.0.1:3000", "level": "exhigh" }
 }
 ```
 
-NCM and Bili require running their sidecar APIs — see [External Dependencies](#external-dependencies) below.
+NCM requires running its sidecar API — see [External Dependencies](#external-dependencies) below.
 
 ## Basic usage
 
@@ -108,7 +109,7 @@ yuzu-cli queue lobby
 
 | Command | What it does |
 |---------|-------------|
-| `yuzu-cli search <query> [-provider ncm\|bili\|local]` | Search tracks |
+| `yuzu-cli search <query> [-provider local\|ncm]` | Search tracks |
 | `yuzu-cli add <room> <track_ref>...` | Add to queue |
 | `yuzu-cli queue <room>` | Show current track + queue |
 | `yuzu-cli skip <room>` | Skip to next track |
@@ -134,8 +135,8 @@ yuzu-cli player create living-room "Living Room Speaker"
 # Save the one-time key from output!
 yuzu-cli player bind living-room lobby
 
-# On the speaker machine:
-YUZU_PLAYER_KEY=yzp_xxx ./bin/yuzu-agent
+# On the speaker machine (defaults to http://127.0.0.1:8080; use YUZU_SERVER when the speaker is on another machine):
+YUZU_SERVER=http://<server-address>:8080 YUZU_PLAYER_KEY=yzp_xxx ./bin/yuzu-agent
 ```
 
 The agent auto-reconnects, syncs playback position, and stays bound to its assigned room.
@@ -147,7 +148,7 @@ These run as separate sidecar processes:
 | Provider | Sidecar | Default URL |
 |----------|---------|-------------|
 | Netease Cloud Music | [NeteaseCloudMusicApi](https://github.com/neteasecloudmusicapienhanced/api-enhanced) | `http://127.0.0.1:3000` |
-| Bilibili | bilibili-api (WBI signing, DASH audio, risk control) | `http://127.0.0.1:3002` |
+| Bilibili | not available yet (sidecar not public) | — |
 
 Disable any provider by setting `"enabled": false` in config.
 
@@ -161,7 +162,7 @@ See [docs/deploy.md](docs/deploy.md) for production setup:
 
 **Where it runs:** Linux server (x86/ARM). The agent runs on any Linux machine with MPV — Raspberry Pi, old laptop, etc.
 
-For low-bandwidth public servers, an optional [EdgeOne CDN offload](docs/edgeone-distribution.md) is available.
+For low-bandwidth public servers, an optional [EdgeOne CDN offload](docs/edgeone-distribution.md) can be evaluated — **experimental, still under development, not recommended for now**.
 
 ## Documentation
 
@@ -169,7 +170,7 @@ For low-bandwidth public servers, an optional [EdgeOne CDN offload](docs/edgeone
 |-----|---------|
 | [docs/spec-v1.md](docs/spec-v1.md) | Wire protocol, room state machine, auth flow, integration contract |
 | [docs/deploy.md](docs/deploy.md) | Production deployment guide |
-| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN offload design |
+| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN offload design (experimental) |
 | [AGENTS.md](AGENTS.md) | Codebase guide for contributors and coding agents |
 
 ## Permissions

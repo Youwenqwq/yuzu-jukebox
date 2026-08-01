@@ -788,7 +788,7 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/media/cache` | `media_admin` | 返回 `entries`、进行中的 `downloads`、内存态最近 20 条 `history`、`total_bytes` 与 `max_bytes` |
 | `DELETE /api/v1/media/cache/{track_ref}` | `media_admin` | 手动清理单条缓存 |
 | `POST /api/v1/media/cache/prune` | `media_admin` | `{unused_days:N}`（非负整数，`N=0` 清空）；跳过下载中条目，返回 `{evicted,freed_bytes}` |
-| `GET /api/v1/cover/{track_ref}` | — | 公开统一封面代理，Cache-Control 1 天 |
+| `GET /api/v1/cover/{track_ref}` | — | 公开统一封面代理，Cache-Control 30 天（`public, max-age=2592000`） |
 | `GET /api/v1/lyrics?track_ref=` | `listener` | `{type:"lrc",lrc,tlrc?}`；Provider 无能力时 501 `not_supported` |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |
 
@@ -1164,5 +1164,3 @@ _, err = client.RESTBindRoomPlayer(ctx, server, roomAdminToken, roomID, player.P
 writeCtx := client.WithIdempotencyKey(ctx, platformEventID)
 _, err = client.RESTRoomQueueAdd(writeCtx, server, actorToken, roomID, trackRef)
 ```
-
-Integration 的 `created.Token` / `rotated.Token` 与 Player 的 `player.Key` 只应写入 secret store，不得记录日志。`caps.Controller` 是服务端 Authorizer 的最终判断；管理查询 DTO 可用于选择目标后调用 scope/subject/grant/Player helpers，无需读取服务端配置或 secret。

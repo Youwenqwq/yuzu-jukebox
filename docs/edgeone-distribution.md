@@ -209,7 +209,7 @@ manifest 至少包含：
 - [x] GET signing 提供 SDK 兼容检查、120 秒 TTL，并在不可用时回退现有源站。
 - [x] 增加发布成功率、上传字节、回退次数、ready 延迟、Blob 响应时间指标。
 
-### P1 生产化：托管资源、观测与主域名接入（已实现）
+### P1 生产化：托管资源、观测与主域名接入（代码已实现，待主域名部署回归）
 
 - [x] acceleration 改为 `media_admin` 可创建、停用和管理的持久资源，移除 Server JSON 配置。
 - [x] publisher/delivery/backend 使用独立凭据；出站 backend secret 经 `secret_key` AES-GCM 加密。

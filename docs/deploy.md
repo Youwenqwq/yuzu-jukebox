@@ -80,6 +80,9 @@ Yuzu 拉取并缓存的媒体文件分发；Provider 拉流、现有 `/stream/v1
 `/stream/v1/*` 配置 URL path 触发规则。REST、WebSocket、管理接口和 SPA 仍按站点原有
 规则回源。Makers 仅保留 control/backend Cloud Functions。Core 使用 850 MiB 默认预算及
 95%/85% 水位；adapter 负责 Blob inventory、orphan/missing reconciliation 和删除 job。
+外部加速存储能力较小时应调低低水位（`storage_low_watermark_percent`），按可用空间留足
+余量：低水位是 GC 的回收目标，被钉住的预取对象不可被驱逐，钉住份额一旦越过低水位，
+GC 永远收不到目标，容量压力会反复出现。
 具体资源创建、凭据、容量字段、触发规则与健康检查见
 [EdgeOne 旁路分发设计与部署](edgeone-distribution.md)。
 
