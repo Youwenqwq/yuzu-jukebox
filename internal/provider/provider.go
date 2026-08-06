@@ -216,6 +216,14 @@ type PlayReporter interface {
 	ReportPlay(ctx context.Context, id string, playedMs, totalMs int64) error
 }
 
+// AccountPlaylist 凭据账号下的歌单摘要（playlist_add 的目标选择）。
+type AccountPlaylist struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	CoverURL   string `json:"cover_url,omitempty"`
+	TrackCount int    `json:"track_count"`
+}
+
 // AccountWriter 是可选接口：支持对凭据账号做写操作的 Provider 实现它。
 // 授权（acting Principal == 凭据 owner）由调用方在 API 层完成；
 // 实现只负责用内部凭据执行，凭据永不下发。
@@ -223,8 +231,12 @@ type AccountWriter interface {
 	Provider
 	// Like 将曲目加入"我喜欢的音乐"。id 为 TrackRef 的 id 段。
 	Like(ctx context.Context, id string) error
+	// LikeCheck 回读喜欢状态（❤ 的客户端显隐/填充）。
+	LikeCheck(ctx context.Context, id string) (bool, error)
 	// AddToPlaylist 将曲目加入凭据账号的指定歌单。
 	AddToPlaylist(ctx context.Context, playlistID, trackID string) error
+	// AccountPlaylists 列出凭据账号的歌单（加歌单 UI 的目标枚举）。
+	AccountPlaylists(ctx context.Context) ([]AccountPlaylist, error)
 }
 
 // Registry 是 provider 注册表。

@@ -76,9 +76,14 @@ func (p *providerCategorySearcherFake) EntityTracks(
 
 type providerAccountWriterFake struct {
 	providerEndpointBase
-	st            *store.Store
-	likeCalls     []string
-	playlistCalls [][2]string
+	st                   *store.Store
+	likeCalls            []string
+	likeCheckCalls       []string
+	likeCheckErr         error
+	playlistCalls        [][2]string
+	accountPlaylists     []provider.AccountPlaylist
+	accountPlaylistsErr  error
+	accountPlaylistCalls int
 }
 
 func (p *providerAccountWriterFake) ReportPlay(context.Context, string, int64, int64) error {
@@ -90,10 +95,21 @@ func (p *providerAccountWriterFake) Like(_ context.Context, id string) error {
 	return nil
 }
 
+func (p *providerAccountWriterFake) LikeCheck(_ context.Context, id string) (bool, error) {
+	p.likeCheckCalls = append(p.likeCheckCalls, id)
+	return true, p.likeCheckErr
+}
+
 func (p *providerAccountWriterFake) AddToPlaylist(_ context.Context, playlistID, trackID string) error {
 	p.playlistCalls = append(p.playlistCalls, [2]string{playlistID, trackID})
 	return nil
 }
+
+func (p *providerAccountWriterFake) AccountPlaylists(context.Context) ([]provider.AccountPlaylist, error) {
+	p.accountPlaylistCalls++
+	return p.accountPlaylists, p.accountPlaylistsErr
+}
+
 func (p *providerAccountWriterFake) SetCredential(ctx context.Context, payload string) error {
 	return p.st.UpsertCredential(ctx, p.ID(), payload, "ok")
 }
@@ -147,6 +163,12 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 	writer := &providerAccountWriterFake{
 		providerEndpointBase: providerEndpointBase{id: "writer"},
 		st:                   st,
+		accountPlaylists: []provider.AccountPlaylist{{
+			ID:         "playlist-7",
+			Name:       "测试歌单",
+			CoverURL:   "https://example.com/playlist.jpg",
+			TrackCount: 23,
+		}},
 	}
 	category := &providerCategorySearcherFake{
 		providerEndpointBase: providerEndpointBase{id: "categorized"},
@@ -299,6 +321,99 @@ func TestProviderAccountWriteEndpoints(t *testing.T) {
 	}
 }
 
+func TestProviderAccountPlaylists(t *testing.T) {
+	f := setupProviderEndpoints(t)
+
+	owner := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/account-playlists", f.ownerToken, nil)
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner account-playlists status = %d, body = %s", owner.Code, owner.Body.String())
+	}
+	var ownerBody struct {
+		Playlists []provider.AccountPlaylist `json:"playlists"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &ownerBody); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ownerBody.Playlists, f.writer.accountPlaylists) {
+		t.Fatalf("account playlists = %#v, want %#v", ownerBody.Playlists, f.writer.accountPlaylists)
+	}
+	if f.writer.accountPlaylistCalls != 1 {
+		t.Fatalf("account playlist calls = %d", f.writer.accountPlaylistCalls)
+	}
+
+	nonOwner := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/account-playlists", f.otherToken, nil)
+	if nonOwner.Code != http.StatusForbidden {
+		t.Fatalf("non-owner account-playlists status = %d, body = %s", nonOwner.Code, nonOwner.Body.String())
+	}
+	if f.writer.accountPlaylistCalls != 1 {
+		t.Fatalf("non-owner triggered account-playlists: calls = %d", f.writer.accountPlaylistCalls)
+	}
+
+	unsupported := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/basic/account-playlists", f.ownerToken, nil)
+	if unsupported.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported account-playlists status = %d, body = %s", unsupported.Code, unsupported.Body.String())
+	}
+
+	f.writer.accountPlaylistsErr = errors.New("playlist upstream failed")
+	upstreamFailure := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/account-playlists", f.ownerToken, nil)
+	if upstreamFailure.Code != http.StatusBadGateway {
+		t.Fatalf("account-playlists provider error status = %d, body = %s",
+			upstreamFailure.Code, upstreamFailure.Body.String())
+	}
+}
+
+func TestProviderLikeCheck(t *testing.T) {
+	f := setupProviderEndpoints(t)
+
+	owner := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/like-check?track=101", f.ownerToken, nil)
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner like-check status = %d, body = %s", owner.Code, owner.Body.String())
+	}
+	var ownerBody struct {
+		Liked bool `json:"liked"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &ownerBody); err != nil {
+		t.Fatal(err)
+	}
+	if !ownerBody.Liked {
+		t.Fatalf("owner like-check body = %s", owner.Body.String())
+	}
+	if !reflect.DeepEqual(f.writer.likeCheckCalls, []string{"101"}) {
+		t.Fatalf("like-check calls = %#v", f.writer.likeCheckCalls)
+	}
+
+	missingTrack := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/like-check", f.ownerToken, nil)
+	if missingTrack.Code != http.StatusBadRequest {
+		t.Fatalf("missing track status = %d, body = %s", missingTrack.Code, missingTrack.Body.String())
+	}
+	if !reflect.DeepEqual(f.writer.likeCheckCalls, []string{"101"}) {
+		t.Fatalf("missing track triggered like-check: %#v", f.writer.likeCheckCalls)
+	}
+
+	nonOwner := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/like-check?track=202", f.otherToken, nil)
+	if nonOwner.Code != http.StatusForbidden {
+		t.Fatalf("non-owner like-check status = %d, body = %s", nonOwner.Code, nonOwner.Body.String())
+	}
+	if !reflect.DeepEqual(f.writer.likeCheckCalls, []string{"101"}) {
+		t.Fatalf("non-owner triggered like-check: %#v", f.writer.likeCheckCalls)
+	}
+
+	f.writer.likeCheckErr = errors.New("like upstream failed")
+	upstreamFailure := providerEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/providers/writer/like-check?track=303", f.ownerToken, nil)
+	if upstreamFailure.Code != http.StatusBadGateway {
+		t.Fatalf("like-check provider error status = %d, body = %s",
+			upstreamFailure.Code, upstreamFailure.Body.String())
+	}
+}
+
 func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 	f := setupProviderEndpoints(t)
 
@@ -327,7 +442,7 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if !ok {
 			t.Fatalf("writer capabilities = %#v", writer["capabilities"])
 		}
-		if got := capabilities["account_write"]; !reflect.DeepEqual(got, []any{"play_report", "like", "playlist_add"}) {
+		if got := capabilities["account_write"]; !reflect.DeepEqual(got, []any{"play_report", "like", "like_check", "playlist_add"}) {
 			t.Fatalf("writer account_write = %#v", got)
 		}
 		if _, ok := capabilities["radio_sources"]; ok {
@@ -341,7 +456,7 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if !ok {
 			t.Fatalf("ncm capabilities = %#v", ncmEntry["capabilities"])
 		}
-		if got := ncmCapabilities["account_write"]; !reflect.DeepEqual(got, []any{"play_report", "like", "playlist_add"}) {
+		if got := ncmCapabilities["account_write"]; !reflect.DeepEqual(got, []any{"play_report", "like", "like_check", "playlist_add"}) {
 			t.Fatalf("ncm account_write = %#v", got)
 		}
 		wantRadioSources := []any{
@@ -349,6 +464,7 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 			map[string]any{"spec": "fm", "name": "私人 FM", "finite": false},
 			map[string]any{"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false},
 			map[string]any{"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false},
+			map[string]any{"spec": "playlist", "arg": "playlist_id", "name": "歌单电台", "finite": true},
 		}
 		if got := ncmCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantRadioSources) {
 			t.Fatalf("ncm radio_sources = %#v, want %#v", got, wantRadioSources)

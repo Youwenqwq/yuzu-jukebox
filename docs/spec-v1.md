@@ -795,6 +795,8 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/providers/{id}/qrlogin/{key}` | `media_admin` | 返回 waiting / scanned / ok / expired；ok 时凭据已在服务端生效 |
 | `POST /api/v1/providers/{id}/like` | 凭据 owner（标准 session） | body `{"track":"<id>"}`；在该 Provider 的凭据账号上喜欢曲目，非 owner 为 403 |
 | `POST /api/v1/providers/{id}/playlist-add` | 凭据 owner（标准 session） | body `{"playlist_id":"...","track":"<id>"}`；加入该凭据账号的歌单，非 owner 为 403 |
+| `GET /api/v1/providers/{id}/account-playlists` | 凭据 owner（标准 session） | 列出凭据账号的歌单（`{"playlists":[{id,name,cover_url,track_count}]}`），作为 playlist-add 的目标枚举，非 owner 为 403 |
+| `GET /api/v1/providers/{id}/like-check?track=<id>` | 凭据 owner（标准 session） | 回读喜欢状态 `{"liked":bool}`；Client 在 now-playing 变化时自行查询，服务端不广播该私有状态 |
 | `GET /api/v1/playlists` | `requester` | 歌单列表（含曲目数，不含条目） |
 | `POST /api/v1/playlists` | `media_admin` | 创建歌单 `{name, description}` |
 | `GET /api/v1/playlists/{id}?offset=&limit=` | `requester` | 歌单详情 + 条目分页（默认 50，上限 200） |
@@ -803,6 +805,11 @@ Room create/PATCH/list/get 的错误合同：
 | `DELETE /api/v1/playlists/{id}/items/{ord}` | `media_admin` | 按序号删除，后续重排 |
 | `PATCH /api/v1/playlists/{id}/items/{ord}` | `media_admin` | body `{to_ord}`；目标 clamp 到 `[1,len]` |
 | `POST /api/v1/playlists/import` | `media_admin` | `{provider,playlist_id}`（外部歌单；ncm 支持 ID/URL）或 `{source}`（曲目源物化）二选一，可选 `{name}` |
+| `POST /api/v1/playlists/bind` | `media_admin` | `{provider,playlist_id,name?}` 创建 Provider 绑定歌单并首次同步；首次同步失败不留残留；重复绑定 409 `already_bound` |
+| `POST /api/v1/playlists/{id}/sync` | `media_admin` | 手动同步绑定歌单（非绑定 400）；失败保留旧快照并把原因记入 `last_sync_error` |
+| `POST /api/v1/playlists/{id}/detach` | `media_admin` | 解除绑定、保留当前条目，转为普通歌单（非绑定 400） |
+
+**Provider 绑定歌单**：绑定歌单（`bound_provider`/`bound_remote_id` 非空，`GET` 响应含绑定状态与 `last_sync_at`/`last_sync_error`）跟随外部歌单内容，在 yuzu 侧只读——items 追加/删除/移动返回 409 `playlist_bound`，删除整个歌单与 `detach` 不受限。同步语义：成功后整表替换条目（`ReplacePlaylistItems` 单事务，ord 从 0 重排）；**失败绝不破坏现有条目**，保留最后一次成功快照。周期同步由 `playlist_sync_interval_minutes`（默认 0 = 关闭，手动 sync 不受影响）驱动，顺序扫描到期的绑定歌单；同步沿用凭据账号身份，凭据失效即同步失败（快照仍在）。同一 `(provider, playlist_id)` 全库唯一绑定（部分唯一索引）。绑定歌单可直接作为房间电台源 `playlist:<id>` 使用，随同步自动换血。
 | `GET /api/v1/media` | `media_admin` | 按 `created_at` 倒序返回 `track_ref/title/artist/duration_ms/size_bytes/uploaded_by/created_at`；空列表为 `{"media":[]}` |
 | `DELETE /api/v1/media/{ref}` | `media_admin` | 仅接受 `local:` ref；删除媒体行、文件与对应缓存，不级联队列/歌单/历史引用；旧引用以后 Resolve 失败 |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |
@@ -825,7 +832,7 @@ Room create/PATCH/list/get 的错误合同：
       "credential_status": "ok",
       "owned": true,
       "capabilities": {
-        "account_write": ["play_report", "like", "playlist_add"],
+        "account_write": ["play_report", "like", "like_check", "playlist_add"],
         "radio_sources": [
           {"spec": "daily", "name": "每日推荐", "finite": true},
           {"spec": "fm", "name": "私人 FM", "finite": false},
@@ -840,8 +847,8 @@ Room create/PATCH/list/get 的错误合同：
 ```
 
 - `owned` 是按当前请求 Principal 计算的布尔值；仅当该 Principal 等于 3.9 的凭据 owner 时为 `true`。它不是 Provider 全局属性，Client、反向代理与共享缓存均不得把一名用户的值复用于另一名用户。
-- `capabilities.account_write` 是按 Provider 可选接口断言得到的子集：`provider.PlayReporter` 提供 `"play_report"`，`provider.AccountWriter` 提供 `"like"` 与 `"playlist_add"`。两种接口都未实现时省略 `capabilities`。
-- `capabilities.radio_sources` 由实现 `provider.SourceCatalog` 的 Provider 报告，元素为 `{"spec", "arg"?, "name"?, "finite"}`：`spec` 不含 Provider 前缀（Client 组装 `"<provider>:<spec>"`，有 `arg` 时追加 `":<arg>"`）；`finite=false` 的源不适用 `shuffle`/`once`。NCM 报告 `daily`（每日推荐，有限）、`fm`（私人 FM，无限）、`simi`（相似歌曲，需 `track_id`）、`heart`（心动模式，需 `track_id`）；未实现 `SourceFactory` 的 Provider（bili、local）不出现该键。通用源 `playlist:<id>`（yuzu 歌单 DB 游标）由房间层提供、恒可用，不在 Provider 目录中。
+- `capabilities.account_write` 是按 Provider 可选接口断言得到的子集：`provider.PlayReporter` 提供 `"play_report"`，`provider.AccountWriter` 提供 `"like"`、`"like_check"` 与 `"playlist_add"`（账号歌单枚举随 `"playlist_add"` 提供，不单列）。两种接口都未实现时省略 `capabilities`。
+- `capabilities.radio_sources` 由实现 `provider.SourceCatalog` 的 Provider 报告，元素为 `{"spec", "arg"?, "name"?, "finite"}`：`spec` 不含 Provider 前缀（Client 组装 `"<provider>:<spec>"`，有 `arg` 时追加 `":<arg>"`）；`finite=false` 的源不适用 `shuffle`/`once`。NCM 报告 `daily`（每日推荐，有限）、`fm`（私人 FM，无限）、`simi`（相似歌曲，需 `track_id`）、`heart`（心动模式，需 `track_id`）、`playlist`（NCM 歌单电台，需 `playlist_id`，有限）；bili 报告 `fav`（收藏夹电台，需 `media_id`，有限，需登录凭据）；local 不出现该键。通用源 `playlist:<id>`（yuzu 歌单 DB 游标）由房间层提供、恒可用，不在 Provider 目录中——注意区分：`playlist:<id>` 是 yuzu 歌单，`ncm:playlist:<id>` 是 NCM 外部歌单。
 - Client 只有在 `owned == true` 且数组含对应能力时才展示或启用喜欢/加入歌单操作；能力发现不替代服务端 owner 鉴权。
 
 喜欢请求与成功响应：
@@ -902,7 +909,7 @@ Content-Type: application/json
 ```
 
 - `type=song` 时改为 `{"type":"song","track":{...}}`，`track` 与旧 `{"tracks":[...]}` 元素同构，可直接入队。
-- `entity_id` 是钻取/导入键：`artist`/`album` 经 `GET /api/v1/search/entity` 展开为 `{"tracks":[...]}`；`playlist` 不经钻取，作为 `POST /api/v1/playlists/import` 的 `playlist_id` 导入（bili 收藏夹即 `media_id`，全量拉取封顶 500 条）。
+- `entity_id` 是钻取/导入键：`artist`/`album` 经 `GET /api/v1/search/entity` 展开为 `{"tracks":[...]}`；`playlist` 不经钻取——`media_admin` 可经 `/api/v1/playlists/import`（或绑定歌单）物化，普通 requester 可把它当电台源直接 `radio.play`（`ncm:playlist:<entity_id>` / `bili:fav:<media_id>`，受 4.7 `radio_control` 治理，见 6.2.1 的 radio_sources），小体量实体也可由 Client 逐条 `queue.add`。bili 收藏夹即 `media_id`，物化拉取封顶 1000 条（对齐上游单夹上限）。
 - 请求了 Provider 未报告的分类、或未实现 `CategorySearcher` 的 Provider，均为 400 `bad_request`。
 
 配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；正整数时每 6 小时清理超过该天数未访问的缓存，正在下载的条目跳过。

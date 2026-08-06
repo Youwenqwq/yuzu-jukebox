@@ -142,6 +142,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
 	mux.HandleFunc("POST /api/v1/providers/{id}/like", s.likeProviderTrack)
 	mux.HandleFunc("POST /api/v1/providers/{id}/playlist-add", s.addProviderTrackToPlaylist)
+	mux.HandleFunc("GET /api/v1/providers/{id}/account-playlists", s.listProviderAccountPlaylists)
+	mux.HandleFunc("GET /api/v1/providers/{id}/like-check", s.checkProviderTrackLiked)
 	mux.HandleFunc("POST /api/v1/providers/{id}/qrlogin", s.qrLoginStart)
 	mux.HandleFunc("GET /api/v1/providers/{id}/qrlogin/{key}", s.qrLoginPoll)
 	mux.HandleFunc("POST /api/v1/media/upload", s.upload)
@@ -756,7 +758,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 			accountWrite = append(accountWrite, "play_report")
 		}
 		if _, ok := p.(provider.AccountWriter); ok {
-			accountWrite = append(accountWrite, "like", "playlist_add")
+			accountWrite = append(accountWrite, "like", "like_check", "playlist_add")
 		}
 		var radioSources []provider.RadioSource
 		if catalog, ok := p.(provider.SourceCatalog); ok {
@@ -923,6 +925,43 @@ func (s *Server) addProviderTrackToPlaylist(w http.ResponseWriter, r *http.Reque
 	detail, _ := json.Marshal(body)
 	_ = s.st.Audit(r.Context(), identity.ID, "provider.playlist_add", providerID, string(detail))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// listProviderAccountPlaylists 列出凭据账号的歌单，只有凭据所有者可调用。
+func (s *Server) listProviderAccountPlaylists(w http.ResponseWriter, r *http.Request) {
+	_, aw, _, ok := s.requireOwnedAccountWriter(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	playlists, err := aw.AccountPlaylists(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
+}
+
+// checkProviderTrackLiked 回读凭据账号的喜欢状态，只有凭据所有者可调用。
+func (s *Server) checkProviderTrackLiked(w http.ResponseWriter, r *http.Request) {
+	_, aw, _, ok := s.requireOwnedAccountWriter(w, r)
+	if !ok {
+		return
+	}
+	trackID := r.URL.Query().Get("track")
+	if strings.TrimSpace(trackID) == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "track required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	liked, err := aw.LikeCheck(ctx, trackID)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"liked": liked})
 }
 
 // requireOwnedAccountWriter 校验账号写能力与当前凭据归属。

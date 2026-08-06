@@ -211,6 +211,12 @@ Still planned:
 
 ### Categorized Search
 - **Capability-driven**: `provider.CategorySearcher` (song/artist/album/playlist) is advertised via `capabilities.search_categories`; clients render only reported tabs. Asymmetry is correct — bili has no album/playlist tabs, local has no categories.
-- **Two-level model**: category search returns discriminated `SearchResult` entities (song wraps a queueable `track`; artist/album/playlist carry `entity_id`); drill = `GET /api/v1/search/entity` (artist/album only), playlist drill = the existing `/api/v1/playlists/import` flow (bili favorite = `media_id`, capped at 500).
+- **Two-level model**: category search returns discriminated `SearchResult` entities (song wraps a queueable `track`; artist/album/playlist carry `entity_id`); drill = `GET /api/v1/search/entity` (artist/album only). Playlist entities have three paths by role: media_admin imports/binds them; any radio-allowed caller plays them as `ncm:playlist:<id>` / `bili:fav:<media_id>` sources; small entities can be looped into `queue.add` client-side.
 - **Legacy path is frozen**: `/api/v1/search` without `category` (or `category=song`) keeps the exact `{"tracks":[...]}` contract — app_test.go pins it.
 - **Bili sidecar contract**: `/search/up`, `/space/videos`, `/fav/resource/list`, `/fav/folders` live in the bilibili-api sidecar (WBI signing there); yuzu parses snake_case fields, normalizes protocol-relative covers, and requires a login cookie for favorites import.
+
+### Provider-Bound Playlists
+- **Read-only followers**: bound playlists (`bound_provider`+`bound_remote_id`) mirror the external playlist; item mutations return 409 `playlist_bound` — `detach` keeps the snapshot and converts to a normal playlist. Deleting the whole playlist is always allowed.
+- **Sync is never destructive**: failure keeps the last good snapshot and records `last_sync_error`; success replaces items in one transaction. `plsync.SyncOne` is the single sync path for both the periodic worker (`playlist_sync_interval_minutes`, default off) and `POST /playlists/{id}/sync`.
+- **Sync rides the credential**: fetching uses the singleton provider credential, so a bound playlist implicitly depends on credential validity — and a private playlist (e.g. NCM 我喜欢的音乐) is only syncable while the owning credential is valid.
+- **Account read-backs are owner-gated**: `account-playlists` and `like-check` use the same `requireOwnedAccountWriter` gate as the write endpoints; the NCM account uid comes from the credential row's `account_uid` snapshot, never from the client.

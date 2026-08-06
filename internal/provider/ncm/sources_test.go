@@ -1,7 +1,12 @@
 package ncm
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -35,6 +40,11 @@ func TestRadioSources(t *testing.T) {
 			want:   provider.RadioSource{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false},
 			source: &chainedSource{p: p, kind: "heart"},
 		},
+		{
+			name:   "playlist",
+			want:   provider.RadioSource{Spec: "playlist", Arg: "playlist_id", Name: "歌单电台", Finite: true},
+			source: &playlistSource{},
+		},
 	}
 	if len(got) != len(tests) {
 		t.Fatalf("RadioSources() returned %d entries, want %d: %#v", len(got), len(tests), got)
@@ -49,4 +59,112 @@ func TestRadioSources(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPlaylistSourceMaterializesAndDrains(t *testing.T) {
+	var detailRequests, trackRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/playlist/detail":
+			detailRequests++
+			if got := r.URL.Query().Get("id"); got != "123" {
+				t.Errorf("detail id = %q, want 123", got)
+			}
+			_, _ = w.Write([]byte(`{"playlist":{"name":"顺序歌单"}}`))
+		case "/playlist/track/all":
+			trackRequests++
+			if got := r.URL.Query().Get("id"); got != "123" {
+				t.Errorf("track id = %q, want 123", got)
+			}
+			if got := r.URL.Query().Get("limit"); got != "1000" {
+				t.Errorf("limit = %q, want 1000", got)
+			}
+			if got := r.URL.Query().Get("offset"); got != "0" {
+				t.Errorf("offset = %q, want 0", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"songs": []map[string]any{
+					{"id": 1, "name": "一", "dt": 1000, "al": map[string]any{"name": "专辑一", "picUrl": "https://cover/1"}, "ar": []map[string]any{{"name": "甲"}}},
+					{"id": 2, "name": "二", "dt": 2000, "al": map[string]any{"name": "专辑二", "picUrl": "https://cover/2"}, "ar": []map[string]any{{"name": "乙"}}},
+					{"id": 3, "name": "三", "dt": 3000, "al": map[string]any{"name": "专辑三", "picUrl": "https://cover/3"}, "ar": []map[string]any{{"name": "丙"}}},
+				},
+			})
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	p := &Provider{base: server.URL, client: server.Client()}
+	p.cookie.Store("")
+	src, err := p.NewSource(context.Background(), "playlist:123")
+	if err != nil {
+		t.Fatalf("NewSource() error = %v", err)
+	}
+	if !src.Finite() {
+		t.Fatal("Finite() = false, want true")
+	}
+	if got := src.Description(); got != "网易云歌单《顺序歌单》" {
+		t.Fatalf("Description() = %q", got)
+	}
+	if detailRequests != 1 || trackRequests != 1 {
+		t.Fatalf("materialization requests = detail:%d tracks:%d, want 1 each", detailRequests, trackRequests)
+	}
+
+	first, exhausted, err := src.NextBatch(context.Background(), 2, "")
+	if err != nil {
+		t.Fatalf("first NextBatch() error = %v", err)
+	}
+	if exhausted {
+		t.Fatal("first NextBatch() exhausted = true, want false")
+	}
+	if got, want := trackRefs(first), []provider.TrackRef{"ncm:1", "ncm:2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("first refs = %v, want %v", got, want)
+	}
+
+	second, exhausted, err := src.NextBatch(context.Background(), 2, "")
+	if err != nil {
+		t.Fatalf("second NextBatch() error = %v", err)
+	}
+	if !exhausted {
+		t.Fatal("second NextBatch() exhausted = false, want true")
+	}
+	if got, want := trackRefs(second), []provider.TrackRef{"ncm:3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("second refs = %v, want %v", got, want)
+	}
+
+	last, exhausted, err := src.NextBatch(context.Background(), 2, "")
+	if err != nil {
+		t.Fatalf("last NextBatch() error = %v", err)
+	}
+	if len(last) != 0 || !exhausted {
+		t.Fatalf("last NextBatch() = (%v, %v), want empty/true", last, exhausted)
+	}
+	if detailRequests != 1 || trackRequests != 1 {
+		t.Fatalf("source refetched: detail:%d tracks:%d", detailRequests, trackRequests)
+	}
+}
+
+func TestNewSourceUnknownMentionsPlaylist(t *testing.T) {
+	p := &Provider{}
+	_, err := p.NewSource(context.Background(), "unknown")
+	if err == nil {
+		t.Fatal("NewSource() error = nil")
+	}
+	if !strings.Contains(err.Error(), "playlist:<id>") {
+		t.Fatalf("NewSource() error = %q, want playlist:<id>", err)
+	}
+	if _, err := p.NewSource(context.Background(), "playlist:"); err == nil {
+		t.Fatal("NewSource(playlist:) error = nil")
+	}
+}
+
+func trackRefs(tracks []provider.Track) []provider.TrackRef {
+	refs := make([]provider.TrackRef, len(tracks))
+	for i := range tracks {
+		refs[i] = tracks[i].Ref
+	}
+	return refs
 }

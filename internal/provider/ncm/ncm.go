@@ -147,6 +147,86 @@ func (p *Provider) Like(ctx context.Context, id string) error {
 	})
 }
 
+// LikeCheck 查询曲目是否已在凭据账号的喜欢列表中。
+// /song/like/check 直接按曲目 ID 回读，无需额外拉取完整喜欢列表。
+func (p *Provider) LikeCheck(ctx context.Context, id string) (bool, error) {
+	cookie := p.cookie.Load().(string)
+	if cookie == "" {
+		return false, fmt.Errorf("ncm api /song/like/check: credential not configured")
+	}
+	var resp struct {
+		Code int     `json:"code"`
+		IDs  []int64 `json:"ids"`
+	}
+	if err := p.getWithClient(ctx, p.writeClient, "/song/like/check",
+		url.Values{"ids": {"[" + id + "]"}}, cookie, &resp); err != nil {
+		return false, err
+	}
+	if resp.Code != http.StatusOK {
+		return false, fmt.Errorf("ncm api /song/like/check: code %d", resp.Code)
+	}
+	for _, likedID := range resp.IDs {
+		if strconv.FormatInt(likedID, 10) == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AccountPlaylists 列出凭据账号的歌单摘要。
+func (p *Provider) AccountPlaylists(ctx context.Context) ([]provider.AccountPlaylist, error) {
+	cookie := p.cookie.Load().(string)
+	if cookie == "" {
+		return nil, fmt.Errorf("ncm api /user/playlist: credential not configured")
+	}
+	uid, err := p.credentialAccountUID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Code     int `json:"code"`
+		Playlist []struct {
+			ID         int64  `json:"id"`
+			Name       string `json:"name"`
+			CoverURL   string `json:"coverImgUrl"`
+			TrackCount int    `json:"trackCount"`
+		} `json:"playlist"`
+	}
+	if err := p.getWithClient(ctx, p.writeClient, "/user/playlist",
+		url.Values{"uid": {uid}}, cookie, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Code != http.StatusOK {
+		return nil, fmt.Errorf("ncm api /user/playlist: code %d", resp.Code)
+	}
+	// 网易云把“我喜欢的音乐”放在首项；保持接口原顺序，不做特殊处理。
+	out := make([]provider.AccountPlaylist, 0, len(resp.Playlist))
+	for _, playlist := range resp.Playlist {
+		out = append(out, provider.AccountPlaylist{
+			ID:         strconv.FormatInt(playlist.ID, 10),
+			Name:       playlist.Name,
+			CoverURL:   playlist.CoverURL,
+			TrackCount: playlist.TrackCount,
+		})
+	}
+	return out, nil
+}
+
+func (p *Provider) credentialAccountUID(ctx context.Context) (string, error) {
+	if p.st == nil {
+		return "", fmt.Errorf("ncm credential account unavailable: re-login required")
+	}
+	owner, ok, err := p.st.GetCredentialOwner(ctx, p.ID())
+	if err != nil {
+		return "", fmt.Errorf("get ncm credential account: %w", err)
+	}
+	uid := strings.TrimSpace(owner.Account.UID)
+	if !ok || uid == "" || uid == "0" {
+		return "", fmt.Errorf("ncm credential account uid unavailable: re-login required")
+	}
+	return uid, nil
+}
+
 // AddToPlaylist 将曲目加入凭据账号的指定歌单。
 func (p *Provider) AddToPlaylist(ctx context.Context, playlistID, trackID string) error {
 	return p.write(ctx, "/playlist/tracks", url.Values{

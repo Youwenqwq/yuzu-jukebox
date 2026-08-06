@@ -80,7 +80,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 
 // ---------- 曲目源工厂（provider.SourceFactory） ----------
 
-// NewSource 创建曲目源。spec 取值：daily | fm | simi:<id> | heart:<id>。
+// NewSource 创建曲目源。spec 取值：daily | fm | simi:<id> | heart:<id> | playlist:<id>。
 func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSource, error) {
 	kind, arg, _ := strings.Cut(spec, ":")
 	switch kind {
@@ -102,8 +102,17 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 			return nil, fmt.Errorf("heart source: %w", err)
 		}
 		return cs, nil
+	case "playlist":
+		if arg == "" {
+			return nil, fmt.Errorf("playlist source requires an id: ncm:playlist:<playlist_id>")
+		}
+		name, tracks, err := p.ImportPlaylist(ctx, arg)
+		if err != nil {
+			return nil, fmt.Errorf("playlist source: %w", err)
+		}
+		return &playlistSource{name: name, tracks: tracks}, nil
 	default:
-		return nil, fmt.Errorf("unknown ncm source %q (want daily|fm|simi:<id>|heart:<id>)", spec)
+		return nil, fmt.Errorf("unknown ncm source %q (want daily|fm|simi:<id>|heart:<id>|playlist:<id>)", spec)
 	}
 }
 
@@ -114,7 +123,33 @@ func (p *Provider) RadioSources() []provider.RadioSource {
 		{Spec: "fm", Name: "私人 FM", Finite: false},
 		{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false},
 		{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false},
+		{Spec: "playlist", Arg: "playlist_id", Name: "歌单电台", Finite: true},
 	}
+}
+
+// ---------- 外部歌单（一次物化有限源） ----------
+
+type playlistSource struct {
+	name   string
+	tracks []provider.Track
+
+	mu     sync.Mutex
+	cursor int
+}
+
+func (s *playlistSource) Description() string { return "网易云歌单《" + s.name + "》" }
+func (s *playlistSource) Finite() bool        { return true }
+
+func (s *playlistSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef) ([]provider.Track, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cursor >= len(s.tracks) {
+		return nil, true, nil
+	}
+	end := min(s.cursor+max(n, 0), len(s.tracks))
+	batch := s.tracks[s.cursor:end]
+	s.cursor = end
+	return batch, s.cursor >= len(s.tracks), nil
 }
 
 // ---------- 每日推荐（TTL 物化有限源） ----------

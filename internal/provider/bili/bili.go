@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -299,7 +300,16 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 	if strings.TrimSpace(cookie) == "" {
 		return "", nil, fmt.Errorf("bili 收藏夹导入需要登录 cookie")
 	}
+	tracks, err := p.favoriteTracks(ctx, playlistID, cookie)
+	if err != nil {
+		return "", nil, err
+	}
+	// sidecar 响应不含收藏夹标题；HTTP 导入流程允许空名称并支持调用方覆盖。
+	return "", tracks, nil
+}
 
+// favoriteTracks 通过收藏夹分页接口物化全部可用曲目。
+func (p *Provider) favoriteTracks(ctx context.Context, mediaID, cookie string) ([]provider.Track, error) {
 	const (
 		pageSize = 20
 		maxItems = 1000 // B 站收藏夹单夹内容上限为 1000，封顶对齐实际上限而非任意防御值。
@@ -309,13 +319,13 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 	total := -1
 	for pn := 1; processed < maxItems; pn++ {
 		q := url.Values{
-			"media_id": {playlistID},
+			"media_id": {mediaID},
 			"pn":       {strconv.Itoa(pn)},
 			"ps":       {strconv.Itoa(pageSize)},
 		}
 		var resp videoListResponse
 		if err := p.get(ctx, "/fav/resource/list", q, cookie, &resp); err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		if total < 0 {
 			total = resp.Total
@@ -338,8 +348,56 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 			break
 		}
 	}
-	// sidecar 响应不含收藏夹标题；HTTP 导入流程允许空名称并支持调用方覆盖。
-	return "", tracks, nil
+	return tracks, nil
+}
+
+// NewSource 把收藏夹物化为有限电台源。
+func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSource, error) {
+	kind, mediaID, found := strings.Cut(spec, ":")
+	if !found || kind != "fav" {
+		return nil, fmt.Errorf("unknown bili source %q (want fav:<media_id>)", spec)
+	}
+	if !isDecimalID(mediaID) {
+		return nil, fmt.Errorf("invalid bili favorite media_id %q: want digits", mediaID)
+	}
+	cookie := p.cookie.Load().(string)
+	if strings.TrimSpace(cookie) == "" {
+		return nil, fmt.Errorf("bili 收藏夹电台需要登录 cookie")
+	}
+	tracks, err := p.favoriteTracks(ctx, mediaID, cookie)
+	if err != nil {
+		return nil, err
+	}
+	return &favoriteSource{mediaID: mediaID, tracks: tracks}, nil
+}
+
+// RadioSources 报告 B 站支持的电台源。
+func (p *Provider) RadioSources() []provider.RadioSource {
+	return []provider.RadioSource{
+		{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true},
+	}
+}
+
+type favoriteSource struct {
+	mu      sync.Mutex
+	mediaID string
+	tracks  []provider.Track
+	cursor  int
+}
+
+func (s *favoriteSource) Description() string { return "B 站收藏夹 " + s.mediaID }
+func (s *favoriteSource) Finite() bool        { return true }
+
+func (s *favoriteSource) NextBatch(_ context.Context, n int, _ provider.TrackRef) ([]provider.Track, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n <= 0 || s.cursor >= len(s.tracks) {
+		return nil, s.cursor >= len(s.tracks), nil
+	}
+	end := min(s.cursor+n, len(s.tracks))
+	batch := s.tracks[s.cursor:end]
+	s.cursor = end
+	return batch, s.cursor >= len(s.tracks), nil
 }
 
 func isDecimalID(s string) bool {
@@ -358,6 +416,8 @@ func isDecimalID(s string) bool {
 var (
 	_ provider.CategorySearcher = (*Provider)(nil)
 	_ provider.PlaylistImporter = (*Provider)(nil)
+	_ provider.SourceFactory    = (*Provider)(nil)
+	_ provider.SourceCatalog    = (*Provider)(nil)
 )
 
 // parseRef 拆解扩展 ref：bili:BVxxx?p=N。无 ?p 默认为第 1 P。
