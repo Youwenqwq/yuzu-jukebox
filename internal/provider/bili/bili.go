@@ -168,8 +168,20 @@ type videoListResponse struct {
 	Total   int           `json:"total"` // 仅收藏夹内容列表提供
 }
 
-func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, error) {
-	q := url.Values{"keywords": {query}, "limit": {"30"}}
+func (p *Provider) Search(ctx context.Context, query string, limit, offset int) ([]provider.Track, error) {
+	if limit <= 0 {
+		limit = 30
+	} else if limit > 50 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	q := url.Values{
+		"keywords": {query},
+		"limit":    {strconv.Itoa(limit)},
+		"offset":   {strconv.Itoa(offset)},
+	}
 	var resp videoListResponse
 	if err := p.get(ctx, "/search", q, p.cookie.Load().(string), &resp); err != nil {
 		return nil, err
@@ -207,10 +219,10 @@ func (p *Provider) SearchCategories() []provider.SearchCategory {
 	}
 }
 
-func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string) ([]provider.SearchResult, error) {
+func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string, limit, offset int) ([]provider.SearchResult, error) {
 	switch cat {
 	case provider.SearchCategorySong:
-		tracks, err := p.Search(ctx, query)
+		tracks, err := p.Search(ctx, query, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -233,7 +245,19 @@ func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCatego
 				Sign string `json:"sign"`
 			} `json:"results"`
 		}
-		q := url.Values{"keywords": {query}, "limit": {"30"}}
+		if limit <= 0 {
+			limit = 30
+		} else if limit > 30 {
+			limit = 30
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		q := url.Values{
+			"keywords": {query},
+			"limit":    {strconv.Itoa(limit)},
+			"pn":       {strconv.Itoa(offset/limit + 1)},
+		}
 		if err := p.get(ctx, "/search/up", q, p.cookie.Load().(string), &resp); err != nil {
 			return nil, err
 		}
@@ -259,17 +283,30 @@ func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCatego
 	}
 }
 
-func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string) ([]provider.Track, error) {
+func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string, limit, offset int) ([]provider.Track, error) {
 	if cat != provider.SearchCategoryArtist {
 		return nil, provider.ErrNotSupported
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
 	const (
 		pageSize = 30
-		maxPages = 3
+		maxPages = 100
 	)
-	tracks := make([]provider.Track, 0, pageSize*maxPages)
-	for pn := 1; pn <= maxPages; pn++ {
+	capacity := limit
+	if capacity > pageSize*maxPages {
+		capacity = pageSize * maxPages
+	}
+	tracks := make([]provider.Track, 0, capacity)
+	startPN := offset/pageSize + 1
+	firstSkip := offset % pageSize
+	for page := range maxPages {
+		pn := startPN + page
 		q := url.Values{
 			"mid": {entityID},
 			"pn":  {strconv.Itoa(pn)},
@@ -279,9 +316,18 @@ func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory
 		if err := p.get(ctx, "/space/videos", q, p.cookie.Load().(string), &resp); err != nil {
 			return nil, err
 		}
-		for _, video := range resp.Results {
+		videos := resp.Results
+		if page == 0 && firstSkip < len(videos) {
+			videos = videos[firstSkip:]
+		} else if page == 0 {
+			videos = nil
+		}
+		for _, video := range videos {
 			if track, ok := p.trackFromVideo(video); ok {
 				tracks = append(tracks, track)
+				if len(tracks) == limit {
+					return tracks, nil
+				}
 			}
 		}
 		if len(resp.Results) < pageSize {

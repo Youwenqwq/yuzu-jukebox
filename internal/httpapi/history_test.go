@@ -116,6 +116,11 @@ func TestHotTracksEndpoint(t *testing.T) {
 		{"room-1", "ncm:a", "A old", "alice", 100},
 		{"room-2", "ncm:b", "B", "bob", 200},
 		{"room-2", "ncm:a", "A new", "bob", 300},
+		{"room-1", "ncm:c", "C", "alice", 400},
+		{"room-1", "ncm:d", "D", "alice", 500},
+		{"room-1", "ncm:e", "E", "alice", 600},
+		{"room-1", "ncm:f", "F", "alice", 700},
+		{"room-1", "ncm:g", "G", "alice", 800},
 	}
 	for _, row := range rows {
 		if err := f.st.AddPlayHistory(ctx, row.roomID, row.ref, row.title, row.requester, row.startedAt, row.startedAt+1, "finished"); err != nil {
@@ -123,26 +128,50 @@ func TestHotTracksEndpoint(t *testing.T) {
 		}
 	}
 
-	rec := historyEndpointRequest(t, f, "/api/v1/stats/hot?days=0")
+	rec := historyEndpointRequest(t, f, "/api/v1/stats/hot?days=0&limit=2")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("hot status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	var body struct {
+	var firstPage struct {
 		Tracks []store.HotTrack `json:"tracks"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstPage); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Tracks) != 2 {
-		t.Fatalf("hot tracks = %#v, want 2 entries", body.Tracks)
+	if len(firstPage.Tracks) != 2 {
+		t.Fatalf("hot tracks = %#v, want 2 entries", firstPage.Tracks)
 	}
-	first := body.Tracks[0]
+	first := firstPage.Tracks[0]
 	if first.TrackRef != "ncm:a" || first.Title != "A new" || first.PlayCount != 2 || first.LastPlayedAt != 300 {
 		t.Fatalf("hot first track = %#v, want aggregated ncm:a", first)
+	}
+
+	rec = historyEndpointRequest(t, f, "/api/v1/stats/hot?days=0&limit=2&offset=5")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("offset hot status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var offsetPage struct {
+		Tracks []store.HotTrack `json:"tracks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &offsetPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(offsetPage.Tracks) != 2 ||
+		offsetPage.Tracks[0].TrackRef != "ncm:c" ||
+		offsetPage.Tracks[1].TrackRef != "ncm:b" {
+		t.Fatalf("offset hot tracks = %#v, want ncm:c then ncm:b", offsetPage.Tracks)
+	}
+	if offsetPage.Tracks[0].TrackRef == firstPage.Tracks[0].TrackRef {
+		t.Fatalf("offset page did not advance: first = %#v, offset = %#v", firstPage.Tracks, offsetPage.Tracks)
 	}
 
 	rec = historyEndpointRequest(t, f, "/api/v1/stats/hot?days=-1")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative days status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = historyEndpointRequest(t, f, "/api/v1/stats/hot?days=0&offset=-1")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative offset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

@@ -45,7 +45,7 @@ func TestHotTracks(t *testing.T) {
 	ctx := context.Background()
 	seedPlayHistory(t, st)
 
-	all, err := st.HotTracks(ctx, 0, 20)
+	all, err := st.HotTracks(ctx, 0, 20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,15 @@ func TestHotTracks(t *testing.T) {
 		t.Fatalf("all-time second track = %#v, want ncm:b count 2", all[1])
 	}
 
-	recent, err := st.HotTracks(ctx, 250, 20)
+	page, err := st.HotTracks(ctx, 0, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].TrackRef != "ncm:b" {
+		t.Fatalf("hot tracks page = %#v, want second-ranked ncm:b", page)
+	}
+
+	recent, err := st.HotTracks(ctx, 250, 20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

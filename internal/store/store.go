@@ -628,7 +628,10 @@ type HotTrack struct {
 }
 
 // HotTracks 返回全局热门曲目；跳过或播放错误仍代表点播意图，因此不按 end_reason 过滤。
-func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit int) ([]HotTrack, error) {
+func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit, offset int) ([]HotTrack, error) {
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`WITH filtered AS (
 			SELECT id, track_ref, title, started_at
@@ -646,8 +649,8 @@ func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit int) ([]HotT
 		FROM filtered AS f
 		GROUP BY f.track_ref
 		ORDER BY play_count DESC, last_played_at DESC
-		LIMIT ?`,
-		sinceMs, sinceMs, limit)
+		LIMIT ? OFFSET ?`,
+		sinceMs, sinceMs, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -921,11 +924,17 @@ func (s *Store) DeleteMediaFile(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) SearchMediaFiles(ctx context.Context, query string, limit int) ([]MediaFile, error) {
+func (s *Store) SearchMediaFiles(ctx context.Context, query string, limit, offset int) ([]MediaFile, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, filename, title, artist, duration_ms, size_bytes, uploaded_by, album, cover_path, bitrate_kbps, created_at
-		 FROM media_files WHERE title LIKE ? OR artist LIKE ? ORDER BY created_at DESC LIMIT ?`,
-		"%"+query+"%", "%"+query+"%", limit)
+		 FROM media_files WHERE title LIKE ? OR artist LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		"%"+query+"%", "%"+query+"%", limit, offset)
 	if err != nil {
 		return nil, err
 	}

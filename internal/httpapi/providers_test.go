@@ -21,12 +21,18 @@ import (
 )
 
 type providerEndpointBase struct {
-	id string
+	id               string
+	lastSearchQuery  string
+	lastSearchLimit  int
+	lastSearchOffset int
 }
 
 func (p *providerEndpointBase) ID() string { return p.id }
 
-func (p *providerEndpointBase) Search(context.Context, string) ([]provider.Track, error) {
+func (p *providerEndpointBase) Search(_ context.Context, query string, limit, offset int) ([]provider.Track, error) {
+	p.lastSearchQuery = query
+	p.lastSearchLimit = limit
+	p.lastSearchOffset = offset
 	return nil, nil
 }
 
@@ -46,8 +52,12 @@ type providerCategorySearcherFake struct {
 	entityErr          error
 	lastSearchCategory provider.SearchCategory
 	lastSearchQuery    string
+	lastSearchLimit    int
+	lastSearchOffset   int
 	lastEntityCategory provider.SearchCategory
 	lastEntityID       string
+	lastEntityLimit    int
+	lastEntityOffset   int
 }
 
 func (p *providerCategorySearcherFake) SearchCategories() []provider.SearchCategory {
@@ -58,9 +68,12 @@ func (p *providerCategorySearcherFake) SearchCategory(
 	_ context.Context,
 	category provider.SearchCategory,
 	query string,
+	limit, offset int,
 ) ([]provider.SearchResult, error) {
 	p.lastSearchCategory = category
 	p.lastSearchQuery = query
+	p.lastSearchLimit = limit
+	p.lastSearchOffset = offset
 	return p.searchResults, nil
 }
 
@@ -68,10 +81,32 @@ func (p *providerCategorySearcherFake) EntityTracks(
 	_ context.Context,
 	category provider.SearchCategory,
 	entityID string,
+	limit, offset int,
 ) ([]provider.Track, error) {
 	p.lastEntityCategory = category
 	p.lastEntityID = entityID
+	p.lastEntityLimit = limit
+	p.lastEntityOffset = offset
 	return p.entityTracks, p.entityErr
+}
+
+type providerEntityAlbumListerFake struct {
+	providerEndpointBase
+	albums           []provider.SearchResult
+	lastArtistID     string
+	lastAlbumsLimit  int
+	lastAlbumsOffset int
+}
+
+func (p *providerEntityAlbumListerFake) EntityAlbums(
+	_ context.Context,
+	artistID string,
+	limit, offset int,
+) ([]provider.SearchResult, error) {
+	p.lastArtistID = artistID
+	p.lastAlbumsLimit = limit
+	p.lastAlbumsOffset = offset
+	return p.albums, nil
 }
 
 type providerAccountWriterFake struct {
@@ -136,6 +171,7 @@ type providerEndpointFixture struct {
 	ownerToken string
 	otherToken string
 	category   *providerCategorySearcherFake
+	albums     *providerEntityAlbumListerFake
 }
 
 func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
@@ -190,8 +226,19 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 			DurationMs: 123000,
 		}},
 	}
+	albums := &providerEntityAlbumListerFake{
+		providerEndpointBase: providerEndpointBase{id: "albums"},
+		albums: []provider.SearchResult{{
+			Type:     provider.SearchCategoryAlbum,
+			EntityID: "album-8",
+			Name:     "测试专辑",
+			Detail:   "2026",
+			CoverURL: "https://example.com/album.jpg",
+		}},
+	}
 	reg.Register(writer)
 	reg.Register(category)
+	reg.Register(albums)
 	reg.Register(&providerEndpointBase{id: "basic"})
 	reg.Register(ncm.New("http://127.0.0.1", "", st))
 	if err := st.UpsertCredential(context.Background(), writer.ID(), "credential", "ok"); err != nil {
@@ -206,8 +253,9 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 		st: st, authm: authm, reg: reg, controls: controls,
 		ws: wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
 	}
+	s.SetCoverSecret([]byte("0123456789abcdef0123456789abcdef"))
 	return providerEndpointFixture{
-		handler: s.Handler(), st: st, writer: writer, category: category,
+		handler: s.Handler(), st: st, writer: writer, category: category, albums: albums,
 		ownerToken: ownerToken, otherToken: otherToken,
 	}
 }
@@ -451,6 +499,10 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if _, ok := capabilities["search_categories"]; ok {
 			t.Fatalf("writer provider advertises search_categories: %#v", capabilities)
 		}
+		if _, ok := capabilities["entity_albums"]; ok {
+			t.Fatalf("writer provider advertises entity_albums: %#v", capabilities)
+		}
+
 		ncmEntry := entries["ncm"]
 		ncmCapabilities, ok := ncmEntry["capabilities"].(map[string]any)
 		if !ok {
@@ -469,6 +521,7 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if got := ncmCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantRadioSources) {
 			t.Fatalf("ncm radio_sources = %#v, want %#v", got, wantRadioSources)
 		}
+
 		categorized := entries["categorized"]
 		categoryCapabilities, ok := categorized["capabilities"].(map[string]any)
 		if !ok {
@@ -480,9 +533,16 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if _, ok := categoryCapabilities["radio_sources"]; ok {
 			t.Fatalf("categorized provider advertises radio_sources: %#v", categoryCapabilities)
 		}
-		basic := entries["basic"]
-		if _, ok := basic["capabilities"]; ok {
-			t.Fatalf("basic provider includes capabilities: %#v", basic)
+		if _, ok := categoryCapabilities["entity_albums"]; ok {
+			t.Fatalf("categorized provider advertises entity_albums: %#v", categoryCapabilities)
+		}
+
+		albumCapabilities, ok := entries["albums"]["capabilities"].(map[string]any)
+		if !ok || albumCapabilities["entity_albums"] != true {
+			t.Fatalf("albums capabilities = %#v", entries["albums"]["capabilities"])
+		}
+		if _, ok := entries["basic"]["capabilities"]; ok {
+			t.Fatalf("basic provider includes capabilities: %#v", entries["basic"])
 		}
 	}
 
@@ -499,16 +559,37 @@ func TestSearchCategories(t *testing.T) {
 
 	t.Run("legacy and explicit song retain tracks response", func(t *testing.T) {
 		legacy := providerEndpointRequest(
-			t, f, http.MethodGet, "/api/v1/search?provider=basic&q=test", f.ownerToken, nil,
-		)
-		explicitSong := providerEndpointRequest(
-			t, f, http.MethodGet, "/api/v1/search?provider=basic&q=test&category=song", f.ownerToken, nil,
+			t, f, http.MethodGet, "/api/v1/search?provider=categorized&q=test", f.ownerToken, nil,
 		)
 		if legacy.Code != http.StatusOK {
 			t.Fatalf("legacy search status = %d, body = %s", legacy.Code, legacy.Body.String())
 		}
+		if f.category.providerEndpointBase.lastSearchLimit != 30 ||
+			f.category.providerEndpointBase.lastSearchOffset != 0 {
+			t.Fatalf(
+				"legacy paging = (%d, %d), want (30, 0)",
+				f.category.providerEndpointBase.lastSearchLimit,
+				f.category.providerEndpointBase.lastSearchOffset,
+			)
+		}
+		explicitSong := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search?provider=categorized&q=test&category=song&limit=7&offset=4",
+			f.ownerToken,
+			nil,
+		)
 		if explicitSong.Code != http.StatusOK {
 			t.Fatalf("song search status = %d, body = %s", explicitSong.Code, explicitSong.Body.String())
+		}
+		if f.category.providerEndpointBase.lastSearchLimit != 7 ||
+			f.category.providerEndpointBase.lastSearchOffset != 4 {
+			t.Fatalf(
+				"song paging = (%d, %d), want (7, 4)",
+				f.category.providerEndpointBase.lastSearchLimit,
+				f.category.providerEndpointBase.lastSearchOffset,
+			)
 		}
 		const want = "{\"tracks\":null}\n"
 		if legacy.Body.String() != want || explicitSong.Body.String() != want {
@@ -521,7 +602,7 @@ func TestSearchCategories(t *testing.T) {
 			t,
 			f,
 			http.MethodGet,
-			"/api/v1/search?provider=categorized&q=%E6%B5%8B%E8%AF%95&category=artist",
+			"/api/v1/search?provider=categorized&q=%E6%B5%8B%E8%AF%95&category=artist&limit=12&offset=3",
 			f.ownerToken,
 			nil,
 		)
@@ -541,12 +622,47 @@ func TestSearchCategories(t *testing.T) {
 		if body.Tracks != nil {
 			t.Fatalf("artist response includes tracks: %s", body.Tracks)
 		}
-		if f.category.lastSearchCategory != provider.SearchCategoryArtist || f.category.lastSearchQuery != "测试" {
+		if f.category.lastSearchCategory != provider.SearchCategoryArtist ||
+			f.category.lastSearchQuery != "测试" ||
+			f.category.lastSearchLimit != 12 ||
+			f.category.lastSearchOffset != 3 {
 			t.Fatalf(
-				"search call = (%q, %q)",
+				"search call = (%q, %q, %d, %d)",
 				f.category.lastSearchCategory,
 				f.category.lastSearchQuery,
+				f.category.lastSearchLimit,
+				f.category.lastSearchOffset,
 			)
+		}
+	})
+
+	t.Run("invalid paging is rejected and non-positive limit defaults", func(t *testing.T) {
+		defaulted := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search?provider=categorized&q=test&limit=0",
+			f.ownerToken,
+			nil,
+		)
+		if defaulted.Code != http.StatusOK || f.category.providerEndpointBase.lastSearchLimit != 30 {
+			t.Fatalf(
+				"zero limit status = %d, forwarded = %d, body = %s",
+				defaulted.Code,
+				f.category.providerEndpointBase.lastSearchLimit,
+				defaulted.Body.String(),
+			)
+		}
+		for _, path := range []string{
+			"/api/v1/search?provider=categorized&q=test&offset=-1",
+			"/api/v1/search?provider=categorized&q=test&offset=nope",
+			"/api/v1/search?provider=categorized&q=test&limit=nope",
+			"/api/v1/search?provider=categorized&q=test&limit=101",
+		} {
+			rec := providerEndpointRequest(t, f, http.MethodGet, path, f.ownerToken, nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s status = %d, body = %s", path, rec.Code, rec.Body.String())
+			}
 		}
 	})
 
@@ -620,8 +736,81 @@ func TestSearchEntity(t *testing.T) {
 		if !reflect.DeepEqual(body.Tracks, f.category.entityTracks) {
 			t.Fatalf("artist tracks = %#v, want %#v", body.Tracks, f.category.entityTracks)
 		}
-		if f.category.lastEntityCategory != provider.SearchCategoryArtist || f.category.lastEntityID != "artist-7" {
-			t.Fatalf("entity call = (%q, %q)", f.category.lastEntityCategory, f.category.lastEntityID)
+		if f.category.lastEntityCategory != provider.SearchCategoryArtist ||
+			f.category.lastEntityID != "artist-7" ||
+			f.category.lastEntityLimit != 30 ||
+			f.category.lastEntityOffset != 0 {
+			t.Fatalf(
+				"entity call = (%q, %q, %d, %d)",
+				f.category.lastEntityCategory,
+				f.category.lastEntityID,
+				f.category.lastEntityLimit,
+				f.category.lastEntityOffset,
+			)
+		}
+	})
+
+	t.Run("artist drill into albums proxies covers and forwards paging", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=albums&category=artist&id=artist-7&into=albums&limit=6&offset=2",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("album drill status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Results []provider.SearchResult `json:"results"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Results) != 1 ||
+			!strings.HasPrefix(body.Results[0].CoverURL, "/api/v1/cover/ext/") {
+			t.Fatalf("album results = %#v", body.Results)
+		}
+		if f.albums.lastArtistID != "artist-7" ||
+			f.albums.lastAlbumsLimit != 6 ||
+			f.albums.lastAlbumsOffset != 2 {
+			t.Fatalf(
+				"album call = (%q, %d, %d)",
+				f.albums.lastArtistID,
+				f.albums.lastAlbumsLimit,
+				f.albums.lastAlbumsOffset,
+			)
+		}
+	})
+
+	t.Run("album drill requires artist category", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=albums&category=song&id=artist-7&into=albums",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest ||
+			!strings.Contains(rec.Body.String(), "into=albums requires category=artist") {
+			t.Fatalf("song into albums status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("album drill requires capability", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=categorized&category=artist&id=artist-7&into=albums",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest ||
+			!strings.Contains(rec.Body.String(), "capability not supported") {
+			t.Fatalf("unsupported album drill status = %d, body = %s", rec.Code, rec.Body.String())
 		}
 	})
 

@@ -52,6 +52,34 @@ func TestListAndDeleteMediaFiles(t *testing.T) {
 	}
 }
 
+func TestSearchMediaFilesPaging(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	for _, file := range []MediaFile{
+		{ID: "old", Filename: "old.mp3", Title: "Song Old", CreatedAt: 10},
+		{ID: "middle", Filename: "middle.mp3", Title: "Song Middle", CreatedAt: 20},
+		{ID: "new", Filename: "new.mp3", Title: "Song New", CreatedAt: 30},
+		{ID: "other", Filename: "other.mp3", Title: "Other", CreatedAt: 40},
+	} {
+		if err := st.AddMediaFile(ctx, file); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.SearchMediaFiles(ctx, "Song", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != "middle" || got[1].ID != "old" {
+		t.Fatalf("SearchMediaFiles() = %#v, want middle then old", got)
+	}
+}
+
 func TestListMediaFilesEmptyIsNonNil(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "test.db"), nil)
 	if err != nil {

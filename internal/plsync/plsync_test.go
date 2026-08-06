@@ -25,7 +25,7 @@ type fakeProvider struct {
 }
 
 func (p *fakeProvider) ID() string { return p.id }
-func (p *fakeProvider) Search(context.Context, string) ([]provider.Track, error) {
+func (p *fakeProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
 	return nil, nil
 }
 func (p *fakeProvider) GetTrack(context.Context, provider.TrackRef) (provider.Track, error) {
@@ -44,7 +44,7 @@ func (p *fakeProvider) ImportPlaylist(ctx context.Context, remoteID string) (str
 type providerWithoutImporter struct{ id string }
 
 func (p *providerWithoutImporter) ID() string { return p.id }
-func (p *providerWithoutImporter) Search(context.Context, string) ([]provider.Track, error) {
+func (p *providerWithoutImporter) Search(context.Context, string, int, int) ([]provider.Track, error) {
 	return nil, nil
 }
 func (p *providerWithoutImporter) GetTrack(context.Context, provider.TrackRef) (provider.Track, error) {

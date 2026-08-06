@@ -31,10 +31,11 @@ type Provider struct {
 }
 
 var (
-	_ provider.PlayReporter     = (*Provider)(nil)
-	_ provider.AccountWriter    = (*Provider)(nil)
-	_ provider.SourceCatalog    = (*Provider)(nil)
-	_ provider.CategorySearcher = (*Provider)(nil)
+	_ provider.PlayReporter      = (*Provider)(nil)
+	_ provider.AccountWriter     = (*Provider)(nil)
+	_ provider.SourceCatalog     = (*Provider)(nil)
+	_ provider.CategorySearcher  = (*Provider)(nil)
+	_ provider.EntityAlbumLister = (*Provider)(nil)
 )
 
 func New(baseURL, level string, st *store.Store) *Provider {
@@ -320,9 +321,26 @@ func extractCookieValue(cookieStr, key string) string {
 }
 
 // ---------- Provider 接口 ----------
+func normalizeSearchPage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = 30
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
 
-func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, error) {
-	q := url.Values{"keywords": {query}, "type": {"1"}, "limit": {"30"}}
+func (p *Provider) Search(ctx context.Context, query string, limit, offset int) ([]provider.Track, error) {
+	limit, offset = normalizeSearchPage(limit, offset)
+	q := url.Values{
+		"keywords": {query},
+		"type":     {"1"},
+		"limit":    {strconv.Itoa(limit)},
+		"offset":   {strconv.Itoa(offset)},
+	}
 	var resp struct {
 		Code   int `json:"code"`
 		Result struct {

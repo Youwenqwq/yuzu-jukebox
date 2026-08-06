@@ -60,7 +60,7 @@ func TestSearchCategoryUsesNCMSearchType(t *testing.T) {
 			defer server.Close()
 
 			p := categoryTestProvider(server)
-			if _, err := p.SearchCategory(context.Background(), tt.category, "query"); err != nil {
+			if _, err := p.SearchCategory(context.Background(), tt.category, "query", 0, 0); err != nil {
 				t.Fatalf("SearchCategory() error = %v", err)
 			}
 		})
@@ -76,11 +76,11 @@ func TestSearchCategorySongWrapsSearch(t *testing.T) {
 	defer server.Close()
 	p := categoryTestProvider(server)
 
-	want, err := p.Search(context.Background(), "same")
+	want, err := p.Search(context.Background(), "same", 0, 0)
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
 	}
-	got, err := p.SearchCategory(context.Background(), provider.SearchCategorySong, "same")
+	got, err := p.SearchCategory(context.Background(), provider.SearchCategorySong, "same", 0, 0)
 	if err != nil {
 		t.Fatalf("SearchCategory(song) error = %v", err)
 	}
@@ -143,7 +143,7 @@ func TestSearchCategoryEntityMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.category), func(t *testing.T) {
-			got, err := p.SearchCategory(context.Background(), tt.category, "entity")
+			got, err := p.SearchCategory(context.Background(), tt.category, "entity", 0, 0)
 			if err != nil {
 				t.Fatalf("SearchCategory() error = %v", err)
 			}
@@ -179,7 +179,7 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 	defer server.Close()
 	p := categoryTestProvider(server)
 
-	artistTracks, err := p.EntityTracks(context.Background(), provider.SearchCategoryArtist, "artist-id")
+	artistTracks, err := p.EntityTracks(context.Background(), provider.SearchCategoryArtist, "artist-id", 0, 0)
 	if err != nil {
 		t.Fatalf("EntityTracks(artist) error = %v", err)
 	}
@@ -200,7 +200,7 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 		t.Fatalf("artist tracks = %#v, want [%#v]", artistTracks, wantArtist)
 	}
 
-	albumTracks, err := p.EntityTracks(context.Background(), provider.SearchCategoryAlbum, "album-id")
+	albumTracks, err := p.EntityTracks(context.Background(), provider.SearchCategoryAlbum, "album-id", 0, 0)
 	if err != nil {
 		t.Fatalf("EntityTracks(album) error = %v", err)
 	}
@@ -216,6 +216,84 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 	}
 	if len(albumTracks) != 1 || !reflect.DeepEqual(albumTracks[0], wantAlbum) {
 		t.Fatalf("album tracks = %#v, want [%#v]", albumTracks, wantAlbum)
+	}
+}
+
+func TestEntityAlbums(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/artist/album" {
+			t.Errorf("path = %q, want /artist/album", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("id"); got != "artist-42" {
+			t.Errorf("id = %q, want artist-42", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "30" {
+			t.Errorf("limit = %q, want 30", got)
+		}
+		if got := r.URL.Query().Get("offset"); got != "7" {
+			t.Errorf("offset = %q, want 7", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hotAlbums":[{"id":401,"name":"First Album","picUrl":"https://cover/401","artists":[{"name":"Singer"}],"size":12},{"id":402,"name":"Second Album","picUrl":"https://cover/402","artists":[],"size":0}]}`))
+	}))
+	defer server.Close()
+
+	p := categoryTestProvider(server)
+	got, err := p.EntityAlbums(context.Background(), "artist-42", 0, 7)
+	if err != nil {
+		t.Fatalf("EntityAlbums() error = %v", err)
+	}
+	want := []provider.SearchResult{
+		{
+			Type: provider.SearchCategoryAlbum, EntityID: "401", Name: "First Album",
+			Detail: "12 首", CoverURL: "https://cover/401",
+		},
+		{
+			Type: provider.SearchCategoryAlbum, EntityID: "402", Name: "Second Album",
+			CoverURL: "https://cover/402",
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("EntityAlbums() = %#v, want %#v", got, want)
+	}
+}
+
+func TestSearchCategoryOffset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("limit"); got != "5" {
+			t.Errorf("limit = %q, want 5", got)
+		}
+		if got := r.URL.Query().Get("offset"); got != "9" {
+			t.Errorf("offset = %q, want 9", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"result":{"albums":[]}}`))
+	}))
+	defer server.Close()
+
+	p := categoryTestProvider(server)
+	if _, err := p.SearchCategory(context.Background(), provider.SearchCategoryAlbum, "paged", 5, 9); err != nil {
+		t.Fatalf("SearchCategory() error = %v", err)
+	}
+}
+
+func TestEntityTracksSlicesLocally(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/artist/top/song" {
+			t.Errorf("path = %q, want /artist/top/song", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"songs":[{"id":1,"name":"One"},{"id":2,"name":"Two"},{"id":3,"name":"Three"},{"id":4,"name":"Four"},{"id":5,"name":"Five"}]}`))
+	}))
+	defer server.Close()
+
+	p := categoryTestProvider(server)
+	got, err := p.EntityTracks(context.Background(), provider.SearchCategoryArtist, "artist", 2, 2)
+	if err != nil {
+		t.Fatalf("EntityTracks() error = %v", err)
+	}
+	if len(got) != 2 || got[0].Ref != provider.NewRef("ncm", "3") || got[1].Ref != provider.NewRef("ncm", "4") {
+		t.Fatalf("EntityTracks() refs = %#v, want ncm:3 and ncm:4", got)
 	}
 }
 
@@ -309,11 +387,11 @@ func TestImportPlaylistPaginatesThousandSongPages(t *testing.T) {
 
 func TestCategoryUnsupported(t *testing.T) {
 	p := &Provider{}
-	if _, err := p.SearchCategory(context.Background(), provider.SearchCategory("unknown"), "q"); !errors.Is(err, provider.ErrNotSupported) {
+	if _, err := p.SearchCategory(context.Background(), provider.SearchCategory("unknown"), "q", 0, 0); !errors.Is(err, provider.ErrNotSupported) {
 		t.Fatalf("SearchCategory(unknown) error = %v, want ErrNotSupported", err)
 	}
 	for _, category := range []provider.SearchCategory{provider.SearchCategoryPlaylist, provider.SearchCategorySong, "unknown"} {
-		if _, err := p.EntityTracks(context.Background(), category, "id"); !errors.Is(err, provider.ErrNotSupported) {
+		if _, err := p.EntityTracks(context.Background(), category, "id", 0, 0); !errors.Is(err, provider.ErrNotSupported) {
 			t.Fatalf("EntityTracks(%q) error = %v, want ErrNotSupported", category, err)
 		}
 	}

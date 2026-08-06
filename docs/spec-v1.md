@@ -669,7 +669,7 @@ played_ms >= min(total_ms / 2, 240000)
 | `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` | 播放历史，最新在前（默认 50，上限 200） |
 | `GET /api/v1/rooms/{id}/stats?limit=` | `listener` | 曲目热度榜（默认 20，上限 100） |
 | `GET /api/v1/history?requester=me&offset=&limit=` | `requester` | 跨房间个人播放历史（`requested_by` = 当前 Principal），最新在前（默认 50，上限 200）；`requester` 只接受 `me` |
-| `GET /api/v1/stats/hot?days=&limit=` | `requester` | 全局热门曲目（跨房间 `play_history` 聚合：`track_ref`/`title`/`play_count`/`last_played_at`，与 `queue.add` 的 ref 体系兼容）；`days` 缺省 7、0 = 全部时间；`limit` 缺省 20，上限 100 |
+| `GET /api/v1/stats/hot?days=&limit=&offset=` | `requester` | 全局热门曲目（跨房间 `play_history` 聚合：`track_ref`/`title`/`play_count`/`last_played_at`，与 `queue.add` 的 ref 体系兼容）；`days` 缺省 7、0 = 全部时间；`limit` 缺省 20，上限 100；`offset` 缺省 0（首页热门翻页用） |
 | `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability（`controller`、`radio`，后者按 4.7 `radio_control` 推导）；Room 不存在为 404 |
 | `GET /api/v1/rooms/{id}/state` | 标准 session | 无副作用完整状态快照 |
 | `POST /api/v1/rooms/{id}/queue` | `requester` | 单条或 1–100 条原子入队 |
@@ -787,8 +787,8 @@ Room create/PATCH/list/get 的错误合同：
 
 | 端点 | 权限 | 说明 |
 |---|---|---|
-| `GET /api/v1/search?provider=&q=&category=` | `requester` | `category` 缺省或 `song`：转发 Provider.Search，返回 `{"tracks":[...]}`；`artist`/`album`/`playlist`：分类检索（Provider 须实现 `CategorySearcher` 且支持该分类），返回 `{"results":[...]}` 判别实体（见 6.2.2） |
-| `GET /api/v1/search/entity?provider=&category=&id=` | `requester` | 实体钻取：`category` 限 `artist`/`album`，把实体展开为可入队 `{"tracks":[...]}`；`playlist` 实体走 `/api/v1/playlists/import` 导入，不经此端点 |
+| `GET /api/v1/search?provider=&q=&category=&limit=&offset=` | `requester` | `category` 缺省或 `song`：转发 Provider.Search，返回 `{"tracks":[...]}`；`artist`/`album`/`playlist`：分类检索（Provider 须实现 `CategorySearcher` 且支持该分类），返回 `{"results":[...]}` 判别实体（见 6.2.2）。分页：`limit` 缺省 30（上限 100），`offset` 缺省 0；上游无分页的实现按 `[offset:offset+limit]` 本地切片 |
+| `GET /api/v1/search/entity?provider=&category=&id=&into=&limit=&offset=` | `requester` | 实体钻取：`into=tracks`（缺省）时 `category` 限 `artist`/`album`，把实体展开为可入队 `{"tracks":[...]}`；`into=albums` 时 `category` 限 `artist`，返回 `{"results":[...]}` 专辑实体（与分类检索同构，可再以 `category=album&id=<entity_id>` 钻到曲目——钻取终点归一；Provider 须实现 `EntityAlbumLister`，能力经 `capabilities.entity_albums` 报告）；`playlist` 实体走 `/api/v1/playlists/import` 导入，不经此端点 |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | body `{"payload":"..."}`；先校验再热生效，凭据存储于服务端且永不下发 |
 | `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 返回 `{key, qr_content}`，Client 自行渲染二维码 |
@@ -916,7 +916,7 @@ Content-Type: application/json
 ```
 
 - `type=song` 时改为 `{"type":"song","track":{...}}`，`track` 与旧 `{"tracks":[...]}` 元素同构，可直接入队。
-- `entity_id` 是钻取/导入键：`artist`/`album` 经 `GET /api/v1/search/entity` 展开为 `{"tracks":[...]}`；`playlist` 不经钻取——`media_admin` 可经 `/api/v1/playlists/import`（或绑定歌单）物化，普通 requester 可把它当电台源直接 `radio.play`（`ncm:playlist:<entity_id>` / `bili:fav:<media_id>`，受 4.7 `radio_control` 治理，见 6.2.1 的 radio_sources），小体量实体也可由 Client 逐条 `queue.add`。bili 收藏夹即 `media_id`，物化拉取封顶 1000 条（对齐上游单夹上限）。
+- `entity_id` 是钻取/导入键：`artist`/`album` 经 `GET /api/v1/search/entity` 展开为 `{"tracks":[...]}`；`artist` 还可带 `&into=albums` 展开为专辑实体列表 `{"results":[...]}`（`capabilities.entity_albums` 报告能力；ncm 用 `/artist/album` 上游分页，bili 无专辑概念不实现）；`playlist` 不经钻取——`media_admin` 可经 `/api/v1/playlists/import`（或绑定歌单）物化，普通 requester 可把它当电台源直接 `radio.play`（`ncm:playlist:<entity_id>` / `bili:fav:<media_id>`，受 4.7 `radio_control` 治理，见 6.2.1 的 radio_sources），小体量实体也可由 Client 逐条 `queue.add`。bili 收藏夹即 `media_id`，物化拉取封顶 1000 条（对齐上游单夹上限）。
 - 请求了 Provider 未报告的分类、或未实现 `CategorySearcher` 的 Provider，均为 400 `bad_request`。
 
 配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；正整数时每 6 小时清理超过该天数未访问的缓存，正在下载的条目跳过。

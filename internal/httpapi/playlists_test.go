@@ -166,7 +166,7 @@ type playlistProviderBase struct {
 
 func (p *playlistProviderBase) ID() string { return p.id }
 
-func (p *playlistProviderBase) Search(context.Context, string) ([]provider.Track, error) {
+func (p *playlistProviderBase) Search(context.Context, string, int, int) ([]provider.Track, error) {
 	return nil, nil
 }
 

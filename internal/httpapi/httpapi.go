@@ -684,6 +684,15 @@ func (s *Server) hotTracks(w http.ResponseWriter, r *http.Request) {
 	if limit > 100 {
 		limit = 100
 	}
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "offset must be a non-negative integer")
+			return
+		}
+		offset = parsed
+	}
 	var sinceMs int64
 	if days > 0 {
 		const dayMs = int64(86_400_000)
@@ -692,7 +701,7 @@ func (s *Server) hotTracks(w http.ResponseWriter, r *http.Request) {
 			sinceMs = now - days*dayMs
 		}
 	}
-	tracks, err := s.st.HotTracks(r.Context(), sinceMs, limit)
+	tracks, err := s.st.HotTracks(r.Context(), sinceMs, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -753,6 +762,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		AccountWrite     []string                  `json:"account_write,omitempty"`
 		RadioSources     []provider.RadioSource    `json:"radio_sources,omitempty"`
 		SearchCategories []provider.SearchCategory `json:"search_categories,omitempty"`
+		EntityAlbums     bool                      `json:"entity_albums,omitempty"`
 	}
 	type info struct {
 		ID               string        `json:"id"`
@@ -786,11 +796,13 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		if searcher, ok := p.(provider.CategorySearcher); ok {
 			searchCategories = searcher.SearchCategories()
 		}
-		if len(accountWrite) > 0 || len(radioSources) > 0 || len(searchCategories) > 0 {
+		_, entityAlbums := p.(provider.EntityAlbumLister)
+		if len(accountWrite) > 0 || len(radioSources) > 0 || len(searchCategories) > 0 || entityAlbums {
 			entry.Capabilities = &capabilities{
 				AccountWrite:     accountWrite,
 				RadioSources:     radioSources,
 				SearchCategories: searchCategories,
+				EntityAlbums:     entityAlbums,
 			}
 		}
 		out = append(out, entry)
@@ -1010,8 +1022,36 @@ func (s *Server) requireOwnedAccountWriter(
 	return identity, aw, providerID, true
 }
 
+// parseSearchPaging 统一校验检索接口的分页参数。
+func parseSearchPaging(w http.ResponseWriter, r *http.Request) (limit, offset int, ok bool) {
+	limit = 30
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed > 100 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "limit must be an integer no greater than 100")
+			return 0, 0, false
+		}
+		if parsed > 0 {
+			limit = parsed
+		}
+	}
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "offset must be a non-negative integer")
+			return 0, 0, false
+		}
+		offset = parsed
+	}
+	return limit, offset, true
+}
+
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+		return
+	}
+	limit, offset, ok := parseSearchPaging(w, r)
+	if !ok {
 		return
 	}
 	providerID := r.URL.Query().Get("provider")
@@ -1027,7 +1067,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 
 	category := provider.SearchCategory(r.URL.Query().Get("category"))
 	if category == "" || category == provider.SearchCategorySong {
-		tracks, err := p.Search(r.Context(), q)
+		tracks, err := p.Search(r.Context(), q, limit, offset)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 			return
@@ -1065,7 +1105,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	results, err := searcher.SearchCategory(r.Context(), category, q)
+	results, err := searcher.SearchCategory(r.Context(), category, q, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
@@ -1078,15 +1118,35 @@ func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
 		return
 	}
-	category := provider.SearchCategory(r.URL.Query().Get("category"))
-	switch category {
-	case provider.SearchCategoryArtist, provider.SearchCategoryAlbum:
-	case provider.SearchCategoryPlaylist:
-		writeErr(w, http.StatusBadRequest, "bad_request", "playlist entities are imported, not drilled")
+	limit, offset, ok := parseSearchPaging(w, r)
+	if !ok {
 		return
+	}
+	into := r.URL.Query().Get("into")
+	if into == "" {
+		into = "tracks"
+	}
+	switch into {
+	case "tracks", "albums":
 	default:
-		writeErr(w, http.StatusBadRequest, "bad_request", "unknown category: "+string(category))
+		writeErr(w, http.StatusBadRequest, "bad_request", "into must be tracks or albums")
 		return
+	}
+	category := provider.SearchCategory(r.URL.Query().Get("category"))
+	if into == "albums" && category != provider.SearchCategoryArtist {
+		writeErr(w, http.StatusBadRequest, "bad_request", "into=albums requires category=artist")
+		return
+	}
+	if into == "tracks" {
+		switch category {
+		case provider.SearchCategoryArtist, provider.SearchCategoryAlbum:
+		case provider.SearchCategoryPlaylist:
+			writeErr(w, http.StatusBadRequest, "bad_request", "playlist entities are imported, not drilled")
+			return
+		default:
+			writeErr(w, http.StatusBadRequest, "bad_request", "unknown category: "+string(category))
+			return
+		}
 	}
 	entityID := r.URL.Query().Get("id")
 	if strings.TrimSpace(entityID) == "" {
@@ -1102,12 +1162,31 @@ func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "unknown provider: "+providerID)
 		return
 	}
+	if into == "albums" {
+		lister, supported := p.(provider.EntityAlbumLister)
+		if !supported {
+			writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
+			return
+		}
+		results, err := lister.EntityAlbums(r.Context(), entityID, limit, offset)
+		if errors.Is(err, provider.ErrNotSupported) {
+			writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			return
+		}
+		s.proxiedSearchResults(providerID, results)
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+		return
+	}
 	searcher, ok := p.(provider.CategorySearcher)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
 		return
 	}
-	tracks, err := searcher.EntityTracks(r.Context(), category, entityID)
+	tracks, err := searcher.EntityTracks(r.Context(), category, entityID, limit, offset)
 	if errors.Is(err, provider.ErrNotSupported) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
 		return

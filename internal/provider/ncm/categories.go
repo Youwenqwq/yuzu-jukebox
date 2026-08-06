@@ -19,10 +19,10 @@ func (p *Provider) SearchCategories() []provider.SearchCategory {
 	}
 }
 
-// SearchCategory 按分类搜索歌曲或可继续钻取的实体。
-func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string) ([]provider.SearchResult, error) {
+// SearchCategory 按分类分页搜索歌曲或可继续钻取的实体。
+func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string, limit, offset int) ([]provider.SearchResult, error) {
 	if cat == provider.SearchCategorySong {
-		tracks, err := p.Search(ctx, query)
+		tracks, err := p.Search(ctx, query, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -33,7 +33,12 @@ func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCatego
 		return results, nil
 	}
 
-	q := url.Values{"keywords": {query}, "limit": {"30"}}
+	limit, offset = normalizeSearchPage(limit, offset)
+	q := url.Values{
+		"keywords": {query},
+		"limit":    {strconv.Itoa(limit)},
+		"offset":   {strconv.Itoa(offset)},
+	}
 	switch cat {
 	case provider.SearchCategoryArtist:
 		q.Set("type", "100")
@@ -138,7 +143,14 @@ func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCatego
 }
 
 // EntityTracks 将歌手或专辑实体展开为可入队曲目。歌单继续使用 ImportPlaylist。
-func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string) ([]provider.Track, error) {
+// 上游接口不支持分页，因此先取全量，再在本地分页。
+func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string, limit, offset int) ([]provider.Track, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	var path string
 	switch cat {
 	case provider.SearchCategoryArtist:
@@ -155,11 +167,58 @@ func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory
 	if err := p.get(ctx, path, url.Values{"id": {entityID}}, "", &resp); err != nil {
 		return nil, err
 	}
-	tracks := make([]provider.Track, 0, len(resp.Songs))
-	for _, song := range resp.Songs {
+	if offset >= len(resp.Songs) {
+		return []provider.Track{}, nil
+	}
+	end := len(resp.Songs)
+	if limit < end-offset {
+		end = offset + limit
+	}
+	songs := resp.Songs[offset:end]
+	tracks := make([]provider.Track, 0, len(songs))
+	for _, song := range songs {
 		tracks = append(tracks, p.entitySongTrack(song))
 	}
 	return tracks, nil
+}
+
+// EntityAlbums 将歌手实体展开为可继续钻取的专辑实体列表。
+func (p *Provider) EntityAlbums(ctx context.Context, artistID string, limit, offset int) ([]provider.SearchResult, error) {
+	limit, offset = normalizeSearchPage(limit, offset)
+	q := url.Values{
+		"id":     {artistID},
+		"limit":  {strconv.Itoa(limit)},
+		"offset": {strconv.Itoa(offset)},
+	}
+	var resp struct {
+		HotAlbums []struct {
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			PicURL  string `json:"picUrl"`
+			Artists []struct {
+				Name string `json:"name"`
+			} `json:"artists"`
+			Size int `json:"size"`
+		} `json:"hotAlbums"`
+	}
+	if err := p.get(ctx, "/artist/album", q, "", &resp); err != nil {
+		return nil, err
+	}
+	results := make([]provider.SearchResult, 0, len(resp.HotAlbums))
+	for _, album := range resp.HotAlbums {
+		detail := ""
+		if album.Size > 0 {
+			detail = fmt.Sprintf("%d 首", album.Size)
+		}
+		results = append(results, provider.SearchResult{
+			Type:     provider.SearchCategoryAlbum,
+			EntityID: strconv.FormatInt(album.ID, 10),
+			Name:     album.Name,
+			Detail:   detail,
+			CoverURL: album.PicURL,
+		})
+	}
+	return results, nil
 }
 
 type ncmEntitySong struct {

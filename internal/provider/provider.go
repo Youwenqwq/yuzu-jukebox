@@ -95,11 +95,21 @@ type CategorySearcher interface {
 	Provider
 	// SearchCategories 报告支持的分类（恒含 song）。
 	SearchCategories() []SearchCategory
-	// SearchCategory 按分类检索；cat 必须是 SearchCategories 报告的值。
-	SearchCategory(ctx context.Context, cat SearchCategory, query string) ([]SearchResult, error)
-	// EntityTracks 钻取：把 artist/album 实体展开为可入队曲目。
-	// 不支持的组合（如 playlist）返回 ErrNotSupported。
-	EntityTracks(ctx context.Context, cat SearchCategory, entityID string) ([]Track, error)
+	// SearchCategory 按分类分页检索；cat 必须是 SearchCategories 报告的值。
+	// limit <= 0 时默认 30，offset < 0 时按 0 处理，实现按上游上限收敛。
+	SearchCategory(ctx context.Context, cat SearchCategory, query string, limit, offset int) ([]SearchResult, error)
+	// EntityTracks 分页钻取：把 artist/album 实体展开为可入队曲目。
+	// limit <= 0 时默认 30，offset < 0 时按 0 处理；不支持的组合
+	// （如 playlist）返回 ErrNotSupported。
+	EntityTracks(ctx context.Context, cat SearchCategory, entityID string, limit, offset int) ([]Track, error)
+}
+
+// EntityAlbumLister 是可选接口：能把歌手实体展开为专辑实体列表。
+// 结果与分类检索的 album 实体同构（Type=album/EntityID/Name/Detail/CoverURL），
+// 可再经 EntityTracks(album) 钻到曲目——保持钻取终点归一契约。
+type EntityAlbumLister interface {
+	Provider
+	EntityAlbums(ctx context.Context, artistID string, limit, offset int) ([]SearchResult, error)
 }
 
 // LyricsProvider 是可选接口：能提供歌词的 Provider 实现它。
@@ -131,8 +141,9 @@ func (l StreamLocator) FilePath() string { return strings.TrimPrefix(l.URL, "fil
 type Provider interface {
 	// ID 是 provider 标识，即 TrackRef 的前缀，如 "local" "netease"。
 	ID() string
-	// Search 按关键词检索曲目。
-	Search(ctx context.Context, query string) ([]Track, error)
+	// Search 按关键词分页检索曲目。limit <= 0 时默认 30，offset < 0
+	// 时按 0 处理，实现按上游上限收敛。
+	Search(ctx context.Context, query string, limit, offset int) ([]Track, error)
 	// GetTrack 获取单条元数据。
 	GetTrack(ctx context.Context, ref TrackRef) (Track, error)
 	// Resolve 将逻辑引用兑换为可拉流的物理地址。

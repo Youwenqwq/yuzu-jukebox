@@ -34,6 +34,9 @@ func TestSearchCategoryArtistMapping(t *testing.T) {
 		if got := r.URL.Query().Get("limit"); got != "30" {
 			t.Errorf("limit = %q, want 30", got)
 		}
+		if got := r.URL.Query().Get("pn"); got != "1" {
+			t.Errorf("pn = %q, want 1", got)
+		}
 		if got := r.Header.Get(cookieHeader); got != "SESSDATA=test" {
 			t.Errorf("cookie header = %q", got)
 		}
@@ -50,7 +53,7 @@ func TestSearchCategoryArtistMapping(t *testing.T) {
 	if got := p.SearchCategories(); len(got) != 2 || got[0] != provider.SearchCategorySong || got[1] != provider.SearchCategoryArtist {
 		t.Fatalf("SearchCategories() = %v", got)
 	}
-	results, err := p.SearchCategory(context.Background(), provider.SearchCategoryArtist, "周杰伦")
+	results, err := p.SearchCategory(context.Background(), provider.SearchCategoryArtist, "周杰伦", 0, 0)
 	if err != nil {
 		t.Fatalf("SearchCategory: %v", err)
 	}
@@ -68,8 +71,65 @@ func TestSearchCategoryArtistMapping(t *testing.T) {
 	}
 }
 
+func TestSearchCategoryArtistPaging(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/up" {
+			t.Errorf("path = %q, want /search/up", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("keywords"); got != "分页 UP" {
+			t.Errorf("keywords = %q, want 分页 UP", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "30" {
+			t.Errorf("limit = %q, want 30", got)
+		}
+		if got := r.URL.Query().Get("pn"); got != "2" {
+			t.Errorf("pn = %q, want 2", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+	}))
+	defer server.Close()
+
+	if _, err := testProvider(server, "cookie").SearchCategory(
+		context.Background(), provider.SearchCategoryArtist, "分页 UP", 30, 30,
+	); err != nil {
+		t.Fatalf("SearchCategory: %v", err)
+	}
+}
+
+func TestSearchCategorySongPaging(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			t.Errorf("path = %q, want /search", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("keywords"); got != "分页视频" {
+			t.Errorf("keywords = %q, want 分页视频", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "12" {
+			t.Errorf("limit = %q, want 12", got)
+		}
+		if got := r.URL.Query().Get("offset"); got != "7" {
+			t.Errorf("offset = %q, want 7", got)
+		}
+		_ = json.NewEncoder(w).Encode(videoListResponse{
+			Results: makeVideos("song-", 1, -1),
+		})
+	}))
+	defer server.Close()
+
+	results, err := testProvider(server, "cookie").SearchCategory(
+		context.Background(), provider.SearchCategorySong, "分页视频", 12, 7,
+	)
+	if err != nil {
+		t.Fatalf("SearchCategory: %v", err)
+	}
+	if len(results) != 1 || results[0].Type != provider.SearchCategorySong || results[0].Track == nil {
+		t.Fatalf("results = %+v, want one song result", results)
+	}
+	assertVideoTrack(t, *results[0].Track, "song-0")
+}
+
 func TestEntityTracksPagination(t *testing.T) {
-	t.Run("three page hard cap", func(t *testing.T) {
+	t.Run("offset starts midway through upstream page", func(t *testing.T) {
 		var requests int
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests++
@@ -77,19 +137,25 @@ func TestEntityTracksPagination(t *testing.T) {
 			if r.URL.Path != "/space/videos" || r.URL.Query().Get("mid") != "12345" || r.URL.Query().Get("ps") != "30" {
 				t.Errorf("unexpected request: %s?%s", r.URL.Path, r.URL.RawQuery)
 			}
+			wantPN := requests + 1
+			if pn != wantPN {
+				t.Errorf("request %d pn = %d, want %d", requests, pn, wantPN)
+			}
 			_ = json.NewEncoder(w).Encode(videoListResponse{Results: makeVideos(fmt.Sprintf("p%d-", pn), 30, -1)})
 		}))
 		defer server.Close()
 
-		tracks, err := testProvider(server, "cookie").EntityTracks(context.Background(), provider.SearchCategoryArtist, "12345")
+		tracks, err := testProvider(server, "cookie").EntityTracks(
+			context.Background(), provider.SearchCategoryArtist, "12345", 40, 35,
+		)
 		if err != nil {
 			t.Fatalf("EntityTracks: %v", err)
 		}
-		if requests != 3 || len(tracks) != 90 {
-			t.Fatalf("requests = %d, tracks = %d; want 3 and 90", requests, len(tracks))
+		if requests != 2 || len(tracks) != 40 {
+			t.Fatalf("requests = %d, tracks = %d; want 2 and 40", requests, len(tracks))
 		}
-		assertVideoTrack(t, tracks[0], "p1-0")
-		assertVideoTrack(t, tracks[89], "p3-29")
+		assertVideoTrack(t, tracks[0], "p2-5")
+		assertVideoTrack(t, tracks[39], "p3-14")
 	})
 
 	t.Run("short page stops early", func(t *testing.T) {
@@ -105,7 +171,9 @@ func TestEntityTracksPagination(t *testing.T) {
 		}))
 		defer server.Close()
 
-		tracks, err := testProvider(server, "cookie").EntityTracks(context.Background(), provider.SearchCategoryArtist, "8")
+		tracks, err := testProvider(server, "cookie").EntityTracks(
+			context.Background(), provider.SearchCategoryArtist, "8", 50, 0,
+		)
 		if err != nil {
 			t.Fatalf("EntityTracks: %v", err)
 		}

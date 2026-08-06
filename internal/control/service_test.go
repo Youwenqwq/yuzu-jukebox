@@ -73,8 +73,10 @@ func (rooms testRoomSource) Get(id string) (*room.Room, error) {
 
 type staticProvider struct{}
 
-func (*staticProvider) ID() string                                               { return "test" }
-func (*staticProvider) Search(context.Context, string) ([]provider.Track, error) { return nil, nil }
+func (*staticProvider) ID() string { return "test" }
+func (*staticProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
+	return nil, nil
+}
 func (*staticProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
 	return provider.Track{
 		Ref: ref, Title: ref.String(), DurationMs: int64(10 * time.Minute / time.Millisecond),

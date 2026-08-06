@@ -81,8 +81,14 @@ func (p *Provider) Add(ctx context.Context, filename string, r io.Reader, title,
 	return p.trackOf(m), nil
 }
 
-func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, error) {
-	files, err := p.st.SearchMediaFiles(ctx, query, 50)
+func (p *Provider) Search(ctx context.Context, query string, limit, offset int) ([]provider.Track, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	files, err := p.st.SearchMediaFiles(ctx, query, limit, offset)
 	if err != nil {
 		return nil, err
 	}

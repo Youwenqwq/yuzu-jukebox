@@ -24,7 +24,7 @@ type coverFakeProvider struct {
 }
 
 func (p *coverFakeProvider) ID() string { return "fake" }
-func (p *coverFakeProvider) Search(ctx context.Context, query string) ([]provider.Track, error) {
+func (p *coverFakeProvider) Search(ctx context.Context, query string, limit, offset int) ([]provider.Track, error) {
 	return []provider.Track{{
 		Ref: provider.NewRef("fake", "t1"), Title: "歌", CoverURL: p.upstream + "/track.jpg",
 	}}, nil
@@ -42,13 +42,13 @@ func (p *coverFakeProvider) CoverHeaders() http.Header {
 func (p *coverFakeProvider) SearchCategories() []provider.SearchCategory {
 	return []provider.SearchCategory{provider.SearchCategorySong, provider.SearchCategoryArtist}
 }
-func (p *coverFakeProvider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string) ([]provider.SearchResult, error) {
+func (p *coverFakeProvider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string, limit, offset int) ([]provider.SearchResult, error) {
 	return []provider.SearchResult{{
 		Type: provider.SearchCategoryArtist, EntityID: "42", Name: "某艺人",
 		CoverURL: p.upstream + "/artist.jpg",
 	}}, nil
 }
-func (p *coverFakeProvider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string) ([]provider.Track, error) {
+func (p *coverFakeProvider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string, limit, offset int) ([]provider.Track, error) {
 	return nil, provider.ErrNotSupported
 }
 

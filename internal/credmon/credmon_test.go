@@ -17,7 +17,7 @@ type fakeProvider struct {
 }
 
 func (f *fakeProvider) ID() string { return f.id }
-func (f *fakeProvider) Search(ctx context.Context, q string) ([]provider.Track, error) {
+func (f *fakeProvider) Search(ctx context.Context, q string, limit, offset int) ([]provider.Track, error) {
 	return nil, nil
 }
 func (f *fakeProvider) GetTrack(ctx context.Context, r provider.TrackRef) (provider.Track, error) {

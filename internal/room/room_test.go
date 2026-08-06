@@ -749,7 +749,7 @@ type recordingPlayProvider struct {
 }
 
 func (*recordingPlayProvider) ID() string { return "scrobble" }
-func (*recordingPlayProvider) Search(context.Context, string) ([]provider.Track, error) {
+func (*recordingPlayProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
 	return nil, nil
 }
 func (*recordingPlayProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
@@ -766,7 +766,7 @@ func (p *recordingPlayProvider) ReportPlay(_ context.Context, id string, playedM
 type nonReportingProvider struct{}
 
 func (*nonReportingProvider) ID() string { return "scrobble" }
-func (*nonReportingProvider) Search(context.Context, string) ([]provider.Track, error) {
+func (*nonReportingProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
 	return nil, nil
 }
 func (*nonReportingProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
