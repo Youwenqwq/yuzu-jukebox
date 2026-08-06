@@ -208,3 +208,9 @@ Still planned:
 - **Cross-room history**: `GET /api/v1/history?requester=me` is caller-only (no admin override); backed by index `idx_play_history_requester` (migration 0024).
 - **Global hot feed**: `GET /api/v1/stats/hot?days=&limit=` aggregates `play_history` across rooms; skipped tracks still count (intent signal) — do not filter by `end_reason`.
 - **Radio source catalog**: `capabilities.radio_sources` in `/api/v1/providers` comes from the optional `provider.SourceCatalog` interface; `finite=false` sources reject `shuffle`/`once`. The generic `playlist:<id>` source is room-level, always available, and deliberately absent from the catalog.
+
+### Categorized Search
+- **Capability-driven**: `provider.CategorySearcher` (song/artist/album/playlist) is advertised via `capabilities.search_categories`; clients render only reported tabs. Asymmetry is correct — bili has no album/playlist tabs, local has no categories.
+- **Two-level model**: category search returns discriminated `SearchResult` entities (song wraps a queueable `track`; artist/album/playlist carry `entity_id`); drill = `GET /api/v1/search/entity` (artist/album only), playlist drill = the existing `/api/v1/playlists/import` flow (bili favorite = `media_id`, capped at 500).
+- **Legacy path is frozen**: `/api/v1/search` without `category` (or `category=song`) keeps the exact `{"tracks":[...]}` contract — app_test.go pins it.
+- **Bili sidecar contract**: `/search/up`, `/space/videos`, `/fav/resource/list`, `/fav/folders` live in the bilibili-api sidecar (WBI signing there); yuzu parses snake_case fields, normalizes protocol-relative covers, and requires a login cookie for favorites import.

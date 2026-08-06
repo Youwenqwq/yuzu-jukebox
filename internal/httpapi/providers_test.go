@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
@@ -34,6 +36,42 @@ func (p *providerEndpointBase) GetTrack(context.Context, provider.TrackRef) (pro
 
 func (p *providerEndpointBase) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
 	return provider.StreamLocator{}, nil
+}
+
+type providerCategorySearcherFake struct {
+	providerEndpointBase
+	categories         []provider.SearchCategory
+	searchResults      []provider.SearchResult
+	entityTracks       []provider.Track
+	entityErr          error
+	lastSearchCategory provider.SearchCategory
+	lastSearchQuery    string
+	lastEntityCategory provider.SearchCategory
+	lastEntityID       string
+}
+
+func (p *providerCategorySearcherFake) SearchCategories() []provider.SearchCategory {
+	return p.categories
+}
+
+func (p *providerCategorySearcherFake) SearchCategory(
+	_ context.Context,
+	category provider.SearchCategory,
+	query string,
+) ([]provider.SearchResult, error) {
+	p.lastSearchCategory = category
+	p.lastSearchQuery = query
+	return p.searchResults, nil
+}
+
+func (p *providerCategorySearcherFake) EntityTracks(
+	_ context.Context,
+	category provider.SearchCategory,
+	entityID string,
+) ([]provider.Track, error) {
+	p.lastEntityCategory = category
+	p.lastEntityID = entityID
+	return p.entityTracks, p.entityErr
 }
 
 type providerAccountWriterFake struct {
@@ -81,6 +119,7 @@ type providerEndpointFixture struct {
 	writer     *providerAccountWriterFake
 	ownerToken string
 	otherToken string
+	category   *providerCategorySearcherFake
 }
 
 func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
@@ -109,7 +148,28 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 		providerEndpointBase: providerEndpointBase{id: "writer"},
 		st:                   st,
 	}
+	category := &providerCategorySearcherFake{
+		providerEndpointBase: providerEndpointBase{id: "categorized"},
+		categories: []provider.SearchCategory{
+			provider.SearchCategorySong,
+			provider.SearchCategoryArtist,
+		},
+		searchResults: []provider.SearchResult{{
+			Type:     provider.SearchCategoryArtist,
+			EntityID: "artist-7",
+			Name:     "测试歌手",
+			Detail:   "歌手简介",
+			CoverURL: "https://example.com/artist.jpg",
+		}},
+		entityTracks: []provider.Track{{
+			Ref:        provider.NewRef("categorized", "track-9"),
+			Title:      "测试歌曲",
+			Artist:     "测试歌手",
+			DurationMs: 123000,
+		}},
+	}
 	reg.Register(writer)
+	reg.Register(category)
 	reg.Register(&providerEndpointBase{id: "basic"})
 	reg.Register(ncm.New("http://127.0.0.1", "", st))
 	if err := st.UpsertCredential(context.Background(), writer.ID(), "credential", "ok"); err != nil {
@@ -125,7 +185,8 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 		ws: wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
 	}
 	return providerEndpointFixture{
-		handler: s.Handler(), st: st, writer: writer, ownerToken: ownerToken, otherToken: otherToken,
+		handler: s.Handler(), st: st, writer: writer, category: category,
+		ownerToken: ownerToken, otherToken: otherToken,
 	}
 }
 
@@ -272,6 +333,9 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if _, ok := capabilities["radio_sources"]; ok {
 			t.Fatalf("writer provider advertises radio_sources: %#v", capabilities)
 		}
+		if _, ok := capabilities["search_categories"]; ok {
+			t.Fatalf("writer provider advertises search_categories: %#v", capabilities)
+		}
 		ncmEntry := entries["ncm"]
 		ncmCapabilities, ok := ncmEntry["capabilities"].(map[string]any)
 		if !ok {
@@ -289,6 +353,17 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if got := ncmCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantRadioSources) {
 			t.Fatalf("ncm radio_sources = %#v, want %#v", got, wantRadioSources)
 		}
+		categorized := entries["categorized"]
+		categoryCapabilities, ok := categorized["capabilities"].(map[string]any)
+		if !ok {
+			t.Fatalf("categorized capabilities = %#v", categorized["capabilities"])
+		}
+		if got := categoryCapabilities["search_categories"]; !reflect.DeepEqual(got, []any{"song", "artist"}) {
+			t.Fatalf("categorized search_categories = %#v", got)
+		}
+		if _, ok := categoryCapabilities["radio_sources"]; ok {
+			t.Fatalf("categorized provider advertises radio_sources: %#v", categoryCapabilities)
+		}
 		basic := entries["basic"]
 		if _, ok := basic["capabilities"]; ok {
 			t.Fatalf("basic provider includes capabilities: %#v", basic)
@@ -300,5 +375,213 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 	})
 	t.Run("other principal", func(t *testing.T) {
 		assertList(t, f.otherToken, false)
+	})
+}
+
+func TestSearchCategories(t *testing.T) {
+	f := setupProviderEndpoints(t)
+
+	t.Run("legacy and explicit song retain tracks response", func(t *testing.T) {
+		legacy := providerEndpointRequest(
+			t, f, http.MethodGet, "/api/v1/search?provider=basic&q=test", f.ownerToken, nil,
+		)
+		explicitSong := providerEndpointRequest(
+			t, f, http.MethodGet, "/api/v1/search?provider=basic&q=test&category=song", f.ownerToken, nil,
+		)
+		if legacy.Code != http.StatusOK {
+			t.Fatalf("legacy search status = %d, body = %s", legacy.Code, legacy.Body.String())
+		}
+		if explicitSong.Code != http.StatusOK {
+			t.Fatalf("song search status = %d, body = %s", explicitSong.Code, explicitSong.Body.String())
+		}
+		const want = "{\"tracks\":null}\n"
+		if legacy.Body.String() != want || explicitSong.Body.String() != want {
+			t.Fatalf("legacy/song bodies = %q / %q, want %q", legacy.Body.String(), explicitSong.Body.String(), want)
+		}
+	})
+
+	t.Run("artist search returns entities", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search?provider=categorized&q=%E6%B5%8B%E8%AF%95&category=artist",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("artist search status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Results []provider.SearchResult `json:"results"`
+			Tracks  json.RawMessage         `json:"tracks"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(body.Results, f.category.searchResults) {
+			t.Fatalf("artist results = %#v, want %#v", body.Results, f.category.searchResults)
+		}
+		if body.Tracks != nil {
+			t.Fatalf("artist response includes tracks: %s", body.Tracks)
+		}
+		if f.category.lastSearchCategory != provider.SearchCategoryArtist || f.category.lastSearchQuery != "测试" {
+			t.Fatalf(
+				"search call = (%q, %q)",
+				f.category.lastSearchCategory,
+				f.category.lastSearchQuery,
+			)
+		}
+	})
+
+	t.Run("unsupported category lists provider categories", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search?provider=categorized&q=test&category=album",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("unsupported category status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "song, artist") {
+			t.Fatalf("unsupported category response does not list supported categories: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("unknown category is rejected", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search?provider=categorized&q=test&category=bogus",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown category") {
+			t.Fatalf("bogus category status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("provider without category search is rejected", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search?provider=basic&q=test&category=artist",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "capability not supported") {
+			t.Fatalf("basic category search status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestSearchEntity(t *testing.T) {
+	f := setupProviderEndpoints(t)
+
+	t.Run("artist drill returns tracks", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=categorized&category=artist&id=artist-7",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("artist drill status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Tracks []provider.Track `json:"tracks"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(body.Tracks, f.category.entityTracks) {
+			t.Fatalf("artist tracks = %#v, want %#v", body.Tracks, f.category.entityTracks)
+		}
+		if f.category.lastEntityCategory != provider.SearchCategoryArtist || f.category.lastEntityID != "artist-7" {
+			t.Fatalf("entity call = (%q, %q)", f.category.lastEntityCategory, f.category.lastEntityID)
+		}
+	})
+
+	t.Run("playlist entities are not drilled", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=categorized&category=playlist&id=list-1",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "imported, not drilled") {
+			t.Fatalf("playlist drill status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("id is required", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=categorized&category=artist",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "id is required") {
+			t.Fatalf("missing id status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("provider without category search is rejected", func(t *testing.T) {
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=basic&category=artist&id=artist-7",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "capability not supported") {
+			t.Fatalf("basic entity drill status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("not supported sentinel maps to bad request", func(t *testing.T) {
+		f.category.entityErr = provider.ErrNotSupported
+		t.Cleanup(func() { f.category.entityErr = nil })
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=categorized&category=album&id=album-2",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "capability not supported") {
+			t.Fatalf("unsupported entity status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		f.category.entityErr = nil
+	})
+
+	t.Run("provider failure maps to bad gateway", func(t *testing.T) {
+		f.category.entityErr = errors.New("upstream failed")
+		t.Cleanup(func() { f.category.entityErr = nil })
+		rec := providerEndpointRequest(
+			t,
+			f,
+			http.MethodGet,
+			"/api/v1/search/entity?provider=categorized&category=album&id=album-2",
+			f.ownerToken,
+			nil,
+		)
+		if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "provider_error") {
+			t.Fatalf("failed entity status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		f.category.entityErr = nil
 	})
 }

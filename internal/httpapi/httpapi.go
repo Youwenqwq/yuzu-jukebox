@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/rooms/{id}/radio", s.idempotent(s.radioPlay))
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/radio", s.idempotent(s.radioStop))
 	mux.HandleFunc("GET /api/v1/search", s.search)
+	mux.HandleFunc("GET /api/v1/search/entity", s.searchEntity)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
 	mux.HandleFunc("POST /api/v1/providers/{id}/like", s.likeProviderTrack)
@@ -726,8 +727,9 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type capabilities struct {
-		AccountWrite []string               `json:"account_write"`
-		RadioSources []provider.RadioSource `json:"radio_sources,omitempty"`
+		AccountWrite     []string                  `json:"account_write,omitempty"`
+		RadioSources     []provider.RadioSource    `json:"radio_sources,omitempty"`
+		SearchCategories []provider.SearchCategory `json:"search_categories,omitempty"`
 	}
 	type info struct {
 		ID               string        `json:"id"`
@@ -757,10 +759,15 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		if catalog, ok := p.(provider.SourceCatalog); ok {
 			radioSources = catalog.RadioSources()
 		}
-		if len(accountWrite) > 0 || len(radioSources) > 0 {
+		var searchCategories []provider.SearchCategory
+		if searcher, ok := p.(provider.CategorySearcher); ok {
+			searchCategories = searcher.SearchCategories()
+		}
+		if len(accountWrite) > 0 || len(radioSources) > 0 || len(searchCategories) > 0 {
 			entry.Capabilities = &capabilities{
-				AccountWrite: accountWrite,
-				RadioSources: radioSources,
+				AccountWrite:     accountWrite,
+				RadioSources:     radioSources,
+				SearchCategories: searchCategories,
 			}
 		}
 		out = append(out, entry)
@@ -957,7 +964,92 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "unknown provider: "+providerID)
 		return
 	}
-	tracks, err := p.Search(r.Context(), q)
+
+	category := provider.SearchCategory(r.URL.Query().Get("category"))
+	if category == "" || category == provider.SearchCategorySong {
+		tracks, err := p.Search(r.Context(), q)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks})
+		return
+	}
+	switch category {
+	case provider.SearchCategoryArtist, provider.SearchCategoryAlbum, provider.SearchCategoryPlaylist:
+	default:
+		writeErr(w, http.StatusBadRequest, "bad_request", "unknown category: "+string(category))
+		return
+	}
+	searcher, ok := p.(provider.CategorySearcher)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
+		return
+	}
+	categories := searcher.SearchCategories()
+	supported := false
+	supportedNames := make([]string, 0, len(categories))
+	for _, supportedCategory := range categories {
+		supportedNames = append(supportedNames, string(supportedCategory))
+		if category == supportedCategory {
+			supported = true
+		}
+	}
+	if !supported {
+		writeErr(
+			w,
+			http.StatusBadRequest,
+			"bad_request",
+			"unsupported category "+string(category)+"; supported categories: "+strings.Join(supportedNames, ", "),
+		)
+		return
+	}
+	results, err := searcher.SearchCategory(r.Context(), category, q)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+		return
+	}
+	category := provider.SearchCategory(r.URL.Query().Get("category"))
+	switch category {
+	case provider.SearchCategoryArtist, provider.SearchCategoryAlbum:
+	case provider.SearchCategoryPlaylist:
+		writeErr(w, http.StatusBadRequest, "bad_request", "playlist entities are imported, not drilled")
+		return
+	default:
+		writeErr(w, http.StatusBadRequest, "bad_request", "unknown category: "+string(category))
+		return
+	}
+	entityID := r.URL.Query().Get("id")
+	if strings.TrimSpace(entityID) == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "id is required")
+		return
+	}
+	providerID := r.URL.Query().Get("provider")
+	if providerID == "" {
+		providerID = "local"
+	}
+	p, ok := s.reg.Get(providerID)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request", "unknown provider: "+providerID)
+		return
+	}
+	searcher, ok := p.(provider.CategorySearcher)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
+		return
+	}
+	tracks, err := searcher.EntityTracks(r.Context(), category, entityID)
+	if errors.Is(err, provider.ErrNotSupported) {
+		writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return

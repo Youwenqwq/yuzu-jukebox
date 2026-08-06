@@ -787,7 +787,8 @@ Room create/PATCH/list/get 的错误合同：
 
 | 端点 | 权限 | 说明 |
 |---|---|---|
-| `GET /api/v1/search?provider=&q=` | `requester` | 转发 Provider.Search，返回 Track 列表（含 track_ref） |
+| `GET /api/v1/search?provider=&q=&category=` | `requester` | `category` 缺省或 `song`：转发 Provider.Search，返回 `{"tracks":[...]}`；`artist`/`album`/`playlist`：分类检索（Provider 须实现 `CategorySearcher` 且支持该分类），返回 `{"results":[...]}` 判别实体（见 6.2.2） |
+| `GET /api/v1/search/entity?provider=&category=&id=` | `requester` | 实体钻取：`category` 限 `artist`/`album`，把实体展开为可入队 `{"tracks":[...]}`；`playlist` 实体走 `/api/v1/playlists/import` 导入，不经此端点 |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | body `{"payload":"..."}`；先校验再热生效，凭据存储于服务端且永不下发 |
 | `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 返回 `{key, qr_content}`，Client 自行渲染二维码 |
@@ -830,7 +831,8 @@ Room create/PATCH/list/get 的错误合同：
           {"spec": "fm", "name": "私人 FM", "finite": false},
           {"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false},
           {"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false}
-        ]
+        ],
+        "search_categories": ["song", "artist", "album", "playlist"]
       }
     }
   ]
@@ -877,6 +879,31 @@ Content-Type: application/json
 ```
 
 这两个端点与 §5.2 的自动播放上报共同构成账号写白名单，不存在“任意 NCM path + cookie”代理。每次写尝试均记录 `audit_log`，内部 cookie 不出服务端。
+
+#### 6.2.2 分类检索与实体钻取合同
+
+分类检索是可选能力：Provider 实现 `provider.CategorySearcher` 后，`GET /api/v1/providers` 的 `capabilities.search_categories` 报告其支持的分类，Client 只渲染报告中存在的分类 tab——能力不对称是正常状态（bili 无 `album`/`playlist` 分类，local 无分类能力），不得占位造假。
+
+| Provider | `song` | `artist` | `album` | `playlist` |
+|---|---|---|---|---|
+| ncm | ✓ | ✓（钻取 `/artist/top/song`） | ✓（钻取 `/album`） | ✓（钻取 = 导入，见下） |
+| bili | ✓ | ✓（UP 主；钻取投稿列表，封顶 90 条） | — | —（收藏夹仅按 media_id 导入） |
+| local | ✓ | — | — | — |
+
+非 `song` 分类的检索返回判别实体而非 Track：
+
+```json
+{
+  "results": [
+    {"type": "artist", "entity_id": "6452", "name": "周杰伦",
+     "detail": "歌手简介", "cover_url": "https://..."}
+  ]
+}
+```
+
+- `type=song` 时改为 `{"type":"song","track":{...}}`，`track` 与旧 `{"tracks":[...]}` 元素同构，可直接入队。
+- `entity_id` 是钻取/导入键：`artist`/`album` 经 `GET /api/v1/search/entity` 展开为 `{"tracks":[...]}`；`playlist` 不经钻取，作为 `POST /api/v1/playlists/import` 的 `playlist_id` 导入（bili 收藏夹即 `media_id`，全量拉取封顶 500 条）。
+- 请求了 Provider 未报告的分类、或未实现 `CategorySearcher` 的 Provider，均为 400 `bad_request`。
 
 配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；正整数时每 6 小时清理超过该天数未访问的缓存，正在下载的条目跳过。
 

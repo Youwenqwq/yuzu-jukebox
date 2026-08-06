@@ -65,6 +65,43 @@ type Lyrics struct {
 // ErrNotSupported 能力缺席：provider 明确不支持某项可选能力。
 var ErrNotSupported = errors.New("capability not supported by provider")
 
+// SearchCategory 分类检索轴。
+type SearchCategory string
+
+const (
+	SearchCategorySong     SearchCategory = "song"
+	SearchCategoryArtist   SearchCategory = "artist"
+	SearchCategoryAlbum    SearchCategory = "album"
+	SearchCategoryPlaylist SearchCategory = "playlist"
+)
+
+// SearchResult 分类检索结果：判别实体。
+// Type=song 时 Track 非空（可直接入队）；其余类型为实体，
+// EntityID 用于钻取（EntityTracks：artist/album）或导入
+// （playlist：走 PlaylistImporter 流程，不经 EntityTracks）。
+type SearchResult struct {
+	Type     SearchCategory `json:"type"`
+	Track    *Track         `json:"track,omitempty"`
+	EntityID string         `json:"entity_id,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	Detail   string         `json:"detail,omitempty"` // 次要文本：专辑歌手/歌单曲目数/UP主签名等
+	CoverURL string         `json:"cover_url,omitempty"`
+}
+
+// CategorySearcher 是可选接口：支持分类检索的 Provider 实现它。
+// 不支持的 provider 直接不实现，调用方以类型断言探测；
+// 能力经 /api/v1/providers 的 capabilities.search_categories 报告给客户端。
+type CategorySearcher interface {
+	Provider
+	// SearchCategories 报告支持的分类（恒含 song）。
+	SearchCategories() []SearchCategory
+	// SearchCategory 按分类检索；cat 必须是 SearchCategories 报告的值。
+	SearchCategory(ctx context.Context, cat SearchCategory, query string) ([]SearchResult, error)
+	// EntityTracks 钻取：把 artist/album 实体展开为可入队曲目。
+	// 不支持的组合（如 playlist）返回 ErrNotSupported。
+	EntityTracks(ctx context.Context, cat SearchCategory, entityID string) ([]Track, error)
+}
+
 // LyricsProvider 是可选接口：能提供歌词的 Provider 实现它。
 // 不支持的 provider 直接不实现，调用方以类型断言探测。
 type LyricsProvider interface {

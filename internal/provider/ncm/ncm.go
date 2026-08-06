@@ -31,9 +31,10 @@ type Provider struct {
 }
 
 var (
-	_ provider.PlayReporter  = (*Provider)(nil)
-	_ provider.AccountWriter = (*Provider)(nil)
-	_ provider.SourceCatalog = (*Provider)(nil)
+	_ provider.PlayReporter     = (*Provider)(nil)
+	_ provider.AccountWriter    = (*Provider)(nil)
+	_ provider.SourceCatalog    = (*Provider)(nil)
+	_ provider.CategorySearcher = (*Provider)(nil)
 )
 
 func New(baseURL, level string, st *store.Store) *Provider {

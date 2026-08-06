@@ -152,39 +152,213 @@ func (p *Provider) QRLoginPoll(ctx context.Context, key string) (string, string,
 
 // ---------- Provider 接口 ----------
 
+type videoResult struct {
+	Bvid       string `json:"bvid"`
+	Title      string `json:"title"`
+	Author     string `json:"author"`
+	Cover      string `json:"cover"`     // 可能是协议相对 URL（//i0.hdslb.com/...）
+	Partition  string `json:"partition"` // 仅搜索结果提供，作为 Album
+	DurationMs int64  `json:"duration_ms"`
+	Published  int64  `json:"published"` // UP 主投稿列表提供
+}
+
+type videoListResponse struct {
+	Results []videoResult `json:"results"`
+	Total   int           `json:"total"` // 仅收藏夹内容列表提供
+}
+
 func (p *Provider) Search(ctx context.Context, query string) ([]provider.Track, error) {
 	q := url.Values{"keywords": {query}, "limit": {"30"}}
-	var resp struct {
-		Results []struct {
-			Bvid       string `json:"bvid"`
-			Title      string `json:"title"`
-			Author     string `json:"author"`
-			Cover      string `json:"cover"`     // 可能是协议相对 URL（//i0.hdslb.com/...）
-			Partition  string `json:"partition"` // 视频分区，作为 Album
-			DurationMs int64  `json:"duration_ms"`
-		} `json:"results"`
-	}
+	var resp videoListResponse
 	if err := p.get(ctx, "/search", q, p.cookie.Load().(string), &resp); err != nil {
 		return nil, err
 	}
 	out := make([]provider.Track, 0, len(resp.Results))
 	for _, r := range resp.Results {
-		if r.Bvid == "" {
-			continue
+		if track, ok := p.trackFromVideo(r); ok {
+			out = append(out, track)
 		}
-		out = append(out, provider.Track{
-			Ref:          provider.NewRef(p.ID(), r.Bvid),
-			Title:        r.Title,
-			Artist:       r.Author,
-			Album:        r.Partition,
-			CoverURL:     normalizeCoverURL(r.Cover),
-			SourceURL:    videoURL(r.Bvid),
-			DurationMs:   r.DurationMs,
-			Contributors: uploaderContributor(r.Author),
-		})
 	}
 	return out, nil
 }
+
+func (p *Provider) trackFromVideo(v videoResult) (provider.Track, bool) {
+	if v.Bvid == "" {
+		return provider.Track{}, false
+	}
+	return provider.Track{
+		Ref:          provider.NewRef(p.ID(), v.Bvid),
+		Title:        v.Title,
+		Artist:       v.Author,
+		Album:        v.Partition,
+		CoverURL:     normalizeCoverURL(v.Cover),
+		SourceURL:    videoURL(v.Bvid),
+		DurationMs:   v.DurationMs,
+		Contributors: uploaderContributor(v.Author),
+	}, true
+}
+
+// SearchCategories 实现 provider.CategorySearcher；B 站仅支持视频与 UP 主。
+func (p *Provider) SearchCategories() []provider.SearchCategory {
+	return []provider.SearchCategory{
+		provider.SearchCategorySong,
+		provider.SearchCategoryArtist,
+	}
+}
+
+func (p *Provider) SearchCategory(ctx context.Context, cat provider.SearchCategory, query string) ([]provider.SearchResult, error) {
+	switch cat {
+	case provider.SearchCategorySong:
+		tracks, err := p.Search(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		results := make([]provider.SearchResult, len(tracks))
+		for i := range tracks {
+			results[i] = provider.SearchResult{
+				Type:  provider.SearchCategorySong,
+				Track: &tracks[i],
+			}
+		}
+		return results, nil
+
+	case provider.SearchCategoryArtist:
+		var resp struct {
+			Results []struct {
+				Mid  int64  `json:"mid"`
+				Name string `json:"name"`
+				Face string `json:"face"`
+				Fans int64  `json:"fans"`
+				Sign string `json:"sign"`
+			} `json:"results"`
+		}
+		q := url.Values{"keywords": {query}, "limit": {"30"}}
+		if err := p.get(ctx, "/search/up", q, p.cookie.Load().(string), &resp); err != nil {
+			return nil, err
+		}
+		results := make([]provider.SearchResult, 0, len(resp.Results))
+		for _, r := range resp.Results {
+			detail := r.Sign
+			if detail == "" {
+				// 简介缺失时仍展示有意义的次要信息。
+				detail = strconv.FormatInt(r.Fans, 10) + " 粉丝"
+			}
+			results = append(results, provider.SearchResult{
+				Type:     provider.SearchCategoryArtist,
+				EntityID: strconv.FormatInt(r.Mid, 10),
+				Name:     r.Name,
+				Detail:   detail,
+				CoverURL: normalizeCoverURL(r.Face),
+			})
+		}
+		return results, nil
+
+	default:
+		return nil, provider.ErrNotSupported
+	}
+}
+
+func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory, entityID string) ([]provider.Track, error) {
+	if cat != provider.SearchCategoryArtist {
+		return nil, provider.ErrNotSupported
+	}
+
+	const (
+		pageSize = 30
+		maxPages = 3
+	)
+	tracks := make([]provider.Track, 0, pageSize*maxPages)
+	for pn := 1; pn <= maxPages; pn++ {
+		q := url.Values{
+			"mid": {entityID},
+			"pn":  {strconv.Itoa(pn)},
+			"ps":  {strconv.Itoa(pageSize)},
+		}
+		var resp videoListResponse
+		if err := p.get(ctx, "/space/videos", q, p.cookie.Load().(string), &resp); err != nil {
+			return nil, err
+		}
+		for _, video := range resp.Results {
+			if track, ok := p.trackFromVideo(video); ok {
+				tracks = append(tracks, track)
+			}
+		}
+		if len(resp.Results) < pageSize {
+			break
+		}
+	}
+	return tracks, nil
+}
+
+// ImportPlaylist 把 B 站收藏夹 media_id 导入为普通歌单。
+func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (string, []provider.Track, error) {
+	if !isDecimalID(playlistID) {
+		return "", nil, fmt.Errorf("invalid bili favorite media_id %q: want digits", playlistID)
+	}
+	cookie := p.cookie.Load().(string)
+	if strings.TrimSpace(cookie) == "" {
+		return "", nil, fmt.Errorf("bili 收藏夹导入需要登录 cookie")
+	}
+
+	const (
+		pageSize = 20
+		maxItems = 500 // 收藏夹可能极大，硬封顶防失控。
+	)
+	tracks := make([]provider.Track, 0, pageSize)
+	processed := 0
+	total := -1
+	for pn := 1; processed < maxItems; pn++ {
+		q := url.Values{
+			"media_id": {playlistID},
+			"pn":       {strconv.Itoa(pn)},
+			"ps":       {strconv.Itoa(pageSize)},
+		}
+		var resp videoListResponse
+		if err := p.get(ctx, "/fav/resource/list", q, cookie, &resp); err != nil {
+			return "", nil, err
+		}
+		if total < 0 {
+			total = resp.Total
+		}
+
+		take := len(resp.Results)
+		if remaining := maxItems - processed; take > remaining {
+			take = remaining
+		}
+		if remaining := total - processed; take > remaining {
+			take = remaining
+		}
+		for _, video := range resp.Results[:take] {
+			processed++
+			if track, ok := p.trackFromVideo(video); ok {
+				tracks = append(tracks, track)
+			}
+		}
+		if processed >= total || processed >= maxItems || len(resp.Results) < pageSize {
+			break
+		}
+	}
+	// sidecar 响应不含收藏夹标题；HTTP 导入流程允许空名称并支持调用方覆盖。
+	return "", tracks, nil
+}
+
+func isDecimalID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
+}
+
+var (
+	_ provider.CategorySearcher = (*Provider)(nil)
+	_ provider.PlaylistImporter = (*Provider)(nil)
+)
 
 // parseRef 拆解扩展 ref：bili:BVxxx?p=N。无 ?p 默认为第 1 P。
 func parseRef(ref provider.TrackRef) (bvid string, page int, err error) {
