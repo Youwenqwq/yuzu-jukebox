@@ -103,6 +103,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	ws := wsapi.NewServer(authm, playerAuth, controls, st)
 	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping, cfg.NCM.CoverDirect)
+	api.SetCoverSecret(key)
 	api.ConfigureDistribution(distributionService, accelerationRegistry)
 
 	if cfg.CacheAutoPruneDays > 0 {

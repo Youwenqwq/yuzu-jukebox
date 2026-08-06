@@ -187,7 +187,7 @@ Still planned:
 
 ## Agent Caveats
 
-- **Cover endpoint is unauthenticated** by design (`/api/v1/cover/{ref}`) — for `<img>` tags that can't send auth headers
+- **Cover endpoint is unauthenticated** by design (`/api/v1/cover/{ref}`) — for `<img>` tags that can't send auth headers. Entity covers (artist/album/playlist, no TrackRef) use `/api/v1/cover/ext/{token}` with a server-minted HMAC token (secret_key-derived) — never a url-passthrough proxy (SSRF). All search/drill responses rewrite `cover_url` to proxy paths at the serialization layer; keep the invariant "clients never see raw source URLs" when adding new track/entity surfaces
 - **Stream endpoint uses ticket auth** (`?ticket=...`) — for `<audio>` tags. Tickets are 5-minute TTL bound to ref + identity
 - **CORS**: methods/headers/max-age are hardcoded in `httpapi.corsMiddleware`, only origins configurable
 - **WS state machine**: playback position is computed from `position_ms + updated_at + playing` — never stored as a continuous counter

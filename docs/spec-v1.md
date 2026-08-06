@@ -820,6 +820,8 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/lyrics?track_ref=` | `listener` | `{type:"lrc",lrc,tlrc?}`；Provider 无能力时 501 `not_supported` |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |
 
+**封面代理（两个端点，均免认证，供 `<img>` 直引）**：`cover_url` 的不变量是一律为服务端代理路径（源站可能需要 Referer 等头，如 B 站图床无 Referer 403）。曲目封面为 `/api/v1/cover/{track_ref}`；**实体封面**（艺人/专辑/歌单，无 TrackRef）为 `/api/v1/cover/ext/{token}`——token 由服务端在搜索/钻取响应序列化时签发（`base64url(provider\nurl).base64url(HMAC-SHA256)`，密钥派生自 `secret_key`），客户端无法伪造目标 URL，不是 url 透传开放代理。搜索与实体钻取响应中的 `cover_url` 在序列化层统一改写，Client 无需自行判断源站。
+
 #### 6.2.1 Provider owner 与账号写操作合同
 
 `GET /api/v1/providers` 的响应仍以 `providers` 为信封；每个条目新增 `owned`，支持可选账号写能力时还携带 `capabilities.account_write`。NCM 的完整示例如下：

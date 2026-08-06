@@ -41,6 +41,9 @@ type Server struct {
 
 	ncmCoverDirect bool
 
+	// coverSecret 实体封面 token 的 HMAC 密钥材料（secret_key 派生，app 装配时注入）。
+	coverSecret []byte
+
 	distribution         *distribution.Service
 	accelerationRegistry *distribution.Registry
 }
@@ -51,6 +54,10 @@ func (s *Server) ConfigureDistribution(service *distribution.Service, registry *
 	s.distribution = service
 	s.accelerationRegistry = registry
 }
+
+// SetCoverSecret 注入实体封面 token 的密钥材料（secret_key 的字节形式）。
+// 未注入时实体封面不做代理改写（保持原始 URL，与旧版行为一致）。
+func (s *Server) SetCoverSecret(secret []byte) { s.coverSecret = secret }
 
 func NewServer(
 	st *store.Store,
@@ -165,6 +172,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/playlists/import", s.importPlaylist)
 	mux.HandleFunc("GET /stream/v1/{ref}", s.stream)
 	mux.HandleFunc("GET /api/v1/cover/{ref}", s.cover)
+	mux.HandleFunc("GET /api/v1/cover/ext/{token}", s.coverExt)
 	mux.HandleFunc("GET /api/v1/lyrics", s.lyrics)
 	mux.HandleFunc("GET /api/v1/players", s.listPlayers)
 	mux.HandleFunc("POST /api/v1/players", s.createPlayer)
@@ -1014,6 +1022,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 			return
 		}
+		proxiedSearchTracks(tracks)
 		writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks})
 		return
 	}
@@ -1051,6 +1060,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
 	}
+	s.proxiedSearchResults(providerID, results)
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
@@ -1096,6 +1106,7 @@ func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
 	}
+	proxiedSearchTracks(tracks)
 	writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks})
 }
 
