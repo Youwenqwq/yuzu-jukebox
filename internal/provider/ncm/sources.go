@@ -107,6 +107,16 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 	}
 }
 
+// RadioSources 返回客户端可配置的网易云电台源。
+func (p *Provider) RadioSources() []provider.RadioSource {
+	return []provider.RadioSource{
+		{Spec: "daily", Name: "每日推荐", Finite: true},
+		{Spec: "fm", Name: "私人 FM", Finite: false},
+		{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false},
+		{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false},
+	}
+}
+
 // ---------- 每日推荐（TTL 物化有限源） ----------
 
 type dailySource struct {

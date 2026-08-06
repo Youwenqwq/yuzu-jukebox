@@ -84,6 +84,18 @@ func (*staticProvider) Resolve(context.Context, provider.TrackRef) (provider.Str
 	return provider.StreamLocator{}, errors.New("not needed in control test")
 }
 
+type staticTrackSource struct{}
+
+func (staticTrackSource) NextBatch(context.Context, int, provider.TrackRef) ([]provider.Track, bool, error) {
+	return nil, false, nil
+}
+func (staticTrackSource) Description() string { return "control test radio" }
+func (staticTrackSource) Finite() bool        { return false }
+
+func (*staticProvider) NewSource(context.Context, string) (provider.TrackSource, error) {
+	return staticTrackSource{}, nil
+}
+
 func newServiceFixture(t *testing.T) (*Service, *fakeGrantStore) {
 	t.Helper()
 	root := t.TempDir()
@@ -167,5 +179,124 @@ func TestServiceRequesterOwnershipAndControllers(t *testing.T) {
 	}
 	if err := service.Pause(ctx, "room-b", controller); !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("cross-room controller error = %v, want forbidden", err)
+	}
+}
+
+func TestServiceRadioControlPolicy(t *testing.T) {
+	ctx := context.Background()
+	requester := auth.Identity{
+		ID: "requester", Name: "Requester",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+
+	for _, policyRaw := range []string{"", `{"radio_control":"controller"}`} {
+		t.Run("controller-only "+policyRaw, func(t *testing.T) {
+			service, _ := newServiceFixture(t)
+			if policyRaw != "" {
+				r, err := service.GetRoom("room-a")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := r.SetPolicy(policyRaw); err != nil {
+					t.Fatalf("set policy: %v", err)
+				}
+			}
+			err := service.RadioPlay(ctx, "room-a", requester, "test:radio", false, false)
+			if !errors.Is(err, room.ErrForbidden) || err.Error() != "controller capability required" {
+				t.Fatalf("requester radio play error = %v, want controller forbidden", err)
+			}
+		})
+	}
+
+	service, grants := newServiceFixture(t)
+	r, err := service.GetRoom("room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetPolicy(`{"radio_control":"requester"}`); err != nil {
+		t.Fatalf("set requester radio policy: %v", err)
+	}
+	if err := service.RadioPlay(ctx, "room-a", requester, "test:radio", false, false); err != nil {
+		t.Fatalf("requester radio play: %v", err)
+	}
+
+	listener := auth.Identity{ID: "listener", Name: "Listener", Roles: []string{auth.RoleListener}}
+	if err := service.RadioStop(ctx, "room-a", listener); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("listener radio stop error = %v, want forbidden", err)
+	}
+	if err := service.RadioPlay(ctx, "room-a", listener, "test:radio", false, false); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("listener radio play error = %v, want forbidden", err)
+	}
+	if err := service.RadioStop(ctx, "room-a", requester); err != nil {
+		t.Fatalf("requester radio stop: %v", err)
+	}
+
+	controller := auth.Identity{ID: "controller", Name: "Controller"}
+	grants.grants[grantKey{
+		roomID: "room-a", principalID: controller.ID, capability: CapabilityController,
+	}] = true
+	if err := service.RadioPlay(ctx, "room-a", controller, "test:radio", false, false); err != nil {
+		t.Fatalf("controller radio play under requester policy: %v", err)
+	}
+	if err := service.RadioStop(ctx, "room-a", controller); err != nil {
+		t.Fatalf("controller radio stop under requester policy: %v", err)
+	}
+}
+
+func TestServiceRoomCapabilitiesRadio(t *testing.T) {
+	service, grants := newServiceFixture(t)
+	ctx := context.Background()
+	requester := auth.Identity{ID: "requester", Roles: []string{auth.RoleRequester}}
+	listener := auth.Identity{ID: "listener", Roles: []string{auth.RoleListener}}
+	controller := auth.Identity{ID: "controller"}
+
+	capabilities, err := service.RoomCapabilities(ctx, "room-a", requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Controller || capabilities.Radio {
+		t.Fatalf("default requester capabilities = %+v, want both false", capabilities)
+	}
+
+	r, err := service.GetRoom("room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetPolicy(`{"radio_control":"requester"}`); err != nil {
+		t.Fatalf("set requester radio policy: %v", err)
+	}
+
+	capabilities, err = service.RoomCapabilities(ctx, "room-a", requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Controller || !capabilities.Radio {
+		t.Fatalf("requester-policy requester capabilities = %+v, want controller=false radio=true", capabilities)
+	}
+
+	capabilities, err = service.RoomCapabilities(ctx, "room-a", listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Controller || capabilities.Radio {
+		t.Fatalf("requester-policy listener capabilities = %+v, want both false", capabilities)
+	}
+
+	grants.grants[grantKey{
+		roomID: "room-a", principalID: controller.ID, capability: CapabilityController,
+	}] = true
+	capabilities, err = service.RoomCapabilities(ctx, "room-a", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.Controller || !capabilities.Radio {
+		t.Fatalf("requester-policy controller capabilities = %+v, want both true", capabilities)
+	}
+}
+
+func TestParsePolicyRejectsInvalidRadioControl(t *testing.T) {
+	_, err := room.ParsePolicy(`{"radio_control":"everyone"}`)
+	if !errors.Is(err, room.ErrInvalidPolicy) {
+		t.Fatalf("invalid radio_control error = %v, want ErrInvalidPolicy", err)
 	}
 }

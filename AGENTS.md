@@ -202,3 +202,9 @@ Still planned:
 - **Whitelisted writes only**: interactive like/playlist-add requests require the acting Principal to equal the credential owner; automatic play reporting instead requires the track's requester to be that owner. These are the complete whitelist—never expose a generic NCM endpoint/cookie proxy; the cookie stays server-side.
 - **Scrobble rule**: report only tracks personally requested by the owner, after `played_ms >= min(total_ms/2, 240000)`; unknown duration uses 240000 ms. Reporting is fire-and-forget, audited, and never blocks playback.
 - **Per-principal discovery**: `owned` in `GET /api/v1/providers` is computed for the requesting Principal and must never be cached across users.
+
+### Roaming Experience Backend (WebUI home feed)
+- **Radio authorization is policy-driven**: room policy `radio_control` (`"controller"` default | `"requester"`) widens `radio.play`/`radio.stop` beyond controllers; REST and WS share the single path in `control.Service.radioRoom`. Clients gate the radio button on `GET /api/v1/rooms/{id}/capabilities` → `radio`, never on local role guesses.
+- **Cross-room history**: `GET /api/v1/history?requester=me` is caller-only (no admin override); backed by index `idx_play_history_requester` (migration 0024).
+- **Global hot feed**: `GET /api/v1/stats/hot?days=&limit=` aggregates `play_history` across rooms; skipped tracks still count (intent signal) — do not filter by `end_reason`.
+- **Radio source catalog**: `capabilities.radio_sources` in `/api/v1/providers` comes from the optional `provider.SourceCatalog` interface; `finite=false` sources reject `shuffle`/`once`. The generic `playlist:<id>` source is room-level, always available, and deliberately absent from the catalog.

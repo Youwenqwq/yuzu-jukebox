@@ -123,6 +123,21 @@ type SourceFactory interface {
 	NewSource(ctx context.Context, spec string) (TrackSource, error)
 }
 
+// RadioSource 描述一个电台源规格的参数约束（spec 不含 provider 前缀）。
+type RadioSource struct {
+	Spec   string `json:"spec"`           // daily | fm | simi | heart
+	Arg    string `json:"arg,omitempty"`  // 参数语义，如 "track_id"；空 = 无参
+	Name   string `json:"name,omitempty"` // 展示名
+	Finite bool   `json:"finite"`         // 有限源才允许 shuffle/once
+}
+
+// SourceCatalog 是可选接口：SourceFactory provider 实现它向客户端报告可用电台源。
+// 不支持的 provider 直接不实现，调用方以类型断言探测。
+type SourceCatalog interface {
+	SourceFactory
+	RadioSources() []RadioSource
+}
+
 // PlaylistImporter 是可选接口：支持导入外部歌单的 Provider 实现它。
 type PlaylistImporter interface {
 	Provider

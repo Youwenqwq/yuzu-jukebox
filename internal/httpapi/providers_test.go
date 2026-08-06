@@ -13,6 +13,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
+	"github.com/youwenqwq/yuzu-jukebox/internal/provider/ncm"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
 )
@@ -110,6 +111,7 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 	}
 	reg.Register(writer)
 	reg.Register(&providerEndpointBase{id: "basic"})
+	reg.Register(ncm.New("http://127.0.0.1", "", st))
 	if err := st.UpsertCredential(context.Background(), writer.ID(), "credential", "ok"); err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +268,26 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		}
 		if got := capabilities["account_write"]; !reflect.DeepEqual(got, []any{"play_report", "like", "playlist_add"}) {
 			t.Fatalf("writer account_write = %#v", got)
+		}
+		if _, ok := capabilities["radio_sources"]; ok {
+			t.Fatalf("writer provider advertises radio_sources: %#v", capabilities)
+		}
+		ncmEntry := entries["ncm"]
+		ncmCapabilities, ok := ncmEntry["capabilities"].(map[string]any)
+		if !ok {
+			t.Fatalf("ncm capabilities = %#v", ncmEntry["capabilities"])
+		}
+		if got := ncmCapabilities["account_write"]; !reflect.DeepEqual(got, []any{"play_report", "like", "playlist_add"}) {
+			t.Fatalf("ncm account_write = %#v", got)
+		}
+		wantRadioSources := []any{
+			map[string]any{"spec": "daily", "name": "每日推荐", "finite": true},
+			map[string]any{"spec": "fm", "name": "私人 FM", "finite": false},
+			map[string]any{"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false},
+			map[string]any{"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false},
+		}
+		if got := ncmCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantRadioSources) {
+			t.Fatalf("ncm radio_sources = %#v, want %#v", got, wantRadioSources)
 		}
 		basic := entries["basic"]
 		if _, ok := basic["capabilities"]; ok {

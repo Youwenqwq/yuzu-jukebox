@@ -82,6 +82,7 @@ func (s *Service) AdmitRoom(
 // RoomCapabilities is the caller's effective room-scoped capability set.
 type RoomCapabilities struct {
 	Controller bool `json:"controller"`
+	Radio      bool `json:"radio"`
 }
 
 // RoomCapabilities resolves effective capabilities through the shared Authorizer.
@@ -89,14 +90,24 @@ func (s *Service) RoomCapabilities(ctx context.Context, roomID string, principal
 	if err := ctx.Err(); err != nil {
 		return RoomCapabilities{}, err
 	}
-	if _, err := s.GetRoom(roomID); err != nil {
+	r, err := s.GetRoom(roomID)
+	if err != nil {
 		return RoomCapabilities{}, err
 	}
 	controller, err := s.authorizer.IsController(ctx, roomID, principal)
 	if err != nil {
 		return RoomCapabilities{}, err
 	}
-	return RoomCapabilities{Controller: controller}, nil
+	capabilities := RoomCapabilities{Controller: controller, Radio: controller}
+	if controller {
+		return capabilities, nil
+	}
+	policy, err := room.ParsePolicy(r.PolicyRaw())
+	if err != nil {
+		return RoomCapabilities{}, err
+	}
+	capabilities.Radio = policy.RadioControl == "requester" && principal.HasRole(auth.RoleRequester)
+	return capabilities, nil
 }
 
 // RoomSnapshot returns a complete, identity-specific state projection without
@@ -226,7 +237,7 @@ func (s *Service) Seek(ctx context.Context, roomID string, principal auth.Identi
 }
 
 func (s *Service) RadioPlay(ctx context.Context, roomID string, principal auth.Identity, source string, shuffle, once bool) error {
-	r, err := s.controlledRoom(ctx, roomID, principal)
+	r, err := s.radioRoom(ctx, roomID, principal)
 	if err != nil {
 		return err
 	}
@@ -234,11 +245,36 @@ func (s *Service) RadioPlay(ctx context.Context, roomID string, principal auth.I
 }
 
 func (s *Service) RadioStop(ctx context.Context, roomID string, principal auth.Identity) error {
-	r, err := s.controlledRoom(ctx, roomID, principal)
+	r, err := s.radioRoom(ctx, roomID, principal)
 	if err != nil {
 		return err
 	}
 	return r.StopRadio()
+}
+
+func (s *Service) radioRoom(ctx context.Context, roomID string, principal auth.Identity) (*room.Room, error) {
+	controller, err := s.authorizer.IsController(ctx, roomID, principal)
+	if err != nil {
+		return nil, err
+	}
+	if controller {
+		return s.GetRoom(roomID)
+	}
+	r, err := s.GetRoom(roomID)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := room.ParsePolicy(r.PolicyRaw())
+	if err != nil {
+		return nil, err
+	}
+	if policy.RadioControl == "requester" && principal.HasRole(auth.RoleRequester) {
+		return r, nil
+	}
+	if err := s.authorizer.RequireController(ctx, roomID, principal); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 func (s *Service) controlledRoom(ctx context.Context, roomID string, principal auth.Identity) (*room.Room, error) {

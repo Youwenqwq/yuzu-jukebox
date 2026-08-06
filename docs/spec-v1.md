@@ -507,7 +507,8 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
   "max_queue": 100,
   "queue_limits": { "guest": 5, "room_admin": 0 },
   "member_player_volume": true,
-  "start_lead_ms": 600
+  "start_lead_ms": 600,
+  "radio_control": "requester"
 }
 ```
 
@@ -515,6 +516,7 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 - `queue_limits`：按身份的待播数上限。key 匹配身份的 **kind**（`guest`/`password`/`oidc`）或其任一 **role**；任一命中值为 0 → 显式不限（覆盖其他命中），否则取命中最大值，无命中 = 不限。超限拒绝，错误码 `quota_exceeded`。
 - `member_player_volume`：缺省 `false`。为 `true` 时，只允许由可信 Integration 签发、且来源 scope 当前默认 Room 正是该 Room 的 actor session 读取和设置 Room headless output desired volume；不授权普通 listener，不授权其他 Room，不授权单设备 mute、换房或绑定管理。
 - `start_lead_ms`：切歌起播提前量（毫秒），取值 `[0, 5000]`，缺省 600，0 = 关闭（切歌即 position 0）。房间内客户端装载普遍慢（公网带宽小、蓝牙输出）时调大；纯本地局域网可调小。语义与客户端处理见 §2.2。
+- `radio_control`：电台启停授权，取值 `"controller"`（缺省，现状）或 `"requester"`。为 `"requester"` 时，任何具全局 `requester` 角色的 Principal 可调用 `radio.play`/`radio.stop`（REST 与 WS 同一条授权路径）；其他取值一律拒绝写入（`invalid_policy`）。controller 授权不受影响。客户端应以 `GET /api/v1/rooms/{id}/capabilities` 的 `radio` 字段决定电台按钮可用性，而非自行推导。
 - 普通 guest 身份 ID 由名字确定性派生（`g_` + `sha256("guest:"+name)` 前 12 hex），同名重连仍是同一人；Integration synthetic guest 使用 3.6 的完整 external subject key——两者的限额与“移除自己点的歌”均可跨会话成立。
 - 电台补充不经过限额检查（补充只在队列 <3 时触发，天然有界）。
 - 播放历史与统计见 6 节 REST；`play_history` 只记**播放**（结束原因 `finished`/`skipped`），不记点歌意图。
@@ -666,7 +668,9 @@ played_ms >= min(total_ms / 2, 240000)
 | `PUT/DELETE /api/v1/rooms/{id}/grants/{principal_id}` | `room_admin` | 授予/撤销该 Principal 的 Room `controller` capability |
 | `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` | 播放历史，最新在前（默认 50，上限 200） |
 | `GET /api/v1/rooms/{id}/stats?limit=` | `listener` | 曲目热度榜（默认 20，上限 100） |
-| `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability；Room 不存在为 404 |
+| `GET /api/v1/history?requester=me&offset=&limit=` | `requester` | 跨房间个人播放历史（`requested_by` = 当前 Principal），最新在前（默认 50，上限 200）；`requester` 只接受 `me` |
+| `GET /api/v1/stats/hot?days=&limit=` | `requester` | 全局热门曲目（跨房间 `play_history` 聚合：`track_ref`/`title`/`play_count`/`last_played_at`，与 `queue.add` 的 ref 体系兼容）；`days` 缺省 7、0 = 全部时间；`limit` 缺省 20，上限 100 |
+| `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability（`controller`、`radio`，后者按 4.7 `radio_control` 推导）；Room 不存在为 404 |
 | `GET /api/v1/rooms/{id}/state` | 标准 session | 无副作用完整状态快照 |
 | `POST /api/v1/rooms/{id}/queue` | `requester` | 单条或 1–100 条原子入队 |
 | `DELETE /api/v1/rooms/{id}/queue` | controller | 原子清空待播队列；保留 current 与 radio；空队列也成功 |
@@ -820,7 +824,13 @@ Room create/PATCH/list/get 的错误合同：
       "credential_status": "ok",
       "owned": true,
       "capabilities": {
-        "account_write": ["play_report", "like", "playlist_add"]
+        "account_write": ["play_report", "like", "playlist_add"],
+        "radio_sources": [
+          {"spec": "daily", "name": "每日推荐", "finite": true},
+          {"spec": "fm", "name": "私人 FM", "finite": false},
+          {"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false},
+          {"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false}
+        ]
       }
     }
   ]
@@ -829,6 +839,7 @@ Room create/PATCH/list/get 的错误合同：
 
 - `owned` 是按当前请求 Principal 计算的布尔值；仅当该 Principal 等于 3.9 的凭据 owner 时为 `true`。它不是 Provider 全局属性，Client、反向代理与共享缓存均不得把一名用户的值复用于另一名用户。
 - `capabilities.account_write` 是按 Provider 可选接口断言得到的子集：`provider.PlayReporter` 提供 `"play_report"`，`provider.AccountWriter` 提供 `"like"` 与 `"playlist_add"`。两种接口都未实现时省略 `capabilities`。
+- `capabilities.radio_sources` 由实现 `provider.SourceCatalog` 的 Provider 报告，元素为 `{"spec", "arg"?, "name"?, "finite"}`：`spec` 不含 Provider 前缀（Client 组装 `"<provider>:<spec>"`，有 `arg` 时追加 `":<arg>"`）；`finite=false` 的源不适用 `shuffle`/`once`。NCM 报告 `daily`（每日推荐，有限）、`fm`（私人 FM，无限）、`simi`（相似歌曲，需 `track_id`）、`heart`（心动模式，需 `track_id`）；未实现 `SourceFactory` 的 Provider（bili、local）不出现该键。通用源 `playlist:<id>`（yuzu 歌单 DB 游标）由房间层提供、恒可用，不在 Provider 目录中。
 - Client 只有在 `owned == true` 且数组含对应能力时才展示或启用喜欢/加入歌单操作；能力发现不替代服务端 owner 鉴权。
 
 喜欢请求与成功响应：

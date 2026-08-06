@@ -26,6 +26,9 @@ type Policy struct {
 	MaxQueue           int            `json:"max_queue,omitempty"`            // 待播队列总上限，0 = 不限
 	QueueLimits        map[string]int `json:"queue_limits,omitempty"`         // kind/role → 待播上限
 	MemberPlayerVolume bool           `json:"member_player_volume,omitempty"` // scoped Integration actor 可调绑定播放器音量
+	// RadioControl 控制电台启停权限："" 或 "controller" 保持仅 controller 可用；
+	// "requester" 允许任何具全局 requester 角色的 Principal 操作。
+	RadioControl string `json:"radio_control,omitempty"`
 	// StartLeadMs 切歌起播提前量（毫秒）：新曲目的 position 0 被排在
 	// 「切歌时刻 + 提前量」，客户端拿到这段窗口装载解码，到点同时开声，
 	// 头部不再被装载延迟吃掉（spec-v1 §2.2 起播提前量）。
@@ -53,6 +56,11 @@ func ParsePolicy(raw string) (Policy, error) {
 		if v < 0 {
 			return p, fmt.Errorf("%w: queue_limits[%q] must be >= 0", ErrInvalidPolicy, k)
 		}
+	}
+	switch p.RadioControl {
+	case "", "controller", "requester":
+	default:
+		return p, fmt.Errorf("%w: radio_control must be one of \"controller\" or \"requester\"", ErrInvalidPolicy)
 	}
 	if p.StartLeadMs != nil && (*p.StartLeadMs < 0 || *p.StartLeadMs > MaxStartLeadMs) {
 		return p, fmt.Errorf("%w: start_lead_ms must be within [0, %d]", ErrInvalidPolicy, MaxStartLeadMs)

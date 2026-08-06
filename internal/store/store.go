@@ -568,6 +568,7 @@ func (s *Store) AddPlayHistory(ctx context.Context, roomID, trackRef, title, req
 
 // PlayHistoryRow 一条播放历史。
 type PlayHistoryRow struct {
+	RoomID      string `json:"room_id"`
 	TrackRef    string `json:"track_ref"`
 	Title       string `json:"title"`
 	RequestedBy string `json:"requested_by"`
@@ -579,8 +580,8 @@ type PlayHistoryRow struct {
 // PlayHistory 房间的播放历史，最新在前。
 func (s *Store) PlayHistory(ctx context.Context, roomID string, offset, limit int) ([]PlayHistoryRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT track_ref, title, requested_by, started_at, ended_at, end_reason
-		 FROM play_history WHERE room_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+		`SELECT room_id, track_ref, title, requested_by, started_at, ended_at, end_reason
+		 FROM play_history WHERE room_id = ? ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
 		roomID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -589,10 +590,75 @@ func (s *Store) PlayHistory(ctx context.Context, roomID string, offset, limit in
 	out := []PlayHistoryRow{}
 	for rows.Next() {
 		var r PlayHistoryRow
-		if err := rows.Scan(&r.TrackRef, &r.Title, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
+		if err := rows.Scan(&r.RoomID, &r.TrackRef, &r.Title, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// PlayHistoryByRequester 返回点歌人在所有房间的播放历史，最新在前。
+func (s *Store) PlayHistoryByRequester(ctx context.Context, requesterID string, offset, limit int) ([]PlayHistoryRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT room_id, track_ref, title, requested_by, started_at, ended_at, end_reason
+		 FROM play_history WHERE requested_by = ? ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
+		requesterID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PlayHistoryRow{}
+	for rows.Next() {
+		var r PlayHistoryRow
+		if err := rows.Scan(&r.RoomID, &r.TrackRef, &r.Title, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// HotTrack 全局热门条目（跨房间 play_history 聚合）。
+type HotTrack struct {
+	TrackRef     string `json:"track_ref"`
+	Title        string `json:"title"`
+	PlayCount    int    `json:"play_count"`
+	LastPlayedAt int64  `json:"last_played_at"`
+}
+
+// HotTracks 返回全局热门曲目；跳过或播放错误仍代表点播意图，因此不按 end_reason 过滤。
+func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit int) ([]HotTrack, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`WITH filtered AS (
+			SELECT id, track_ref, title, started_at
+			FROM play_history
+			WHERE ? <= 0 OR started_at >= ?
+		)
+		SELECT f.track_ref,
+		       (SELECT recent.title
+		        FROM filtered AS recent
+		        WHERE recent.track_ref = f.track_ref
+		        ORDER BY recent.started_at DESC, recent.id DESC
+		        LIMIT 1),
+		       COUNT(*) AS play_count,
+		       MAX(f.started_at) AS last_played_at
+		FROM filtered AS f
+		GROUP BY f.track_ref
+		ORDER BY play_count DESC, last_played_at DESC
+		LIMIT ?`,
+		sinceMs, sinceMs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []HotTrack{}
+	for rows.Next() {
+		var t HotTrack
+		if err := rows.Scan(&t.TrackRef, &t.Title, &t.PlayCount, &t.LastPlayedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
 	}
 	return out, rows.Err()
 }

@@ -109,6 +109,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare", s.prepareAccelerationCredential)
 	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/activate", s.activateAccelerationCredential)
 	mux.HandleFunc("GET /api/v1/principals", s.listPrincipals)
+	mux.HandleFunc("GET /api/v1/history", s.requesterHistory)
+	mux.HandleFunc("GET /api/v1/stats/hot", s.hotTracks)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
@@ -611,6 +613,69 @@ func (s *Server) roomStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
 }
 
+// requesterHistory 返回当前点歌人在所有房间的播放历史；本接口不提供管理员代查。
+func (s *Server) requesterHistory(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireRole(w, r, auth.RoleRequester)
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("requester") != "me" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "requester must be me")
+		return
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.st.PlayHistoryByRequester(r.Context(), id.ID, offset, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"history": rows})
+}
+
+// hotTracks 返回跨房间聚合的全局热门曲目。
+func (s *Server) hotTracks(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+		return
+	}
+	days := int64(7)
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "days must be a non-negative integer")
+			return
+		}
+		days = parsed
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var sinceMs int64
+	if days > 0 {
+		const dayMs = int64(86_400_000)
+		now := nowMs()
+		if days <= now/dayMs {
+			sinceMs = now - days*dayMs
+		}
+	}
+	tracks, err := s.st.HotTracks(r.Context(), sinceMs, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks})
+}
+
 // playerCommand 向在线播放端下发音量或静音指令（room_admin）。
 func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.requireRole(w, r, auth.RoleRoomAdmin)
@@ -661,7 +726,8 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type capabilities struct {
-		AccountWrite []string `json:"account_write"`
+		AccountWrite []string               `json:"account_write"`
+		RadioSources []provider.RadioSource `json:"radio_sources,omitempty"`
 	}
 	type info struct {
 		ID               string        `json:"id"`
@@ -687,8 +753,15 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		if _, ok := p.(provider.AccountWriter); ok {
 			accountWrite = append(accountWrite, "like", "playlist_add")
 		}
-		if len(accountWrite) > 0 {
-			entry.Capabilities = &capabilities{AccountWrite: accountWrite}
+		var radioSources []provider.RadioSource
+		if catalog, ok := p.(provider.SourceCatalog); ok {
+			radioSources = catalog.RadioSources()
+		}
+		if len(accountWrite) > 0 || len(radioSources) > 0 {
+			entry.Capabilities = &capabilities{
+				AccountWrite: accountWrite,
+				RadioSources: radioSources,
+			}
 		}
 		out = append(out, entry)
 	}
