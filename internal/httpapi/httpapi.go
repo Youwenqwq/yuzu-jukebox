@@ -137,6 +137,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
+	mux.HandleFunc("POST /api/v1/providers/{id}/like", s.likeProviderTrack)
+	mux.HandleFunc("POST /api/v1/providers/{id}/playlist-add", s.addProviderTrackToPlaylist)
 	mux.HandleFunc("POST /api/v1/providers/{id}/qrlogin", s.qrLoginStart)
 	mux.HandleFunc("GET /api/v1/providers/{id}/qrlogin/{key}", s.qrLoginPoll)
 	mux.HandleFunc("POST /api/v1/media/upload", s.upload)
@@ -654,12 +656,18 @@ func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
 
 // listProviders 已注册 Provider 清单。
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+	identity, ok := s.requireRole(w, r, auth.RoleRequester)
+	if !ok {
 		return
 	}
+	type capabilities struct {
+		AccountWrite []string `json:"account_write"`
+	}
 	type info struct {
-		ID               string `json:"id"`
-		CredentialStatus string `json:"credential_status,omitempty"` // 仅 CredentialAware provider 有此字段
+		ID               string        `json:"id"`
+		CredentialStatus string        `json:"credential_status,omitempty"` // 仅 CredentialAware provider 有此字段
+		Owned            bool          `json:"owned"`                       // 按当前用户逐请求计算，绝不能跨用户缓存
+		Capabilities     *capabilities `json:"capabilities,omitempty"`
 	}
 	out := []info{}
 	for _, p := range s.reg.All() {
@@ -668,6 +676,19 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 			if status, err := s.st.GetCredentialStatus(r.Context(), p.ID()); err == nil {
 				entry.CredentialStatus = status
 			}
+		}
+		if owner, exists, err := s.st.GetCredentialOwner(r.Context(), p.ID()); err == nil {
+			entry.Owned = exists && owner.PrincipalID == identity.ID
+		}
+		var accountWrite []string
+		if _, ok := p.(provider.PlayReporter); ok {
+			accountWrite = append(accountWrite, "play_report")
+		}
+		if _, ok := p.(provider.AccountWriter); ok {
+			accountWrite = append(accountWrite, "like", "playlist_add")
+		}
+		if len(accountWrite) > 0 {
+			entry.Capabilities = &capabilities{AccountWrite: accountWrite}
 		}
 		out = append(out, entry)
 	}
@@ -706,6 +727,7 @@ func (s *Server) setCredential(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
 	}
+	_ = s.st.SetCredentialOwner(ctx, pid, id.ID)
 	s.st.Audit(r.Context(), id.ID, "provider.set_credential", pid, "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"provider": pid, "status": "ok"})
 }
@@ -728,7 +750,7 @@ func (s *Server) qrLoginStart(w http.ResponseWriter, r *http.Request) {
 
 // qrLoginPoll 轮询扫码状态；ok 时凭据已由服务端落库并热生效。
 func (s *Server) qrLoginPoll(w http.ResponseWriter, r *http.Request) {
-	_, qa, ok := s.requireQRProvider(w, r)
+	identity, qa, ok := s.requireQRProvider(w, r)
 	if !ok {
 		return
 	}
@@ -738,6 +760,9 @@ func (s *Server) qrLoginPoll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
+	}
+	if status == "ok" {
+		_ = s.st.SetCredentialOwner(ctx, r.PathValue("id"), identity.ID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": status, "message": message})
 }
@@ -758,6 +783,91 @@ func (s *Server) requireQRProvider(w http.ResponseWriter, r *http.Request) (auth
 		return id, nil, false
 	}
 	return id, qa, true
+}
+
+// likeProviderTrack 使用凭据账号收藏曲目，只有凭据所有者可调用。
+func (s *Server) likeProviderTrack(w http.ResponseWriter, r *http.Request) {
+	identity, aw, providerID, ok := s.requireOwnedAccountWriter(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Track string `json:"track"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	if strings.TrimSpace(body.Track) == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "track required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := aw.Like(ctx, body.Track); err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	detail, _ := json.Marshal(body)
+	_ = s.st.Audit(r.Context(), identity.ID, "provider.like", providerID, string(detail))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// addProviderTrackToPlaylist 使用凭据账号把曲目加入指定歌单。
+func (s *Server) addProviderTrackToPlaylist(w http.ResponseWriter, r *http.Request) {
+	identity, aw, providerID, ok := s.requireOwnedAccountWriter(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		PlaylistID string `json:"playlist_id"`
+		Track      string `json:"track"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	if strings.TrimSpace(body.PlaylistID) == "" || strings.TrimSpace(body.Track) == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "playlist_id and track required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := aw.AddToPlaylist(ctx, body.PlaylistID, body.Track); err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	detail, _ := json.Marshal(body)
+	_ = s.st.Audit(r.Context(), identity.ID, "provider.playlist_add", providerID, string(detail))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// requireOwnedAccountWriter 校验账号写能力与当前凭据归属。
+func (s *Server) requireOwnedAccountWriter(
+	w http.ResponseWriter,
+	r *http.Request,
+) (auth.Identity, provider.AccountWriter, string, bool) {
+	identity, ok := s.requireRole(w, r, auth.RoleRequester)
+	if !ok {
+		return identity, nil, "", false
+	}
+	providerID := r.PathValue("id")
+	p, exists := s.reg.Get(providerID)
+	if !exists {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown provider: "+providerID)
+		return identity, nil, providerID, false
+	}
+	aw, supported := p.(provider.AccountWriter)
+	if !supported {
+		writeErr(w, http.StatusBadRequest, "bad_request", "capability not supported")
+		return identity, nil, providerID, false
+	}
+	owner, exists, err := s.st.GetCredentialOwner(r.Context(), providerID)
+	if err != nil || !exists || owner.PrincipalID != identity.ID {
+		writeErr(w, http.StatusForbidden, "forbidden", "credential owner required")
+		return identity, nil, providerID, false
+	}
+	return identity, aw, providerID, true
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {

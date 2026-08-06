@@ -4,6 +4,7 @@ bin/
 /config.json
 /edgeone.json
 temp/
+TODO.md
 .claude/
 .vscode/
 .idea/

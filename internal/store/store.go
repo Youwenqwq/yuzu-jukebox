@@ -1146,14 +1146,30 @@ func (s *Store) GetCredential(ctx context.Context, providerID string) (string, e
 
 // UpsertCredential 写入凭据并记录校验状态。
 // 配置了 secret_key 时 AES-GCM 加密落盘（enc1: 前缀）。
+// 新行继承上一条记录的 owner/account 绑定：凭据轮换不是重新委托，
+// 重绑只通过 SetCredentialOwner 显式发生（API 层，人设凭据时）。
 func (s *Store) UpsertCredential(ctx context.Context, providerID, payload, status string) error {
 	enc, err := s.encrypt(payload)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO credentials (provider, payload, status, last_check_at) VALUES (?,?,?,?)`,
-		providerID, enc, status, nowMs())
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO credentials (provider, payload, status, last_check_at,
+			owner_principal_id, account_uid, account_name, account_avatar)
+		 SELECT ?, ?, ?, ?,
+			owner_principal_id, account_uid, account_name, account_avatar
+		 FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1`,
+		providerID, enc, status, nowMs(), providerID)
+	if err != nil {
+		return err
+	}
+	// INSERT...SELECT 匹配不到上一行时静默插入 0 行：首个凭据走纯 INSERT，
+	// owner/account 列取默认值（未绑定）。
+	if n, _ := res.RowsAffected(); n == 0 {
+		_, err = s.db.ExecContext(ctx,
+			`INSERT INTO credentials (provider, payload, status, last_check_at) VALUES (?,?,?,?)`,
+			providerID, enc, status, nowMs())
+	}
 	return err
 }
 
@@ -1193,6 +1209,56 @@ func (s *Store) GetCredentialStatus(ctx context.Context, providerID string) (str
 		return "unset", nil
 	}
 	return status, err
+}
+
+// AccountProfile 是凭据对应平台账号的资料快照（provider 校验凭据时写入）。
+type AccountProfile struct {
+	UID    string
+	Name   string
+	Avatar string
+}
+
+// CredentialOwner 是最新凭据行的归属信息。
+// PrincipalID 为空 = 未绑定（无写操作权限）；ok=false = 该 provider 无凭据行。
+type CredentialOwner struct {
+	PrincipalID string
+	Account     AccountProfile
+}
+
+// GetCredentialOwner 读最新凭据行的 owner 绑定与账号资料。
+func (s *Store) GetCredentialOwner(ctx context.Context, providerID string) (CredentialOwner, bool, error) {
+	var o CredentialOwner
+	err := s.db.QueryRowContext(ctx,
+		`SELECT owner_principal_id, account_uid, account_name, account_avatar
+		 FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1`,
+		providerID).Scan(&o.PrincipalID, &o.Account.UID, &o.Account.Name, &o.Account.Avatar)
+	if err == sql.ErrNoRows {
+		return CredentialOwner{}, false, nil
+	}
+	if err != nil {
+		return CredentialOwner{}, false, err
+	}
+	return o, true, nil
+}
+
+// SetCredentialOwner 绑定最新凭据行的所有者（委托关系）。
+// 只在人设凭据（管理端设置/扫码完成）时由 API 层调用。
+func (s *Store) SetCredentialOwner(ctx context.Context, providerID, principalID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE credentials SET owner_principal_id = ?
+		 WHERE id = (SELECT id FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1)`,
+		principalID, providerID)
+	return err
+}
+
+// SetCredentialAccount 写入最新凭据行的平台账号资料快照。
+// 由 provider 在校验凭据（/login/status 等）成功后调用。
+func (s *Store) SetCredentialAccount(ctx context.Context, providerID string, acct AccountProfile) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE credentials SET account_uid = ?, account_name = ?, account_avatar = ?
+		 WHERE id = (SELECT id FROM credentials WHERE provider = ? ORDER BY id DESC LIMIT 1)`,
+		acct.UID, acct.Name, acct.Avatar, providerID)
+	return err
 }
 
 func (s *Store) ListCacheRows(ctx context.Context) ([]CacheRow, error) {

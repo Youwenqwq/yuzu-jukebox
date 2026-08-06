@@ -738,3 +738,143 @@ func TestParsePolicyStartLeadBounds(t *testing.T) {
 		t.Fatalf("explicit 0 start_lead_ms = %d, want 0 (disabled)", got)
 	}
 }
+
+type playReportCall struct {
+	id                string
+	playedMs, totalMs int64
+}
+
+type recordingPlayProvider struct {
+	calls chan playReportCall
+}
+
+func (*recordingPlayProvider) ID() string { return "scrobble" }
+func (*recordingPlayProvider) Search(context.Context, string) ([]provider.Track, error) {
+	return nil, nil
+}
+func (*recordingPlayProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
+	return provider.Track{Ref: ref}, nil
+}
+func (*recordingPlayProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{}, errors.New("测试不需要解析播放地址")
+}
+func (p *recordingPlayProvider) ReportPlay(_ context.Context, id string, playedMs, totalMs int64) error {
+	p.calls <- playReportCall{id: id, playedMs: playedMs, totalMs: totalMs}
+	return nil
+}
+
+type nonReportingProvider struct{}
+
+func (*nonReportingProvider) ID() string { return "scrobble" }
+func (*nonReportingProvider) Search(context.Context, string) ([]provider.Track, error) {
+	return nil, nil
+}
+func (*nonReportingProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
+	return provider.Track{Ref: ref}, nil
+}
+func (*nonReportingProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{}, errors.New("测试不需要解析播放地址")
+}
+
+// TestFinishCurrentScrobble 验证播放结束上报只对凭据所有者和达到阈值的曲目触发。
+func TestFinishCurrentScrobble(t *testing.T) {
+	const (
+		ownerID = "owner"
+		totalMs = int64(10 * time.Minute / time.Millisecond)
+	)
+	tests := []struct {
+		name        string
+		requestedBy string
+		playedMs    int64
+		reporter    bool
+		want        *playReportCall
+	}{
+		{
+			name:        "所有者达到阈值",
+			requestedBy: ownerID,
+			playedMs:    250_000,
+			reporter:    true,
+			want:        &playReportCall{id: "track-1", playedMs: 250_000, totalMs: totalMs},
+		},
+		{
+			name:        "非所有者不上报",
+			requestedBy: "other",
+			playedMs:    250_000,
+			reporter:    true,
+		},
+		{
+			name:        "低于阈值不上报",
+			requestedBy: ownerID,
+			playedMs:    239_999,
+			reporter:    true,
+		},
+		{
+			name:        "电台曲目不上报",
+			requestedBy: "radio",
+			playedMs:    250_000,
+			reporter:    true,
+		},
+		{
+			name:        "无上报能力安全跳过",
+			requestedBy: ownerID,
+			playedMs:    250_000,
+			reporter:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, st := newTestRoom(t, `{"start_lead_ms":0}`)
+			calls := make(chan playReportCall, 2)
+			if tc.reporter {
+				r.reg.Register(&recordingPlayProvider{calls: calls})
+			} else {
+				r.reg.Register(&nonReportingProvider{})
+			}
+
+			ctx := context.Background()
+			if err := st.UpsertCredential(ctx, "scrobble", "credential", "valid"); err != nil {
+				t.Fatalf("UpsertCredential: %v", err)
+			}
+			if err := st.SetCredentialOwner(ctx, "scrobble", ownerID); err != nil {
+				t.Fatalf("SetCredentialOwner: %v", err)
+			}
+			entry := mkEntry("scrobble:track-1", tc.requestedBy)
+			if err := r.AddFor(guest, entry); err != nil {
+				t.Fatalf("AddFor: %v", err)
+			}
+			// 先暂停再定位，使结束时的已播时长不受测试调度耗时影响。
+			if err := r.Pause(); err != nil {
+				t.Fatalf("Pause: %v", err)
+			}
+			if err := r.SeekTo(tc.playedMs); err != nil {
+				t.Fatalf("SeekTo: %v", err)
+			}
+			if err := r.Skip(); err != nil {
+				t.Fatalf("Skip: %v", err)
+			}
+
+			if tc.want == nil {
+				select {
+				case got := <-calls:
+					t.Fatalf("ReportPlay 调用 = %+v，期望不调用", got)
+				case <-time.After(100 * time.Millisecond):
+				}
+				return
+			}
+			select {
+			case got := <-calls:
+				if got != *tc.want {
+					t.Fatalf("ReportPlay 调用 = %+v，期望 %+v", got, *tc.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("等待 ReportPlay 调用超时")
+			}
+			select {
+			case got := <-calls:
+				t.Fatalf("ReportPlay 额外调用 = %+v", got)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}

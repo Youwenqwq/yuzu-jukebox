@@ -689,6 +689,68 @@ func (r *Room) Run(ctx context.Context) {
 		_ = r.st.AddPlayHistory(ctx, r.ID, cur.TrackRef, cur.Title, cur.RequestedBy,
 			cur.AddedAt, now, reason)
 		r.authm.RevokeTrack(cur.TrackRef)
+		pid, id, err := provider.TrackRef(cur.TrackRef).Split()
+		if err != nil {
+			return
+		}
+		p, ok := r.reg.Get(pid)
+		if !ok {
+			return
+		}
+		rep, ok := p.(provider.PlayReporter)
+		if !ok {
+			return
+		}
+		owner, ok, err := r.st.GetCredentialOwner(ctx, pid)
+		if err != nil || !ok || owner.PrincipalID == "" || cur.RequestedBy != owner.PrincipalID {
+			return
+		}
+
+		playedMs := position(playback, now)
+		if playedMs < 0 {
+			playedMs = 0
+		}
+		totalMs := cur.DurationMs
+		threshold := int64(240_000)
+		if totalMs > 0 && totalMs/2 < threshold {
+			threshold = totalMs / 2
+		}
+		if playedMs < threshold {
+			return
+		}
+
+		principalID := cur.RequestedBy
+		target := cur.TrackRef
+		roomID := r.ID
+		st := r.st
+		go func(
+			rep provider.PlayReporter,
+			id string,
+			playedMs, totalMs int64,
+			principalID, target, roomID string,
+		) {
+			cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := rep.ReportPlay(cctx, id, playedMs, totalMs)
+			cancel()
+			if err != nil {
+				log.Printf("[room %s] scrobble %s: %v", roomID, target, err)
+			}
+			detailValue := struct {
+				PlayedMs int64  `json:"played_ms"`
+				TotalMs  int64  `json:"total_ms"`
+				OK       bool   `json:"ok"`
+				Error    string `json:"error,omitempty"`
+			}{
+				PlayedMs: playedMs,
+				TotalMs:  totalMs,
+				OK:       err == nil,
+			}
+			if err != nil {
+				detailValue.Error = err.Error()
+			}
+			detail, _ := json.Marshal(detailValue)
+			_ = st.Audit(context.Background(), principalID, "provider.scrobble", target, string(detail))
+		}(rep, id, playedMs, totalMs, principalID, target, roomID)
 	}
 
 	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充。

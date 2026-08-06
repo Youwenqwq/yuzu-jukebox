@@ -307,6 +307,12 @@ Headless Agent 不是 guest/OIDC Principal，也不使用管理员口令。`room
 - `last_seen_at` 在成功 Player-key 认证时更新。Agent SHOULD 对断线使用有上限的指数退避；连续稳定运行后重置退避。
 - 从旧版自声明 `player_id` 升级时，已有 Room 分配迁移为 `active=false`、尚无 key 的 Player；管理员必须先轮换 key，再显式启用。没有凭据的 Player 不能启用。
 
+### 3.9 Provider 凭据 owner 与信任委托
+
+NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一份。凭据写入成功的时刻同时建立 owner 绑定：`POST /api/v1/providers/{id}/credential` 的写入者，或 QR 轮询进入 `ok` 时的发起 Principal，成为该凭据的新 owner；之后每次人工重设都重新绑定，owner 始终跟随最近一次写入者。两条写入路径都要求当前 `media_admin`，因此这是一条以管理面准入为信任根的委托链；NCM 不提供可替代它的第三方 OAuth 绑定。
+
+`credmon` 健康检查只更新凭据状态，不改 owner。凭据行轮换时由新行继承上一行的 owner 与账号快照（migration 0023），所以健康检查与轮换不会解除绑定。该绑定只授权固定白名单：播放上报、喜欢、加入账号歌单；HTTP 写操作要求 acting Principal 与 owner 相同，自动播放上报则按点歌归属执行 §5.2 的 owner 判定。服务端禁止提供携带内部 cookie 的通用 NCM 路径代理，cookie 永不离开服务端。
+
 ## 4. 房间会话
 
 ### 4.1 入房状态与 revision 队列协议
@@ -596,6 +602,14 @@ pause│  │resume
 6. **毒化条目丢弃**：`duration_ms <= 0` 的队列条目在 advance 时直接丢弃（记日志，不写历史）——时长未知会导致结束 timer 永不触发，队列永久停滞。单次 advance 最多连续丢弃 100 条，防病态电台源死循环。
 7. **预解析**：进入 PLAYING 时若队列非空，立即对新队首 Resolve 并后台预拉取缓存（整文件），使切歌时 `/stream` 首字节无源站延迟。
 
+**账号播放上报（scrobble）**：房间结算当前曲目时，若其 Provider 实现 `provider.PlayReporter`，服务端自动、异步尝试上报。只有凭据 owner 本人点的曲目（`requested_by == owner Principal ID`）有资格上报，并且实际播放时长必须满足
+
+```
+played_ms >= min(total_ms / 2, 240000)
+```
+
+`total_ms == 0` 表示总时长未知，此时门槛固定为 240000 ms（240 秒）。上报是 fire-and-forget：所有实际发起的尝试都写入 `audit_log`，失败另记日志，但不得阻塞或回滚播放切换与历史结算。
+
 ### 5.3 并发模型
 
 - 每个房间一个 actor goroutine；所有 4.2 节操作、timer 事件、听众进出全部经 `inbound` channel 串行处理。无锁。
@@ -774,6 +788,8 @@ Room create/PATCH/list/get 的错误合同：
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | body `{"payload":"..."}`；先校验再热生效，凭据存储于服务端且永不下发 |
 | `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 返回 `{key, qr_content}`，Client 自行渲染二维码 |
 | `GET /api/v1/providers/{id}/qrlogin/{key}` | `media_admin` | 返回 waiting / scanned / ok / expired；ok 时凭据已在服务端生效 |
+| `POST /api/v1/providers/{id}/like` | 凭据 owner（标准 session） | body `{"track":"<id>"}`；在该 Provider 的凭据账号上喜欢曲目，非 owner 为 403 |
+| `POST /api/v1/providers/{id}/playlist-add` | 凭据 owner（标准 session） | body `{"playlist_id":"...","track":"<id>"}`；加入该凭据账号的歌单，非 owner 为 403 |
 | `GET /api/v1/playlists` | `requester` | 歌单列表（含曲目数，不含条目） |
 | `POST /api/v1/playlists` | `media_admin` | 创建歌单 `{name, description}` |
 | `GET /api/v1/playlists/{id}?offset=&limit=` | `requester` | 歌单详情 + 条目分页（默认 50，上限 200） |
@@ -791,6 +807,65 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/cover/{track_ref}` | — | 公开统一封面代理，Cache-Control 30 天（`public, max-age=2592000`） |
 | `GET /api/v1/lyrics?track_ref=` | `listener` | `{type:"lrc",lrc,tlrc?}`；Provider 无能力时 501 `not_supported` |
 | `GET /stream/v1/{track_ref}?ticket=` | 持票 | 统一出流；支持 HTTP Range |
+
+#### 6.2.1 Provider owner 与账号写操作合同
+
+`GET /api/v1/providers` 的响应仍以 `providers` 为信封；每个条目新增 `owned`，支持可选账号写能力时还携带 `capabilities.account_write`。NCM 的完整示例如下：
+
+```json
+{
+  "providers": [
+    {
+      "id": "ncm",
+      "credential_status": "ok",
+      "owned": true,
+      "capabilities": {
+        "account_write": ["play_report", "like", "playlist_add"]
+      }
+    }
+  ]
+}
+```
+
+- `owned` 是按当前请求 Principal 计算的布尔值；仅当该 Principal 等于 3.9 的凭据 owner 时为 `true`。它不是 Provider 全局属性，Client、反向代理与共享缓存均不得把一名用户的值复用于另一名用户。
+- `capabilities.account_write` 是按 Provider 可选接口断言得到的子集：`provider.PlayReporter` 提供 `"play_report"`，`provider.AccountWriter` 提供 `"like"` 与 `"playlist_add"`。两种接口都未实现时省略 `capabilities`。
+- Client 只有在 `owned == true` 且数组含对应能力时才展示或启用喜欢/加入歌单操作；能力发现不替代服务端 owner 鉴权。
+
+喜欢请求与成功响应：
+
+```http
+POST /api/v1/providers/ncm/like
+Authorization: Bearer <session_token>
+Content-Type: application/json
+
+{"track":"347230"}
+```
+
+```json
+{ "ok": true }
+```
+
+加入账号歌单请求与成功响应：
+
+```http
+POST /api/v1/providers/ncm/playlist-add
+Authorization: Bearer <session_token>
+Content-Type: application/json
+
+{"playlist_id":"123456","track":"347230"}
+```
+
+```json
+{ "ok": true }
+```
+
+两者成功均为 HTTP 200。acting Principal 不是凭据 owner 时返回 HTTP 403，沿用 6.1 的错误信封：
+
+```json
+{ "error": { "code": "forbidden", "message": "..." } }
+```
+
+这两个端点与 §5.2 的自动播放上报共同构成账号写白名单，不存在“任意 NCM path + cookie”代理。每次写尝试均记录 `audit_log`，内部 cookie 不出服务端。
 
 配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；正整数时每 6 小时清理超过该天数未访问的缓存，正在下载的条目跳过。
 
@@ -1064,6 +1139,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
   `position_ms` 不落库）
 - 队列事件的增量 diff 下发
 - 账号密码登录（guest + 全局管理员口令 + OIDC 已覆盖当前认证需求）
+- 每个 Principal 各持一份 Provider 凭据或按 Principal 选择凭据；v1 只使用带 owner 绑定的服务端单例凭据
 
 ## 9. 客户端实现清单
 

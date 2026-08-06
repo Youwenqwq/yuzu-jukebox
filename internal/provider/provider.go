@@ -154,6 +154,27 @@ type CredentialAware interface {
 	CredentialStatus(ctx context.Context) string
 }
 
+// PlayReporter 是可选接口：能把播放记录上报回凭据账号的 Provider 实现它
+// （如 NCM scrobble）。上报是 fire-and-forget：调用方负责 owner 校验
+// （RequestedBy == 凭据 owner）、短超时与失败降级；实现不得阻塞调用方。
+type PlayReporter interface {
+	Provider
+	// ReportPlay 上报一次播放。id 为 TrackRef 的 id 段；
+	// playedMs 为实际播放时长，totalMs 为曲目总时长（0 = 未知）。
+	ReportPlay(ctx context.Context, id string, playedMs, totalMs int64) error
+}
+
+// AccountWriter 是可选接口：支持对凭据账号做写操作的 Provider 实现它。
+// 授权（acting Principal == 凭据 owner）由调用方在 API 层完成；
+// 实现只负责用内部凭据执行，凭据永不下发。
+type AccountWriter interface {
+	Provider
+	// Like 将曲目加入"我喜欢的音乐"。id 为 TrackRef 的 id 段。
+	Like(ctx context.Context, id string) error
+	// AddToPlaylist 将曲目加入凭据账号的指定歌单。
+	AddToPlaylist(ctx context.Context, playlistID, trackID string) error
+}
+
 // Registry 是 provider 注册表。
 type Registry struct {
 	providers map[string]Provider

@@ -21,23 +21,30 @@ import (
 )
 
 type Provider struct {
-	base   string
-	level  string
-	st     *store.Store
-	client *http.Client
+	base        string
+	level       string
+	st          *store.Store
+	client      *http.Client
+	writeClient *http.Client
 
 	cookie atomic.Value // string，空串 = 未配置
 }
+
+var (
+	_ provider.PlayReporter  = (*Provider)(nil)
+	_ provider.AccountWriter = (*Provider)(nil)
+)
 
 func New(baseURL, level string, st *store.Store) *Provider {
 	if level == "" {
 		level = "exhigh"
 	}
 	p := &Provider{
-		base:   strings.TrimRight(baseURL, "/"),
-		level:  level,
-		st:     st,
-		client: &http.Client{Timeout: 15 * time.Second},
+		base:        strings.TrimRight(baseURL, "/"),
+		level:       level,
+		st:          st,
+		client:      &http.Client{Timeout: 15 * time.Second},
+		writeClient: &http.Client{Timeout: 8 * time.Second},
 	}
 	p.cookie.Store("")
 	// 启动时从 DB 恢复凭据
@@ -59,13 +66,15 @@ func (p *Provider) SetCredential(ctx context.Context, payload string) error {
 	if payload == "" {
 		return fmt.Errorf("empty credential")
 	}
-	if err := p.checkLogin(ctx, payload); err != nil {
+	account, err := p.checkLogin(ctx, payload)
+	if err != nil {
 		_ = p.st.UpsertCredential(ctx, p.ID(), payload, "invalid")
 		return fmt.Errorf("credential validation failed: %w", err)
 	}
 	if err := p.st.UpsertCredential(ctx, p.ID(), payload, "ok"); err != nil {
 		return err
 	}
+	_ = p.st.SetCredentialAccount(ctx, p.ID(), account)
 	p.cookie.Store(payload)
 	return nil
 }
@@ -75,28 +84,75 @@ func (p *Provider) CredentialStatus(ctx context.Context) string {
 	if err != nil || payload == "" {
 		return "unset"
 	}
-	if err := p.checkLogin(ctx, payload); err != nil {
+	if _, err := p.checkLogin(ctx, payload); err != nil {
 		return "invalid"
 	}
 	return "ok"
 }
 
-// checkLogin 用 /login/status 验证 cookie 有效性（account 非空即已登录）。
-func (p *Provider) checkLogin(ctx context.Context, cookie string) error {
+// checkLogin 用 /login/status 验证 cookie，并返回登录账号资料。
+func (p *Provider) checkLogin(ctx context.Context, cookie string) (store.AccountProfile, error) {
 	var resp struct {
 		Data struct {
+			Profile *struct {
+				UserID    int64  `json:"userId"`
+				Nickname  string `json:"nickname"`
+				AvatarURL string `json:"avatarUrl"`
+			} `json:"profile"`
 			Account *struct {
 				ID int64 `json:"id"`
 			} `json:"account"`
 		} `json:"data"`
 	}
 	if err := p.get(ctx, "/login/status", url.Values{}, cookie, &resp); err != nil {
-		return err
+		return store.AccountProfile{}, err
 	}
-	if resp.Data.Account == nil {
-		return fmt.Errorf("not logged in")
+
+	var account store.AccountProfile
+	if resp.Data.Profile != nil {
+		account.UID = strconv.FormatInt(resp.Data.Profile.UserID, 10)
+		account.Name = resp.Data.Profile.Nickname
+		account.Avatar = resp.Data.Profile.AvatarURL
 	}
-	return nil
+	if (account.UID == "" || account.UID == "0") && resp.Data.Account != nil {
+		account.UID = strconv.FormatInt(resp.Data.Account.ID, 10)
+	}
+	if account.UID == "" || account.UID == "0" {
+		return store.AccountProfile{}, fmt.Errorf("not logged in")
+	}
+	return account, nil
+}
+
+// ---------- 账号写操作 ----------
+
+// ReportPlay 通过 /scrobble/v1 上报播放记录（sourceid 可选），时间单位为秒。
+func (p *Provider) ReportPlay(ctx context.Context, id string, playedMs, totalMs int64) error {
+	q := url.Values{
+		"id":   {id},
+		"time": {strconv.FormatInt(playedMs/1000, 10)},
+	}
+	if totalMs > 0 {
+		q.Set("total", strconv.FormatInt(totalMs/1000, 10))
+	}
+	return p.write(ctx, "/scrobble/v1", q)
+}
+
+// Like 将曲目加入凭据账号的喜欢列表。
+func (p *Provider) Like(ctx context.Context, id string) error {
+	return p.write(ctx, "/like", url.Values{
+		"id":   {id},
+		"like": {"true"},
+	})
+}
+
+// AddToPlaylist 将曲目加入凭据账号的指定歌单。
+func (p *Provider) AddToPlaylist(ctx context.Context, playlistID, trackID string) error {
+	return p.write(ctx, "/playlist/tracks", url.Values{
+		"op":        {"add"},
+		"pid":       {playlistID},
+		"tracks":    {trackID},
+		"timestamp": {strconv.FormatInt(time.Now().UnixMilli(), 10)},
+	})
 }
 
 // ---------- 二维码登录 ----------
@@ -298,6 +354,41 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 
 // get 发 GET 请求并解码 JSON。cookie 非空时按文档以 query 参数传递。
 func (p *Provider) get(ctx context.Context, path string, q url.Values, cookie string, out any) error {
+	return p.getWithClient(ctx, p.client, path, q, cookie, out)
+}
+
+// write 使用短超时客户端执行账号写操作，并校验业务状态码。
+func (p *Provider) write(ctx context.Context, path string, q url.Values) error {
+	cookie := p.cookie.Load().(string)
+	if cookie == "" {
+		return fmt.Errorf("ncm api %s: credential not configured", path)
+	}
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Msg     string `json:"msg"`
+	}
+	if err := p.getWithClient(ctx, p.writeClient, path, q, cookie, &resp); err != nil {
+		return err
+	}
+	if resp.Code != http.StatusOK {
+		message := resp.Message
+		if message == "" {
+			message = resp.Msg
+		}
+		return fmt.Errorf("ncm api %s: code %d (%s)", path, resp.Code, message)
+	}
+	return nil
+}
+
+func (p *Provider) getWithClient(
+	ctx context.Context,
+	client *http.Client,
+	path string,
+	q url.Values,
+	cookie string,
+	out any,
+) error {
 	if cookie != "" {
 		q.Set("cookie", cookie)
 	}
@@ -306,7 +397,7 @@ func (p *Provider) get(ctx context.Context, path string, q url.Values, cookie st
 	if err != nil {
 		return err
 	}
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("ncm api %s: %w", path, err)
 	}

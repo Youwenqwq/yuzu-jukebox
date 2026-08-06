@@ -196,3 +196,9 @@ Still planned:
 - **Current track stays in the queue**: `room_queue` holds the playing entry plus everything upcoming; `is_current` marks the cursor. The wire format is unchanged — `queue.snapshot`/`queue.patch` still carry upcoming entries only, and the playing entry is delivered via `playback.changed`. Persisting it means the playing track is queryable in SQL (acceleration pins the object being streamed) and a restart resumes that track instead of skipping to the next one. `position_ms` is still runtime-only, so resume starts from the head
 - **TrackRef format**: `provider:id` — opaque string below the API layer (e.g. `ncm:347230`, `bili:BV1xx`, `local:<uuid>`)
 - **All timestamps**: Unix milliseconds (UTC)
+
+### Provider Credential Ownership
+- **Singleton owner**: a provider credential is server-wide; every human-driven credential write (direct set or successful QR login) re-binds it to the writing Principal. Credential monitoring and row rotation preserve the owner/account binding.
+- **Whitelisted writes only**: interactive like/playlist-add requests require the acting Principal to equal the credential owner; automatic play reporting instead requires the track's requester to be that owner. These are the complete whitelist—never expose a generic NCM endpoint/cookie proxy; the cookie stays server-side.
+- **Scrobble rule**: report only tracks personally requested by the owner, after `played_ms >= min(total_ms/2, 240000)`; unknown duration uses 240000 ms. Reporting is fire-and-forget, audited, and never blocks playback.
+- **Per-principal discovery**: `owned` in `GET /api/v1/providers` is computed for the requesting Principal and must never be cached across users.
