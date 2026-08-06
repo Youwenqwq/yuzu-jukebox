@@ -2,10 +2,12 @@ package ncm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -214,6 +216,88 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 	}
 	if len(albumTracks) != 1 || !reflect.DeepEqual(albumTracks[0], wantAlbum) {
 		t.Fatalf("album tracks = %#v, want [%#v]", albumTracks, wantAlbum)
+	}
+}
+
+func TestImportPlaylistPaginatesThousandSongPages(t *testing.T) {
+	type songFixture struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+
+	var detailRequests, trackRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/playlist/detail":
+			detailRequests++
+			if got := r.URL.Query().Get("id"); got != "9876" {
+				t.Errorf("detail id = %q, want 9876", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"playlist": map[string]any{"name": "Long Playlist"},
+			})
+		case "/playlist/track/all":
+			trackRequests++
+			if got := r.URL.Query().Get("id"); got != "9876" {
+				t.Errorf("track id = %q, want 9876", got)
+			}
+			if got := r.URL.Query().Get("limit"); got != "1000" {
+				t.Errorf("limit = %q, want 1000", got)
+			}
+			offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+			if err != nil {
+				t.Errorf("invalid offset %q: %v", r.URL.Query().Get("offset"), err)
+			}
+			count := 0
+			switch offset {
+			case 0, 1000:
+				count = 1000
+			case 2000:
+				count = 300
+			default:
+				t.Errorf("unexpected offset %d", offset)
+			}
+			songs := make([]songFixture, count)
+			for i := range songs {
+				id := int64(offset + i + 1)
+				songs[i] = songFixture{ID: id, Name: "song-" + strconv.FormatInt(id, 10)}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"songs": songs})
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	p := categoryTestProvider(server)
+	p.cookie.Store("")
+	name, tracks, err := p.ImportPlaylist(context.Background(), "9876")
+	if err != nil {
+		t.Fatalf("ImportPlaylist() error = %v", err)
+	}
+	if name != "Long Playlist" {
+		t.Errorf("name = %q, want Long Playlist", name)
+	}
+	if len(tracks) != 2300 {
+		t.Fatalf("tracks = %d, want 2300", len(tracks))
+	}
+	for _, check := range []struct {
+		index int
+		ref   provider.TrackRef
+	}{
+		{index: 0, ref: provider.NewRef("ncm", "1")},
+		{index: 999, ref: provider.NewRef("ncm", "1000")},
+		{index: 1000, ref: provider.NewRef("ncm", "1001")},
+		{index: 2299, ref: provider.NewRef("ncm", "2300")},
+	} {
+		if got := tracks[check.index].Ref; got != check.ref {
+			t.Errorf("tracks[%d].Ref = %q, want %q", check.index, got, check.ref)
+		}
+	}
+	if detailRequests != 1 || trackRequests != 3 {
+		t.Fatalf("detail requests = %d, track-all requests = %d; want 1 and 3", detailRequests, trackRequests)
 	}
 }
 

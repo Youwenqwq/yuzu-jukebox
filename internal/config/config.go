@@ -31,6 +31,8 @@ type Config struct {
 	CacheMaxBytes int64 `json:"cache_max_bytes"`
 	// 自动清理超过指定天数未访问的缓存；0 表示关闭
 	CacheAutoPruneDays int `json:"cache_auto_prune_days"`
+	// provider 绑定歌单的周期同步间隔（分钟）；0 关闭周期同步，手动同步不受影响
+	PlaylistSyncIntervalMinutes int `json:"playlist_sync_interval_minutes"`
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
 	// v1 没有账号体系，这是唯一的管理员入口。
 	AdminPassword string `json:"admin_password"`
@@ -74,12 +76,13 @@ type BiliConfig struct {
 
 func Default() Config {
 	return Config{
-		Addr:               ":8080",
-		DBPath:             "data/yuzu.db",
-		MediaDir:           "data/media",
-		CacheDir:           "data/cache",
-		CacheMaxBytes:      20 << 30, // 20 GiB
-		CacheAutoPruneDays: 0,
+		Addr:                        ":8080",
+		DBPath:                      "data/yuzu.db",
+		MediaDir:                    "data/media",
+		CacheDir:                    "data/cache",
+		CacheMaxBytes:               20 << 30, // 20 GiB
+		CacheAutoPruneDays:          0,
+		PlaylistSyncIntervalMinutes: 0,
 		NCM: NCMConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3000",

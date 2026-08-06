@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
+	"github.com/youwenqwq/yuzu-jukebox/internal/plsync"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
@@ -55,6 +57,130 @@ func (s *Server) createPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	s.st.Audit(r.Context(), id.ID, "playlist.create", pl.ID, "{}")
 	writeJSON(w, http.StatusCreated, map[string]any{"playlist": pl})
+}
+
+// bindPlaylist 绑定外部 provider 歌单，并在创建时完成首次全量同步。
+func (s *Server) bindPlaylist(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	var body struct {
+		Provider   string `json:"provider"`
+		PlaylistID string `json:"playlist_id"`
+		Name       string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	body.Provider = strings.TrimSpace(body.Provider)
+	body.PlaylistID = strings.TrimSpace(body.PlaylistID)
+	if body.Provider == "" || body.PlaylistID == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "provider and playlist_id required")
+		return
+	}
+	p, ok := s.reg.Get(body.Provider)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request", "unknown provider: "+body.Provider)
+		return
+	}
+	if _, ok := p.(provider.PlaylistImporter); !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request",
+			"provider does not support playlist import: "+body.Provider)
+		return
+	}
+	existing, found, err := s.st.GetPlaylistByBinding(r.Context(), body.Provider, body.PlaylistID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if found {
+		writeErr(w, http.StatusConflict, "already_bound",
+			"provider playlist is already bound to "+existing.ID)
+		return
+	}
+
+	now := nowMs()
+	pl := store.Playlist{
+		ID:            "pl_" + randHex(6),
+		Name:          body.Name,
+		CreatedBy:     identity.ID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		BoundProvider: body.Provider,
+		BoundRemoteID: body.PlaylistID,
+	}
+	if err := s.st.CreatePlaylist(r.Context(), pl); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, pl.ID)
+	if err != nil {
+		if rollbackErr := s.st.DeletePlaylist(r.Context(), pl.ID); rollbackErr != nil {
+			writeErr(w, http.StatusBadGateway, "provider_error",
+				err.Error()+"; rollback failed: "+rollbackErr.Error())
+			return
+		}
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	pl, err = s.st.GetPlaylist(r.Context(), pl.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), identity.ID, "playlist.bind", pl.ID,
+		`{"count":`+strconv.Itoa(synced)+`}`)
+	writeJSON(w, http.StatusOK, map[string]any{"playlist": pl, "synced": synced})
+}
+
+// syncPlaylist 立即全量同步 provider 绑定歌单。
+func (s *Server) syncPlaylist(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "playlist is not provider-bound")
+		return
+	}
+	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, pl.ID)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), identity.ID, "playlist.sync", pl.ID,
+		`{"count":`+strconv.Itoa(synced)+`}`)
+	writeJSON(w, http.StatusOK, map[string]any{"synced": synced})
+}
+
+// detachPlaylist 解除 provider 绑定，保留当前歌单条目。
+func (s *Server) detachPlaylist(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "playlist is not provider-bound")
+		return
+	}
+	if err := s.st.ClearPlaylistBinding(r.Context(), pl.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), identity.ID, "playlist.detach", pl.ID, "{}")
+	writeJSON(w, http.StatusOK, map[string]any{"detached": pl.ID})
 }
 
 func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -107,8 +233,14 @@ func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plID := r.PathValue("id")
-	if _, err := s.st.GetPlaylist(r.Context(), plID); err != nil {
+	pl, err := s.st.GetPlaylist(r.Context(), plID)
+	if err != nil {
 		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider != "" {
+		writeErr(w, http.StatusConflict, "playlist_bound",
+			"playlist is provider-bound; detach first")
 		return
 	}
 	var body struct {
@@ -160,6 +292,16 @@ func (s *Server) deletePlaylistItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plID := r.PathValue("id")
+	pl, err := s.st.GetPlaylist(r.Context(), plID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider != "" {
+		writeErr(w, http.StatusConflict, "playlist_bound",
+			"playlist is provider-bound; detach first")
+		return
+	}
 	if err := s.st.DeletePlaylistItem(r.Context(), plID, ord); err != nil {
 		writeErr(w, http.StatusNotFound, "not_found", "item not found")
 		return
@@ -176,8 +318,14 @@ func (s *Server) movePlaylistItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plID := r.PathValue("id")
-	if _, err := s.st.GetPlaylist(r.Context(), plID); err != nil {
+	pl, err := s.st.GetPlaylist(r.Context(), plID)
+	if err != nil {
 		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider != "" {
+		writeErr(w, http.StatusConflict, "playlist_bound",
+			"playlist is provider-bound; detach first")
 		return
 	}
 	ord, err := strconv.Atoi(r.PathValue("ord"))

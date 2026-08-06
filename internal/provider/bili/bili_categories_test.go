@@ -152,14 +152,17 @@ func TestImportPlaylist(t *testing.T) {
 		assertVideoTrack(t, tracks[len(tracks)-1], "p2-4")
 	})
 
-	t.Run("caps at five hundred resources", func(t *testing.T) {
+	t.Run("caps at one thousand resources", func(t *testing.T) {
 		var requests int
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests++
 			pn, _ := strconv.Atoi(r.URL.Query().Get("pn"))
+			if pn > 50 {
+				t.Errorf("requested page %d beyond 1000-resource cap", pn)
+			}
 			_ = json.NewEncoder(w).Encode(videoListResponse{
 				Results: makeVideos(fmt.Sprintf("p%d-", pn), 20, -1),
-				Total:   999,
+				Total:   2000,
 			})
 		}))
 		defer server.Close()
@@ -168,9 +171,10 @@ func TestImportPlaylist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ImportPlaylist: %v", err)
 		}
-		if requests != 25 || len(tracks) != 500 {
-			t.Fatalf("requests = %d, tracks = %d; want 25 and 500", requests, len(tracks))
+		if requests != 50 || len(tracks) != 1000 {
+			t.Fatalf("requests = %d, tracks = %d; want 50 and 1000", requests, len(tracks))
 		}
+		assertVideoTrack(t, tracks[len(tracks)-1], "p50-19")
 	})
 
 	t.Run("empty cookie fails before request", func(t *testing.T) {

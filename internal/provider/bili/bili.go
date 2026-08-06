@@ -302,7 +302,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 
 	const (
 		pageSize = 20
-		maxItems = 500 // 收藏夹可能极大，硬封顶防失控。
+		maxItems = 1000 // B 站收藏夹单夹内容上限为 1000，封顶对齐实际上限而非任意防御值。
 	)
 	tracks := make([]provider.Track, 0, pageSize)
 	processed := 0

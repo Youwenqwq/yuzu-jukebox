@@ -143,3 +143,179 @@ func TestMovePlaylistItemOutOfRange(t *testing.T) {
 	// 未命中不应产生任何副作用
 	assertOrder(t, orderOf(t, st, pl), "t1", "t2", "t3")
 }
+
+func openPlaylistStore(t *testing.T) *Store {
+	t.Helper()
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+func TestPlaylistBindingRoundTripAndDetach(t *testing.T) {
+	st := openPlaylistStore(t)
+	ctx := context.Background()
+	bound := Playlist{
+		ID: "bound", Name: "远端歌单", CreatedAt: 1, UpdatedAt: 1,
+		BoundProvider: "fake", BoundRemoteID: "remote-1",
+		LastSyncAt: 23, LastSyncError: "old error",
+	}
+	if err := st.CreatePlaylist(ctx, bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendPlaylistItems(ctx, bound.ID, []PlaylistItem{{TrackRef: "fake:old", Title: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := st.GetPlaylistByBinding(ctx, "fake", "remote-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("binding not found")
+	}
+	if got.ID != bound.ID || got.BoundProvider != "fake" || got.BoundRemoteID != "remote-1" ||
+		got.LastSyncAt != 23 || got.LastSyncError != "old error" || got.TrackCount != 1 {
+		t.Fatalf("binding round trip = %+v", got)
+	}
+	all, err := st.ListPlaylists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundOnly, err := st.ListBoundPlaylists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].BoundRemoteID != "remote-1" || len(boundOnly) != 1 || boundOnly[0].ID != bound.ID {
+		t.Fatalf("lists: all=%+v bound=%+v", all, boundOnly)
+	}
+
+	duplicate := bound
+	duplicate.ID = "duplicate"
+	if err := st.CreatePlaylist(ctx, duplicate); err == nil {
+		t.Fatal("duplicate provider binding unexpectedly succeeded")
+	}
+
+	if err := st.ClearPlaylistBinding(ctx, bound.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.GetPlaylistByBinding(ctx, "fake", "remote-1"); err != nil || ok {
+		t.Fatalf("binding after detach: ok=%v err=%v", ok, err)
+	}
+	detached, err := st.GetPlaylist(ctx, bound.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detached.BoundProvider != "" || detached.BoundRemoteID != "" ||
+		detached.LastSyncAt != 0 || detached.LastSyncError != "" {
+		t.Fatalf("detached metadata = %+v", detached)
+	}
+	items, err := st.PlaylistItems(ctx, bound.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].TrackRef != "fake:old" {
+		t.Fatalf("detach changed items: %+v", items)
+	}
+}
+
+func TestReplacePlaylistItemsAtomicAndZeroBased(t *testing.T) {
+	st, playlistID := setupPlaylist(t, 2)
+	ctx := context.Background()
+	replacement := []PlaylistItem{
+		{TrackRef: "fake:new-1", Title: "new 1"},
+		{TrackRef: "fake:new-2", Title: "new 2"},
+		{TrackRef: "fake:new-3", Title: "new 3"},
+	}
+	if err := st.ReplacePlaylistItems(ctx, playlistID, replacement); err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.PlaylistItems(ctx, playlistID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("item count = %d, want 3", len(items))
+	}
+	for i, item := range items {
+		if item.Ord != i || item.TrackRef != replacement[i].TrackRef {
+			t.Fatalf("item %d = %+v, want ord=%d ref=%s", i, item, i, replacement[i].TrackRef)
+		}
+	}
+
+	if _, err := st.DB().ExecContext(ctx, `
+		CREATE TRIGGER reject_bad_playlist_item
+		BEFORE INSERT ON playlist_items
+		WHEN NEW.track_ref = 'fake:bad'
+		BEGIN
+			SELECT RAISE(ABORT, 'bad item');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	err = st.ReplacePlaylistItems(ctx, playlistID, []PlaylistItem{
+		{TrackRef: "fake:partial", Title: "partial"},
+		{TrackRef: "fake:bad", Title: "bad"},
+	})
+	if err == nil {
+		t.Fatal("replacement with rejected item unexpectedly succeeded")
+	}
+	afterFailure, err := st.PlaylistItems(ctx, playlistID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterFailure) != len(items) {
+		t.Fatalf("failed replacement changed item count: %+v", afterFailure)
+	}
+	for i := range items {
+		if afterFailure[i].Ord != items[i].Ord || afterFailure[i].TrackRef != items[i].TrackRef {
+			t.Fatalf("failed replacement changed items: before=%+v after=%+v", items, afterFailure)
+		}
+	}
+}
+
+func TestSetPlaylistSyncResult(t *testing.T) {
+	st := openPlaylistStore(t)
+	ctx := context.Background()
+	playlist := Playlist{
+		ID: "sync-result", Name: "原名称", CreatedAt: 1, UpdatedAt: 1,
+		BoundProvider: "fake", BoundRemoteID: "remote",
+	}
+	if err := st.CreatePlaylist(ctx, playlist); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplacePlaylistItems(ctx, playlist.ID, []PlaylistItem{{TrackRef: "fake:old", Title: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	syncErr := errors.New("provider unavailable")
+	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "不应采用", 100, syncErr); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := st.GetPlaylist(ctx, playlist.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Name != "原名称" || failed.LastSyncAt != 100 || failed.LastSyncError != syncErr.Error() {
+		t.Fatalf("failure result = %+v", failed)
+	}
+	items, err := st.PlaylistItems(ctx, playlist.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].TrackRef != "fake:old" {
+		t.Fatalf("failure changed items: %+v", items)
+	}
+
+	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "远端新名称", 200, nil); err != nil {
+		t.Fatal(err)
+	}
+	succeeded, err := st.GetPlaylist(ctx, playlist.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded.Name != "远端新名称" || succeeded.LastSyncAt != 200 || succeeded.LastSyncError != "" {
+		t.Fatalf("success result = %+v", succeeded)
+	}
+}

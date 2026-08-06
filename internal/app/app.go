@@ -18,6 +18,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/credmon"
 	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
+	"github.com/youwenqwq/yuzu-jukebox/internal/plsync"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/bili"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
@@ -88,6 +89,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	mon := credmon.New(reg, st)
 	go mon.Run(ctx)
+	if cfg.PlaylistSyncIntervalMinutes > 0 {
+		syncer := plsync.New(reg, st)
+		syncer.SetInterval(time.Duration(cfg.PlaylistSyncIntervalMinutes) * time.Minute)
+		go syncer.Run(ctx)
+	}
 
 	var oidcValidator *auth.OIDCValidator
 	if cfg.OIDC.Enabled && cfg.OIDC.Issuer != "" {

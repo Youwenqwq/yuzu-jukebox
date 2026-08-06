@@ -986,13 +986,17 @@ func (s *Store) DeleteCacheRow(ctx context.Context, trackRef string) error {
 // ---------- 歌单 ----------
 
 type Playlist struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	CreatedBy   string `json:"created_by"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
-	TrackCount  int    `json:"track_count"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	CreatedBy     string `json:"created_by"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+	TrackCount    int    `json:"track_count"`
+	BoundProvider string `json:"bound_provider,omitempty"`
+	BoundRemoteID string `json:"bound_remote_id,omitempty"`
+	LastSyncAt    int64  `json:"last_sync_at,omitempty"`
+	LastSyncError string `json:"last_sync_error,omitempty"`
 }
 
 type PlaylistItem struct {
@@ -1010,9 +1014,12 @@ type PlaylistItem struct {
 
 func (s *Store) CreatePlaylist(ctx context.Context, p Playlist) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO playlists (id, name, description, created_by, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?)`,
-		p.ID, p.Name, p.Description, p.CreatedBy, p.CreatedAt, p.UpdatedAt)
+		`INSERT INTO playlists
+		 (id, name, description, created_by, created_at, updated_at,
+		  bound_provider, bound_remote_id, last_sync_at, last_sync_error)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Description, p.CreatedBy, p.CreatedAt, p.UpdatedAt,
+		p.BoundProvider, p.BoundRemoteID, p.LastSyncAt, p.LastSyncError)
 	return err
 }
 
@@ -1025,15 +1032,18 @@ func (s *Store) GetPlaylist(ctx context.Context, id string) (Playlist, error) {
 	var p Playlist
 	err := s.db.QueryRowContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
+		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p WHERE p.id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.TrackCount)
+		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount)
 	return p, err
 }
 
 func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
+		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p ORDER BY p.created_at`)
 	if err != nil {
@@ -1043,12 +1053,106 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 	var out []Playlist
 	for rows.Next() {
 		var p Playlist
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt, &p.TrackCount); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) GetPlaylistByBinding(ctx context.Context, providerID, remoteID string) (Playlist, bool, error) {
+	var p Playlist
+	err := s.db.QueryRowContext(ctx,
+		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
+		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
+		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
+		 FROM playlists p WHERE p.bound_provider = ? AND p.bound_remote_id = ?`,
+		providerID, remoteID).
+		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Playlist{}, false, nil
+	}
+	if err != nil {
+		return Playlist{}, false, err
+	}
+	return p, true, nil
+}
+
+func (s *Store) ListBoundPlaylists(ctx context.Context) ([]Playlist, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
+		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
+		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
+		 FROM playlists p WHERE p.bound_provider != '' ORDER BY p.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Playlist
+	for rows.Next() {
+		var p Playlist
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ReplacePlaylistItems 在单个事务内全量替换歌单条目，序号从 0 连续排列。
+func (s *Store) ReplacePlaylistItems(ctx context.Context, playlistID string, items []PlaylistItem) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM playlist_items WHERE playlist_id = ?`, playlistID); err != nil {
+		return err
+	}
+	for ord, it := range items {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO playlist_items (playlist_id, ord, track_ref, title, artist, duration_ms,
+			 album, cover_url, source_url, contributors_json, added_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			playlistID, ord, it.TrackRef, it.Title, it.Artist, it.DurationMs,
+			it.Album, it.CoverURL, it.SourceURL, it.ContributorsJSON, it.AddedAt); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE playlists SET updated_at = ? WHERE id = ?`, nowMs(), playlistID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SetPlaylistSyncResult(ctx context.Context, id, name string, at int64, syncErr error) error {
+	if syncErr != nil {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE playlists SET last_sync_at = ?, last_sync_error = ? WHERE id = ?`,
+			at, syncErr.Error(), id)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE playlists
+		 SET last_sync_at = ?, last_sync_error = '',
+		     name = CASE WHEN ? != '' THEN ? ELSE name END
+		 WHERE id = ?`,
+		at, name, name, id)
+	return err
+}
+
+// ClearPlaylistBinding 解除外部绑定，保留当前歌单名称和条目。
+func (s *Store) ClearPlaylistBinding(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE playlists
+		 SET bound_provider = '', bound_remote_id = '', last_sync_at = 0, last_sync_error = ''
+		 WHERE id = ?`, id)
+	return err
 }
 
 // AppendPlaylistItems 事务批量追加（ord 从当前最大值续排）。
