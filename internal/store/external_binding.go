@@ -203,7 +203,7 @@ func (s *Store) RedeemExternalBindingCode(
 
 func currentOIDCPrincipal(ctx context.Context, tx *sql.Tx, principalID string) (Principal, error) {
 	principal, err := scanPrincipal(tx.QueryRowContext(ctx,
-		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json,
+		`SELECT id, name, avatar, kind, COALESCE(oidc_subject, ''), roles_json,
 		        active, created_at, updated_at
 		 FROM users
 		 WHERE id = ? AND active = 1 AND COALESCE(oidc_subject, '') <> ''`,

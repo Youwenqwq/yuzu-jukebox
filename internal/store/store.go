@@ -179,6 +179,7 @@ func scanRoom(row roomScanner) (Room, error) {
 type Principal struct {
 	ID          string
 	Name        string
+	Avatar      string // OIDC picture claim 快照；guest/password 恒为空
 	Kind        string
 	OIDCSubject string
 	Roles       []string
@@ -199,28 +200,29 @@ func (s *Store) UpsertPrincipal(ctx context.Context, p Principal) error {
 	now := nowMs()
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO users
-			(id, kind, name, oidc_subject, roles_json, active, created_at, updated_at)
-		 VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?)
+			(id, kind, name, avatar, oidc_subject, roles_json, active, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 			kind = excluded.kind,
 			name = excluded.name,
+			avatar = excluded.avatar,
 			oidc_subject = COALESCE(NULLIF(users.oidc_subject, ''), excluded.oidc_subject),
 			roles_json = excluded.roles_json,
 			active = excluded.active,
 			updated_at = excluded.updated_at`,
-		p.ID, p.Kind, p.Name, p.OIDCSubject, string(rolesJSON), p.Active, now, now)
+		p.ID, p.Kind, p.Name, p.Avatar, p.OIDCSubject, string(rolesJSON), p.Active, now, now)
 	return err
 }
 
 func (s *Store) GetPrincipal(ctx context.Context, id string) (Principal, error) {
 	return scanPrincipal(s.db.QueryRowContext(ctx,
-		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
+		`SELECT id, name, avatar, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
 		 FROM users WHERE id = ?`, id))
 }
 
 func (s *Store) GetPrincipalByOIDCSubject(ctx context.Context, subject string) (Principal, error) {
 	return scanPrincipal(s.db.QueryRowContext(ctx,
-		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
+		`SELECT id, name, avatar, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
 		 FROM users WHERE oidc_subject = ?`, subject))
 }
 
@@ -232,7 +234,7 @@ func (s *Store) ListPrincipals(ctx context.Context, query string, limit int) ([]
 	}
 	query = strings.TrimSpace(query)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
+		`SELECT id, name, avatar, kind, COALESCE(oidc_subject, ''), roles_json, active, created_at, updated_at
 		 FROM users
 		 WHERE ? = ''
 		    OR instr(lower(id), lower(?)) > 0
@@ -265,6 +267,7 @@ func scanPrincipal(row principalScanner) (Principal, error) {
 	err := row.Scan(
 		&p.ID,
 		&p.Name,
+		&p.Avatar,
 		&p.Kind,
 		&p.OIDCSubject,
 		&rolesJSON,

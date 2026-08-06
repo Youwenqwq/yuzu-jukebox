@@ -62,6 +62,7 @@ func (f *fakeIdP) baseClaims() map[string]any {
 	return map[string]any{
 		"iss": f.s.URL, "aud": "yuzu-cli", "sub": "user-42",
 		"preferred_username": "youko",
+		"picture":            "https://id.example/assets/v1/org1/avatar-key",
 		"exp":                time.Now().Add(time.Hour).Unix(),
 	}
 }
@@ -83,8 +84,65 @@ func TestOIDCValidateHappyPath(t *testing.T) {
 	if got.Sub != "user-42" || got.Username != "youko" {
 		t.Fatalf("unexpected claims: %+v", got)
 	}
+	if got.Avatar != "https://id.example/assets/v1/org1/avatar-key" {
+		t.Fatalf("picture not extracted: %q", got.Avatar)
+	}
 	if len(got.Roles) != 1 || got.Roles[0] != "jukebox-admin" {
 		t.Fatalf("roles not extracted: %v", got.Roles)
+	}
+}
+
+func TestOIDCValidateMissingPicture(t *testing.T) {
+	f := newFakeIdP(t)
+	v := NewOIDCValidator(f.s.URL, "yuzu-cli")
+	c := f.baseClaims()
+	delete(c, "picture")
+	got, err := v.Validate(context.Background(), f.sign(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Avatar != "" {
+		t.Fatalf("want empty avatar, got %q", got.Avatar)
+	}
+}
+
+func TestOIDCApplyUserinfo(t *testing.T) {
+	f := newFakeIdP(t)
+	v := NewOIDCValidator(f.s.URL, "yuzu-cli")
+	// id_token 只带 sub（Zitadel 默认剥掉 profile claims）
+	claims, err := v.Validate(context.Background(), f.sign(map[string]any{
+		"iss": f.s.URL, "aud": "yuzu-cli", "sub": "user-42",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Username != "user-42" || claims.Avatar != "" {
+		t.Fatalf("want bare sub identity, got %+v", claims)
+	}
+
+	claims.ApplyUserinfo(map[string]any{
+		"sub":                "user-42",
+		"preferred_username": "youko",
+		"picture":            "https://id.example/assets/v1/org1/avatar-key",
+		"urn:zitadel:iam:org:project:123:roles": map[string]any{
+			"jukebox-admin": map[string]any{},
+		},
+	})
+	if claims.Username != "youko" || claims.Avatar != "https://id.example/assets/v1/org1/avatar-key" {
+		t.Fatalf("userinfo not applied: %+v", claims)
+	}
+	if len(claims.Roles) != 1 || claims.Roles[0] != "jukebox-admin" {
+		t.Fatalf("roles not merged: %v", claims.Roles)
+	}
+}
+
+func TestOIDCApplyUserinfoKeepsIdTokenAvatar(t *testing.T) {
+	// id_token 已带头像时（客户端开了 IDTokenUserinfoAssertion），userinfo 不该覆盖。
+	claims := OIDCClaims{Sub: "s", Username: "u", Avatar: "https://id.example/a1"}
+	claims.ApplyUserinfo(map[string]any{"picture": "https://id.example/a2"})
+	if claims.Avatar != "https://id.example/a1" {
+		t.Fatalf("id_token avatar overwritten: %q", claims.Avatar)
 	}
 }
 
@@ -230,6 +288,13 @@ func TestOIDCIdentityStable(t *testing.T) {
 	c := OIDCIdentity(OIDCClaims{Sub: "s2", Username: "u"}, []string{RoleListener})
 	if a.ID != b.ID || a.ID == c.ID || a.Kind != "oidc" || a.Name != "u" {
 		t.Fatalf("identity derivation broken: %s %s %s", a.ID, b.ID, c.ID)
+	}
+	if a.Avatar != "" {
+		t.Fatalf("want empty avatar when claim unset, got %q", a.Avatar)
+	}
+	withAvatar := OIDCIdentity(OIDCClaims{Sub: "s1", Username: "u", Avatar: "https://id.example/a"}, []string{RoleListener})
+	if withAvatar.Avatar != "https://id.example/a" {
+		t.Fatalf("avatar not carried into identity: %q", withAvatar.Avatar)
 	}
 }
 

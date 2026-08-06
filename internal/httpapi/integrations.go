@@ -95,6 +95,7 @@ type integrationSubjectResponse struct {
 type principalResponse struct {
 	ID     string   `json:"id"`
 	Name   string   `json:"name"`
+	Avatar string   `json:"avatar,omitempty"`
 	Kind   string   `json:"kind"`
 	Roles  []string `json:"roles"`
 	Active bool     `json:"active"`
@@ -322,7 +323,7 @@ func (s *Server) listPrincipals(w http.ResponseWriter, r *http.Request) {
 	principals := make([]principalResponse, len(rows))
 	for i, row := range rows {
 		principals[i] = principalResponse{
-			ID: row.ID, Name: row.Name, Kind: row.Kind,
+			ID: row.ID, Name: row.Name, Avatar: row.Avatar, Kind: row.Kind,
 			Roles: row.Roles, Active: row.Active,
 		}
 	}

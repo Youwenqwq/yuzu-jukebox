@@ -17,7 +17,8 @@ func TestPrincipalAndExternalMappings(t *testing.T) {
 	ctx := context.Background()
 
 	alice := Principal{
-		ID: "principal-alice", Name: "Alice", Kind: "oidc", OIDCSubject: "oidc-alice",
+		ID: "principal-alice", Name: "Alice", Avatar: "https://id.example/assets/v1/org1/avatar-key",
+		Kind: "oidc", OIDCSubject: "oidc-alice",
 		Roles: []string{"listener", "requester"}, Active: true,
 	}
 	bob := Principal{
@@ -37,6 +38,9 @@ func TestPrincipalAndExternalMappings(t *testing.T) {
 	}
 	if got.ID != alice.ID || got.Name != alice.Name || got.Kind != alice.Kind || !got.Active {
 		t.Fatalf("OIDC principal = %#v, want %#v", got, alice)
+	}
+	if got.Avatar != alice.Avatar {
+		t.Fatalf("avatar = %q, want %q", got.Avatar, alice.Avatar)
 	}
 	if len(got.Roles) != 2 || got.Roles[1] != "requester" {
 		t.Fatalf("principal roles = %#v", got.Roles)

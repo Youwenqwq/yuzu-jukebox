@@ -57,6 +57,7 @@ func (v *OIDCValidator) ClientIDs() []string { return append([]string(nil), v.au
 type OIDCClaims struct {
 	Sub      string
 	Username string   // preferred_username；缺失时回退 sub
+	Avatar   string   // picture claim（头像 URL）；缺失为空串（Zitadel 默认剥掉，靠 ApplyUserinfo 补）
 	Roles    []string // Zitadel project role keys（仅角色名）
 }
 
@@ -148,6 +149,7 @@ func (v *OIDCValidator) Validate(ctx context.Context, idToken string) (OIDCClaim
 	if claims.Username == "" {
 		claims.Username = claims.Sub
 	}
+	claims.Avatar = get("picture")
 	claims.Roles = zitadelRoles(payload)
 	return claims, nil
 }
@@ -192,10 +194,61 @@ func OIDCIdentity(c OIDCClaims, roles []string) Identity {
 	return Identity{
 		ID:          "o_" + hex.EncodeToString(sum[:])[:12],
 		Name:        c.Username,
+		Avatar:      c.Avatar,
 		Kind:        "oidc",
 		Roles:       roles,
 		OIDCSubject: c.Sub,
 	}
+}
+
+// ApplyUserinfo 用 userinfo 响应补齐 ID token 缺失的 profile claims。
+// 背景：Zitadel 默认把 profile scope 的 claims（preferred_username/picture 等）
+// 从 id_token 剥掉（客户端 flag IDTokenUserinfoAssertion 默认 false），
+// userinfo 端点恒带。只填缺失值：显示名仅在当前等于 sub（即 id_token 无
+// preferred_username）时替换；头像为空时填充；角色始终合并。
+func (c *OIDCClaims) ApplyUserinfo(info map[string]any) {
+	if c.Username == c.Sub {
+		if name, _ := info["preferred_username"].(string); name != "" {
+			c.Username = name
+		} else if name, _ := info["name"].(string); name != "" {
+			c.Username = name
+		}
+	}
+	if c.Avatar == "" {
+		if pic, _ := info["picture"].(string); pic != "" {
+			c.Avatar = pic
+		}
+	}
+	c.Roles = mergeRoles(c.Roles, zitadelRolesFrom(info))
+}
+
+// mergeRoles 合并去重。
+func mergeRoles(a, b []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, r := range append(a, b...) {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// zitadelRolesFrom 从 userinfo map 提取 Zitadel 角色名。
+func zitadelRolesFrom(info map[string]any) []string {
+	var out []string
+	for k, v := range info {
+		if !strings.HasPrefix(k, "urn:zitadel:iam:org:project") || !strings.HasSuffix(k, ":roles") {
+			continue
+		}
+		if m, ok := v.(map[string]any); ok {
+			for role := range m {
+				out = append(out, role)
+			}
+		}
+	}
+	return out
 }
 
 // zitadelRoles 收集所有 urn:zitadel:iam:org:project*:roles claim 的

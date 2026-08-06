@@ -304,7 +304,7 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	// 且角色 claim 也可能只在 userinfo 里（Project 级 Assert Roles on
 	// Authentication 只作用于 userinfo；roles 进 id_token 由 Application 级
 	// Token Settings 的同名选项控制，旧名 User Roles Inside ID Token）。
-	// 有 access_token 就统一走 userinfo：补显示名 + 合并角色。
+	// 有 access_token 就统一走 userinfo：补显示名 + 头像 + 合并角色。
 	if body.AccessToken != "" {
 		if info, err := s.oidc.Userinfo(r.Context(), body.AccessToken); err == nil {
 			userinfoSub, _ := info["sub"].(string)
@@ -312,14 +312,7 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusUnauthorized, "unauthorized", "userinfo subject does not match id_token")
 				return
 			}
-			if claims.Username == claims.Sub {
-				if name, _ := info["preferred_username"].(string); name != "" {
-					claims.Username = name
-				} else if name, _ := info["name"].(string); name != "" {
-					claims.Username = name
-				}
-			}
-			claims.Roles = mergeRoles(claims.Roles, zitadelRolesFrom(info))
+			claims.ApplyUserinfo(info)
 		}
 	}
 	roles := []string{auth.RoleListener, auth.RoleRequester}
@@ -341,35 +334,6 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	auth.LogAdminGrant(id, "oidc", r.RemoteAddr)
 	s.st.Audit(r.Context(), id.ID, "auth.oidc", "", `{"name":`+strconv.Quote(id.Name)+`}`)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
-}
-
-// mergeRoles 合并去重。
-func mergeRoles(a, b []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(a)+len(b))
-	for _, r := range append(a, b...) {
-		if !seen[r] {
-			seen[r] = true
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// zitadelRolesFrom 从 userinfo map 提取 Zitadel 角色名。
-func zitadelRolesFrom(info map[string]any) []string {
-	var out []string
-	for k, v := range info {
-		if !strings.HasPrefix(k, "urn:zitadel:iam:org:project") || !strings.HasSuffix(k, ":roles") {
-			continue
-		}
-		if m, ok := v.(map[string]any); ok {
-			for role := range m {
-				out = append(out, role)
-			}
-		}
-	}
-	return out
 }
 
 // logout 吊销当前会话（服务端侧）。幂等。

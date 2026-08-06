@@ -149,13 +149,15 @@ should_be = position_ms                                        (paused 时)
 ```
 POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>", "access_token": "<可选>" }
 → { "identity": { "id": "o_…", "name": "<preferred_username>", "kind": "oidc",
+                  "avatar": "<picture claim，可选>",
                   "roles": ["listener", "requester", …映射结果] },
     "session_token": "..." }
 ```
 
-- 服务端始终验签并校验 **ID token**（恒为 JWT，RS256）。可选 access token（Zitadel 默认 opaque）只用于调用 userinfo 补显示名/角色；成功取得的 userinfo 必须带有与已验证 ID token 严格相同的 `sub`，缺失或不匹配时拒绝登录。
+- 服务端始终验签并校验 **ID token**（恒为 JWT，RS256）。可选 access token（Zitadel 默认 opaque）只用于调用 userinfo 补显示名/头像/角色；成功取得的 userinfo 必须带有与已验证 ID token 严格相同的 `sub`，缺失或不匹配时拒绝登录。
 - 验签材料：`{issuer}/.well-known/openid-configuration` → `jwks_uri` → JWKS 缓存；未知 kid 自动刷新一次（密钥轮换）。校验 iss / aud（命中 config `oidc.client_id` 或 `oidc.extra_client_ids` 任一）/ exp（60s 宽限）。
 - 显示名优先取 ID token 的 `preferred_username`；缺失时可用上述同主体 userinfo 的 `preferred_username`/`name` 补充，最终回退稳定 `sub`。
+- 头像取标准 OIDC `picture` claim（Zitadel 值为 `{origin}/assets/v1/{resource_owner}/{avatar_key}`，未设置时为空）。Zitadel 默认把 profile scope 的 claims 从 id_token 剥掉（客户端 flag `IDTokenUserinfoAssertion` 默认关），因此传 `access_token` 时优先经 userinfo 补齐；id_token 已带 `picture`（该 flag 打开时）则保留不覆盖。头像随登录响应 `identity.avatar` 下发，并持久化到 Principal（`users.avatar`，`GET /api/v1/principals` 同样带出）；guest/password 身份恒无此字段。
 - 身份 ID：`o_` + sha256(sub) 前 12 hex——`sub` 在 IdP 里永不变，改名不影响归属。
 - 角色映射：扫描 payload 中所有 `urn:zitadel:iam:org:project*:roles` claim，对象 key 即角色名；config `oidc.role_mapping` 把 Zitadel 角色名映射为 yuzu roles。未命中者保持 `listener + requester`。
 - IdP 侧前提（Zitadel console）：Native 类型应用。角色进 ID token 需 **Application 级**设置（Token Settings 中勾选包含 User Roles 的选项，旧版 UI 叫 "User Roles Inside ID Token"，新版与 Project 级同名为 "Assert Roles on Authentication"，API 字段 `id_token_role_assertion`）——这是角色映射的主路径。Project 级 "Assert Roles on Authentication" 只让 roles 出现在 userinfo，为可选兜底（客户端传 access_token 时服务端会合并 userinfo 角色）。替代方案：客户端在授权请求中携带 scope `urn:zitadel:iam:org:projects:roles`，可不依赖上述 console 设置让 roles 进 token。
@@ -163,7 +165,7 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>", "access_token":
 
 ### 3.4 Principal、角色与当前状态授权
 
-`Principal` 是持久主体，当前记录包含 `id/name/kind/roles/active`（OIDC 主体另存 `oidc_subject`）。对外的 `identity` JSON 仍只有 `id/name/kind/roles`；`active` 是服务端授权状态。
+`Principal` 是持久主体，当前记录包含 `id/name/avatar/kind/roles/active`（OIDC 主体另存 `oidc_subject` 与头像 `users.avatar`）。对外的 `identity` JSON 仍只有 `id/name/avatar/kind/roles`；`active` 是服务端授权状态。
 
 | role / capability | 当前语义 |
 |---|---|

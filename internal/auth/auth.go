@@ -28,6 +28,7 @@ const (
 type Identity struct {
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
+	Avatar               string   `json:"avatar,omitempty"` // OIDC picture claim；仅 OIDC 身份可能有
 	Kind                 string   `json:"kind"` // guest | password | oidc | player
 	Roles                []string `json:"roles"`
 	OIDCSubject          string   `json:"-"`
@@ -145,6 +146,7 @@ func principalFromIdentity(id Identity, active bool) store.Principal {
 	return store.Principal{
 		ID:          id.ID,
 		Name:        id.Name,
+		Avatar:      id.Avatar,
 		Kind:        id.Kind,
 		OIDCSubject: id.OIDCSubject,
 		Roles:       id.Roles,

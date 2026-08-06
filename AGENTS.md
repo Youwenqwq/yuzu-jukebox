@@ -180,6 +180,7 @@ Keep these separate from Integration credential lifecycle work.
 Done:
 1. **OIDC self-service external-subject binding** — implemented (spec-v1 §3.7; `POST /api/v1/auth/external-binding-codes` + `POST /api/v1/integrations/bindings/redeem`; migration 0008).
 2. **Principal and grant administration queries** — implemented: principal list (`GET /api/v1/principals`), Integration scope/subject binding management, and Room controller grant/revoke.
+3. **OIDC avatar passthrough** — `picture` claim rides the preferred_username path (id_token + userinfo backfill via `OIDCClaims.ApplyUserinfo`; userinfo fills only when id_token lacks it), surfaces as `identity.avatar` on login and persists to `users.avatar` (migration 0027) shown in `GET /api/v1/principals`. Zitadel strips profile claims from id_token by default (`IDTokenUserinfoAssertion` flag off), so the access_token + userinfo path is the reliable source.
 
 Still planned:
 1. **Principal lifecycle administration** — first-party disable/enable and bulk external-access revocation have no admin endpoints yet; the persisted `active` flag already enforces disabled Principals, but no complete admin workflow exists.
