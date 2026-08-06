@@ -235,7 +235,10 @@ func TestImportPlaylistPaginatesThousandSongPages(t *testing.T) {
 				t.Errorf("detail id = %q, want 9876", got)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"playlist": map[string]any{"name": "Long Playlist"},
+				"playlist": map[string]any{
+					"name":        "Long Playlist",
+					"coverImgUrl": "https://p1.music.126.net/playlist-cover.jpg",
+				},
 			})
 		case "/playlist/track/all":
 			trackRequests++
@@ -273,12 +276,15 @@ func TestImportPlaylistPaginatesThousandSongPages(t *testing.T) {
 
 	p := categoryTestProvider(server)
 	p.cookie.Store("")
-	name, tracks, err := p.ImportPlaylist(context.Background(), "9876")
+	name, coverURL, tracks, err := p.ImportPlaylist(context.Background(), "9876")
 	if err != nil {
 		t.Fatalf("ImportPlaylist() error = %v", err)
 	}
 	if name != "Long Playlist" {
 		t.Errorf("name = %q, want Long Playlist", name)
+	}
+	if coverURL != "https://p1.music.126.net/playlist-cover.jpg" {
+		t.Errorf("coverURL = %q, want detail coverImgUrl", coverURL)
 	}
 	if len(tracks) != 2300 {
 		t.Fatalf("tracks = %d, want 2300", len(tracks))

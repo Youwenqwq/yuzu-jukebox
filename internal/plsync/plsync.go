@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/youwenqwq/yuzu-jukebox/internal/coverurl"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
@@ -18,13 +19,14 @@ const (
 )
 
 type Syncer struct {
-	reg      *provider.Registry
-	st       *store.Store
-	interval time.Duration
+	reg         *provider.Registry
+	st          *store.Store
+	coverSigner *coverurl.Signer
+	interval    time.Duration
 }
 
-func New(reg *provider.Registry, st *store.Store) *Syncer {
-	return &Syncer{reg: reg, st: st}
+func New(reg *provider.Registry, st *store.Store, signer *coverurl.Signer) *Syncer {
+	return &Syncer{reg: reg, st: st, coverSigner: signer}
 }
 
 // SetInterval 设置周期同步间隔；非正值关闭周期同步，不影响手动同步。
@@ -67,7 +69,7 @@ func (s *Syncer) syncDue(ctx context.Context, now time.Time) {
 		if !isDue(playlist, now, s.interval) {
 			continue
 		}
-		if _, err := SyncOne(ctx, s.st, s.reg, playlist.ID); err != nil {
+		if _, err := SyncOne(ctx, s.st, s.reg, s.coverSigner, playlist.ID); err != nil {
 			log.Printf("[plsync] %s: sync failed: %v", playlist.ID, err)
 		}
 	}
@@ -78,7 +80,7 @@ func isDue(playlist store.Playlist, now time.Time, interval time.Duration) bool 
 }
 
 // SyncOne 从绑定的 provider 拉取歌单全量内容并原子替换本地条目。
-func SyncOne(ctx context.Context, st *store.Store, reg *provider.Registry, playlistID string) (int, error) {
+func SyncOne(ctx context.Context, st *store.Store, reg *provider.Registry, signer *coverurl.Signer, playlistID string) (int, error) {
 	playlist, err := st.GetPlaylist(ctx, playlistID)
 	if err != nil {
 		return 0, err
@@ -99,7 +101,7 @@ func SyncOne(ctx context.Context, st *store.Store, reg *provider.Registry, playl
 	}
 
 	importCtx, cancel := context.WithTimeout(ctx, importTimeout)
-	name, tracks, err := imp.ImportPlaylist(importCtx, playlist.BoundRemoteID)
+	name, importedCoverURL, tracks, err := imp.ImportPlaylist(importCtx, playlist.BoundRemoteID)
 	cancel()
 	if err != nil {
 		return 0, recordFailure(ctx, st, playlistID, err)
@@ -127,14 +129,20 @@ func SyncOne(ctx context.Context, st *store.Store, reg *provider.Registry, playl
 	if err := st.ReplacePlaylistItems(ctx, playlistID, items); err != nil {
 		return 0, recordFailure(ctx, st, playlistID, err)
 	}
-	if err := st.SetPlaylistSyncResult(ctx, playlistID, name, now, nil); err != nil {
+	coverURL := ""
+	if importedCoverURL != "" && signer != nil {
+		if token := signer.Mint(playlist.BoundProvider, importedCoverURL); token != "" {
+			coverURL = "/api/v1/cover/ext/" + token
+		}
+	}
+	if err := st.SetPlaylistSyncResult(ctx, playlistID, name, coverURL, now, nil); err != nil {
 		return 0, err
 	}
 	return len(items), nil
 }
 
 func recordFailure(ctx context.Context, st *store.Store, playlistID string, syncErr error) error {
-	if err := st.SetPlaylistSyncResult(ctx, playlistID, "", time.Now().UnixMilli(), syncErr); err != nil {
+	if err := st.SetPlaylistSyncResult(ctx, playlistID, "", "", time.Now().UnixMilli(), syncErr); err != nil {
 		return fmt.Errorf("%w (record sync result: %v)", syncErr, err)
 	}
 	return syncErr

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -183,8 +185,8 @@ type playlistImporterFake struct {
 	importErr error
 }
 
-func (p *playlistImporterFake) ImportPlaylist(context.Context, string) (string, []provider.Track, error) {
-	return p.name, p.tracks, p.importErr
+func (p *playlistImporterFake) ImportPlaylist(context.Context, string) (string, string, []provider.Track, error) {
+	return p.name, "", p.tracks, p.importErr
 }
 
 type playlistBindingFixture struct {
@@ -533,5 +535,182 @@ func TestPlaylistBindingEndpointsRequireMediaAdmin(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type playlistCoverFixture struct {
+	handler        http.Handler
+	st             *store.Store
+	adminToken     string
+	requesterToken string
+	playlistID     string
+	boundID        string
+}
+
+func setupPlaylistCoverEndpoints(t *testing.T) playlistCoverFixture {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cover.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	authm := auth.NewManager("", st)
+	adminToken := authm.IssueSession(auth.Identity{
+		ID: "cover-admin", Name: "Admin", Kind: "password",
+		Roles: []string{auth.RoleMediaAdmin},
+	})
+	requesterToken := authm.IssueSession(auth.Identity{
+		ID: "cover-requester", Name: "Requester", Kind: "guest",
+		Roles: []string{auth.RoleRequester},
+	})
+	const playlistID = "pl_cover"
+	const boundID = "pl_cover_bound"
+	for _, pl := range []store.Playlist{
+		{ID: playlistID, Name: "自建歌单", CreatedAt: 1, UpdatedAt: 1},
+		{
+			ID: boundID, Name: "绑定歌单", CreatedAt: 1, UpdatedAt: 1,
+			BoundProvider: "fake", BoundRemoteID: "remote-cover",
+		},
+	} {
+		if err := st.CreatePlaylist(context.Background(), pl); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Server{st: st, authm: authm}
+	s.SetPlaylistCoverDir(filepath.Join(t.TempDir(), "playlist-covers"))
+	return playlistCoverFixture{
+		handler: s.Handler(), st: st, adminToken: adminToken,
+		requesterToken: requesterToken, playlistID: playlistID, boundID: boundID,
+	}
+}
+
+func uploadPlaylistCover(
+	t *testing.T,
+	f playlistCoverFixture,
+	playlistID, token string,
+	data []byte,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "cover.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/playlists/"+playlistID+"/cover", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestPlaylistCoverUploadAndServe(t *testing.T) {
+	f := setupPlaylistCoverEndpoints(t)
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+	uploaded := uploadPlaylistCover(t, f, f.playlistID, f.adminToken, png)
+	if uploaded.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", uploaded.Code, uploaded.Body.String())
+	}
+	pl, err := f.st.GetPlaylist(context.Background(), f.playlistID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantURL := "/api/v1/cover/playlist/" + f.playlistID
+	if pl.CoverURL != wantURL || !filepath.IsAbs(pl.CoverPath) {
+		t.Fatalf("stored cover = (%q, %q)", pl.CoverURL, pl.CoverPath)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, wantURL, nil)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("serve status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("content-type = %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=2592000" {
+		t.Fatalf("cache-control = %q", got)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), png) {
+		t.Fatalf("served bytes = %x, want %x", rec.Body.Bytes(), png)
+	}
+	oversized := make([]byte, maxPlaylistCoverBytes+1)
+	copy(oversized, png)
+
+	for _, tc := range []struct {
+		name, playlistID, token string
+		data                    []byte
+		wantStatus              int
+		wantCode                string
+	}{
+		{"requester forbidden", f.playlistID, f.requesterToken, png, http.StatusForbidden, "forbidden"},
+		{"bound conflict", f.boundID, f.adminToken, png, http.StatusConflict, "playlist_bound"},
+		{"non image", f.playlistID, f.adminToken, []byte("not an image"), http.StatusBadRequest, "bad_request"},
+		{"oversized image", f.playlistID, f.adminToken, oversized, http.StatusBadRequest, "bad_request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := uploadPlaylistCover(t, f, tc.playlistID, tc.token, tc.data)
+			response := playlistResponse(t, got)
+			if got.Code != tc.wantStatus || errCode(t, response) != tc.wantCode {
+				t.Fatalf("status = %d, body = %v", got.Code, response)
+			}
+		})
+	}
+}
+
+func TestPlaylistCoverDelete(t *testing.T) {
+	f := setupPlaylistCoverEndpoints(t)
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	uploaded := uploadPlaylistCover(t, f, f.playlistID, f.adminToken, png)
+	if uploaded.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", uploaded.Code, uploaded.Body.String())
+	}
+	before, err := f.st.GetPlaylist(context.Background(), f.playlistID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := playlistEndpointRequest(t, playlistBindingFixture{handler: f.handler},
+		http.MethodDelete, "/api/v1/playlists/"+f.playlistID+"/cover", f.adminToken, nil)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", deleted.Code, deleted.Body.String())
+	}
+	after, err := f.st.GetPlaylist(context.Background(), f.playlistID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.CoverURL != "" || after.CoverPath != "" {
+		t.Fatalf("cover not cleared: %+v", after)
+	}
+	if _, err := os.Stat(before.CoverPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cover file still exists: %v", err)
+	}
+
+	served := httptest.NewRecorder()
+	f.handler.ServeHTTP(served, httptest.NewRequest(http.MethodGet,
+		"/api/v1/cover/playlist/"+f.playlistID, nil))
+	if served.Code != http.StatusNotFound {
+		t.Fatalf("serve after delete status = %d", served.Code)
+	}
+
+	bound := playlistEndpointRequest(t, playlistBindingFixture{handler: f.handler},
+		http.MethodDelete, "/api/v1/playlists/"+f.boundID+"/cover", f.adminToken, nil)
+	boundBody := playlistResponse(t, bound)
+	if bound.Code != http.StatusConflict || errCode(t, boundBody) != "playlist_bound" {
+		t.Fatalf("bound delete status = %d, body = %v", bound.Code, boundBody)
 	}
 }

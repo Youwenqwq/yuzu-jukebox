@@ -85,9 +85,9 @@ func setupCoverServer(t *testing.T) (*Server, *coverFakeProvider) {
 
 func TestCoverExtProxiesEntityImageWithHeaders(t *testing.T) {
 	s, fp := setupCoverServer(t)
-	token := s.mintCoverToken("fake", fp.upstream+"/artist.jpg")
+	token := s.coverSigner.Mint("fake", fp.upstream+"/artist.jpg")
 	if token == "" {
-		t.Fatal("mintCoverToken returned empty")
+		t.Fatal("Signer.Mint returned empty")
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/ext/"+token, nil)
@@ -105,7 +105,7 @@ func TestCoverExtProxiesEntityImageWithHeaders(t *testing.T) {
 
 func TestCoverExtRejectsForgedTokens(t *testing.T) {
 	s, fp := setupCoverServer(t)
-	valid := s.mintCoverToken("fake", fp.upstream+"/artist.jpg")
+	valid := s.coverSigner.Mint("fake", fp.upstream+"/artist.jpg")
 
 	// 防线 = 无法伪造：客户端没有密钥，构造不出指向任意目标的合法 token。
 	cases := map[string]string{
@@ -124,7 +124,7 @@ func TestCoverExtRejectsForgedTokens(t *testing.T) {
 
 func TestCoverExtUnknownProvider(t *testing.T) {
 	s, _ := setupCoverServer(t)
-	token := s.mintCoverToken("nosuch", "http://example.com/x.jpg")
+	token := s.coverSigner.Mint("nosuch", "http://example.com/x.jpg")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/ext/"+token, nil)
 	s.Handler().ServeHTTP(rec, req)

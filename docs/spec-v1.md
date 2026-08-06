@@ -808,8 +808,13 @@ Room create/PATCH/list/get 的错误合同：
 | `POST /api/v1/playlists/bind` | `media_admin` | `{provider,playlist_id,name?}` 创建 Provider 绑定歌单并首次同步；首次同步失败不留残留；重复绑定 409 `already_bound` |
 | `POST /api/v1/playlists/{id}/sync` | `media_admin` | 手动同步绑定歌单（非绑定 400）；失败保留旧快照并把原因记入 `last_sync_error` |
 | `POST /api/v1/playlists/{id}/detach` | `media_admin` | 解除绑定、保留当前条目，转为普通歌单（非绑定 400） |
+| `PUT /api/v1/playlists/{id}/cover` | `media_admin` | multipart `file`（image/*，≤8MB）设置自建歌单封面；绑定歌单 409 `playlist_bound`（封面来自外部，见下） |
+| `DELETE /api/v1/playlists/{id}/cover` | `media_admin` | 清除自建歌单封面（绑定歌单 409） |
+| `GET /api/v1/cover/playlist/{id}` | 免认证 | 提供已上传的歌单封面图（`<img>` 直引） |
 
 **Provider 绑定歌单**：绑定歌单（`bound_provider`/`bound_remote_id` 非空，`GET` 响应含绑定状态与 `last_sync_at`/`last_sync_error`）跟随外部歌单内容，在 yuzu 侧只读——items 追加/删除/移动返回 409 `playlist_bound`，删除整个歌单与 `detach` 不受限。同步语义：成功后整表替换条目（`ReplacePlaylistItems` 单事务，ord 从 0 重排）；**失败绝不破坏现有条目**，保留最后一次成功快照。周期同步由 `playlist_sync_interval_minutes`（默认 0 = 关闭，手动 sync 不受影响）驱动，顺序扫描到期的绑定歌单；同步沿用凭据账号身份，凭据失效即同步失败（快照仍在）。同一 `(provider, playlist_id)` 全库唯一绑定（部分唯一索引）。绑定歌单可直接作为房间电台源 `playlist:<id>` 使用，随同步自动换血。
+
+**歌单封面**：`cover_url` 一律为服务端代理路径。自建歌单上传后为 `/api/v1/cover/playlist/{id}`（文件存 `<media_dir>/playlist_covers/`）；绑定歌单在每次成功同步时由服务端把外部封面 URL 签入防伪造 token（`/api/v1/cover/ext/{token}`，与 6.2.1 实体封面同一机制，`detach` 后依然可读），外部不再提供封面时保留上一份；上传路径对绑定歌单关闭（409）。
 | `GET /api/v1/media` | `media_admin` | 按 `created_at` 倒序返回 `track_ref/title/artist/duration_ms/size_bytes/uploaded_by/created_at`；空列表为 `{"media":[]}` |
 | `DELETE /api/v1/media/{ref}` | `media_admin` | 仅接受 `local:` ref；删除媒体行、文件与对应缓存，不级联队列/歌单/历史引用；旧引用以后 Resolve 失败 |
 | `POST /api/v1/media/upload` | `media_admin` | local provider 上传 |

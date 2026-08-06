@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/youwenqwq/yuzu-jukebox/internal/coverurl"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
@@ -18,6 +19,7 @@ type fakeProvider struct {
 	remoteID string
 	deadline time.Time
 	name     string
+	coverURL string
 	tracks   []provider.Track
 	err      error
 }
@@ -32,11 +34,11 @@ func (p *fakeProvider) GetTrack(context.Context, provider.TrackRef) (provider.Tr
 func (p *fakeProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
 	return provider.StreamLocator{}, provider.ErrNotSupported
 }
-func (p *fakeProvider) ImportPlaylist(ctx context.Context, remoteID string) (string, []provider.Track, error) {
+func (p *fakeProvider) ImportPlaylist(ctx context.Context, remoteID string) (string, string, []provider.Track, error) {
 	p.calls++
 	p.remoteID = remoteID
 	p.deadline, _ = ctx.Deadline()
-	return p.name, p.tracks, p.err
+	return p.name, p.coverURL, p.tracks, p.err
 }
 
 type providerWithoutImporter struct{ id string }
@@ -79,7 +81,7 @@ func TestSyncOneSuccessReplacesItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &fakeProvider{
-		id: "fake", name: "new name",
+		id: "fake", name: "new name", coverURL: "https://img.example/playlist.jpg",
 		tracks: []provider.Track{
 			{Ref: provider.NewRef("fake", "1"), Title: "one", Artist: "artist one", DurationMs: 1000,
 				Album: "album", CoverURL: "https://cover", SourceURL: "https://source",
@@ -90,8 +92,9 @@ func TestSyncOneSuccessReplacesItems(t *testing.T) {
 	reg := provider.NewRegistry()
 	reg.Register(fake)
 
+	signer := coverurl.New([]byte("playlist-cover-test-key"))
 	started := time.Now()
-	count, err := SyncOne(context.Background(), st, reg, "bound")
+	count, err := SyncOne(context.Background(), st, reg, signer, "bound")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,8 +118,37 @@ func TestSyncOneSuccessReplacesItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if playlist.Name != "new name" || playlist.LastSyncAt == 0 || playlist.LastSyncError != "" {
+	if playlist.Name != "new name" || playlist.LastSyncAt == 0 || playlist.LastSyncError != "" ||
+		!strings.HasPrefix(playlist.CoverURL, "/api/v1/cover/ext/") || playlist.CoverPath != "" {
 		t.Fatalf("synced playlist = %+v", playlist)
+	}
+	token := strings.TrimPrefix(playlist.CoverURL, "/api/v1/cover/ext/")
+	providerID, rawURL, ok := signer.Open(token)
+	if !ok || providerID != "fake" || rawURL != fake.coverURL {
+		t.Fatalf("minted cover = (%q, %q, %v), want fake/%q", providerID, rawURL, ok, fake.coverURL)
+	}
+}
+
+func TestSyncOneEmptyCoverPreservesExistingCover(t *testing.T) {
+	st := openSyncStore(t)
+	createSyncPlaylist(t, st, "bound", "fake", "remote")
+	const existingCover = "/api/v1/cover/ext/existing-token"
+	if err := st.SetPlaylistCover(context.Background(), "bound", existingCover, "/tmp/old-cover"); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProvider{id: "fake", name: "new name"}
+	reg := provider.NewRegistry()
+	reg.Register(fake)
+
+	if _, err := SyncOne(context.Background(), st, reg, coverurl.New([]byte("test-key")), "bound"); err != nil {
+		t.Fatal(err)
+	}
+	playlist, err := st.GetPlaylist(context.Background(), "bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if playlist.CoverURL != existingCover || playlist.CoverPath != "" {
+		t.Fatalf("empty imported cover changed existing cover: %+v", playlist)
 	}
 }
 
@@ -131,7 +163,7 @@ func TestSyncOneFailurePreservesItemsAndRecordsError(t *testing.T) {
 	reg := provider.NewRegistry()
 	reg.Register(fake)
 
-	if _, err := SyncOne(context.Background(), st, reg, "bound"); !errors.Is(err, providerErr) {
+	if _, err := SyncOne(context.Background(), st, reg, coverurl.New([]byte("test-key")), "bound"); !errors.Is(err, providerErr) {
 		t.Fatalf("SyncOne error = %v, want %v", err, providerErr)
 	}
 	items, err := st.PlaylistItems(context.Background(), "bound", 0, 10)
@@ -153,7 +185,7 @@ func TestSyncOneFailurePreservesItemsAndRecordsError(t *testing.T) {
 func TestSyncOneRejectsUnboundPlaylist(t *testing.T) {
 	st := openSyncStore(t)
 	createSyncPlaylist(t, st, "unbound", "", "")
-	if _, err := SyncOne(context.Background(), st, provider.NewRegistry(), "unbound"); err == nil || !strings.Contains(err.Error(), "not provider-bound") {
+	if _, err := SyncOne(context.Background(), st, provider.NewRegistry(), coverurl.New([]byte("test-key")), "unbound"); err == nil || !strings.Contains(err.Error(), "not provider-bound") {
 		t.Fatalf("SyncOne error = %v", err)
 	}
 }
@@ -164,7 +196,7 @@ func TestSyncOneRejectsProviderWithoutPlaylistImporter(t *testing.T) {
 	reg := provider.NewRegistry()
 	reg.Register(&providerWithoutImporter{id: "plain"})
 
-	if _, err := SyncOne(context.Background(), st, reg, "bound"); err == nil || !strings.Contains(err.Error(), "does not support playlist import") {
+	if _, err := SyncOne(context.Background(), st, reg, coverurl.New([]byte("test-key")), "bound"); err == nil || !strings.Contains(err.Error(), "does not support playlist import") {
 		t.Fatalf("SyncOne error = %v", err)
 	}
 	playlist, err := st.GetPlaylist(context.Background(), "bound")
@@ -177,7 +209,7 @@ func TestSyncOneRejectsProviderWithoutPlaylistImporter(t *testing.T) {
 }
 
 func TestRunDisabledReturnsImmediately(t *testing.T) {
-	syncer := New(provider.NewRegistry(), openSyncStore(t))
+	syncer := New(provider.NewRegistry(), openSyncStore(t), coverurl.New([]byte("test-key")))
 	done := make(chan struct{})
 	go func() {
 		syncer.Run(context.Background())

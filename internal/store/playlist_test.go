@@ -161,6 +161,7 @@ func TestPlaylistBindingRoundTripAndDetach(t *testing.T) {
 		ID: "bound", Name: "远端歌单", CreatedAt: 1, UpdatedAt: 1,
 		BoundProvider: "fake", BoundRemoteID: "remote-1",
 		LastSyncAt: 23, LastSyncError: "old error",
+		CoverURL: "/api/v1/cover/ext/token", CoverPath: "/tmp/playlist-cover",
 	}
 	if err := st.CreatePlaylist(ctx, bound); err != nil {
 		t.Fatal(err)
@@ -177,8 +178,16 @@ func TestPlaylistBindingRoundTripAndDetach(t *testing.T) {
 		t.Fatal("binding not found")
 	}
 	if got.ID != bound.ID || got.BoundProvider != "fake" || got.BoundRemoteID != "remote-1" ||
-		got.LastSyncAt != 23 || got.LastSyncError != "old error" || got.TrackCount != 1 {
+		got.LastSyncAt != 23 || got.LastSyncError != "old error" || got.TrackCount != 1 ||
+		got.CoverURL != bound.CoverURL || got.CoverPath != bound.CoverPath {
 		t.Fatalf("binding round trip = %+v", got)
+	}
+	direct, err := st.GetPlaylist(ctx, bound.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.CoverURL != bound.CoverURL || direct.CoverPath != bound.CoverPath {
+		t.Fatalf("direct cover round trip = %+v", direct)
 	}
 	all, err := st.ListPlaylists(ctx)
 	if err != nil {
@@ -188,7 +197,9 @@ func TestPlaylistBindingRoundTripAndDetach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 || all[0].BoundRemoteID != "remote-1" || len(boundOnly) != 1 || boundOnly[0].ID != bound.ID {
+	if len(all) != 1 || all[0].BoundRemoteID != "remote-1" ||
+		all[0].CoverURL != bound.CoverURL || all[0].CoverPath != bound.CoverPath ||
+		len(boundOnly) != 1 || boundOnly[0].ID != bound.ID {
 		t.Fatalf("lists: all=%+v bound=%+v", all, boundOnly)
 	}
 
@@ -281,6 +292,7 @@ func TestSetPlaylistSyncResult(t *testing.T) {
 	playlist := Playlist{
 		ID: "sync-result", Name: "原名称", CreatedAt: 1, UpdatedAt: 1,
 		BoundProvider: "fake", BoundRemoteID: "remote",
+		CoverURL: "/api/v1/cover/playlist/sync-result", CoverPath: "/tmp/uploaded-cover",
 	}
 	if err := st.CreatePlaylist(ctx, playlist); err != nil {
 		t.Fatal(err)
@@ -290,14 +302,15 @@ func TestSetPlaylistSyncResult(t *testing.T) {
 	}
 
 	syncErr := errors.New("provider unavailable")
-	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "不应采用", 100, syncErr); err != nil {
+	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "不应采用", "/api/v1/cover/ext/ignored", 100, syncErr); err != nil {
 		t.Fatal(err)
 	}
 	failed, err := st.GetPlaylist(ctx, playlist.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed.Name != "原名称" || failed.LastSyncAt != 100 || failed.LastSyncError != syncErr.Error() {
+	if failed.Name != "原名称" || failed.LastSyncAt != 100 || failed.LastSyncError != syncErr.Error() ||
+		failed.CoverURL != playlist.CoverURL || failed.CoverPath != playlist.CoverPath {
 		t.Fatalf("failure result = %+v", failed)
 	}
 	items, err := st.PlaylistItems(ctx, playlist.ID, 0, 10)
@@ -308,14 +321,30 @@ func TestSetPlaylistSyncResult(t *testing.T) {
 		t.Fatalf("failure changed items: %+v", items)
 	}
 
-	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "远端新名称", 200, nil); err != nil {
+	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "远端新名称", "/api/v1/cover/ext/replacement", 200, nil); err != nil {
 		t.Fatal(err)
 	}
 	succeeded, err := st.GetPlaylist(ctx, playlist.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if succeeded.Name != "远端新名称" || succeeded.LastSyncAt != 200 || succeeded.LastSyncError != "" {
+	if succeeded.Name != "远端新名称" || succeeded.LastSyncAt != 200 || succeeded.LastSyncError != "" ||
+		succeeded.CoverURL != "/api/v1/cover/ext/replacement" || succeeded.CoverPath != "" {
 		t.Fatalf("success result = %+v", succeeded)
+	}
+
+	if err := st.SetPlaylistCover(ctx, playlist.ID, "/api/v1/cover/playlist/sync-result", "/tmp/new-upload"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetPlaylistSyncResult(ctx, playlist.ID, "", "", 300, nil); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := st.GetPlaylist(ctx, playlist.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preserved.Name != "远端新名称" || preserved.LastSyncAt != 300 ||
+		preserved.CoverURL != "/api/v1/cover/playlist/sync-result" || preserved.CoverPath != "" {
+		t.Fatalf("empty cover result = %+v", preserved)
 	}
 }

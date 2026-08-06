@@ -17,23 +17,24 @@ import (
 
 var playlistIDRe = regexp.MustCompile(`(?:playlist\?.*id=)?(\d+)`)
 
-// ImportPlaylist 拉取 NCM 歌单全量曲目。接受裸 id 或完整 URL。
+// ImportPlaylist 拉取 NCM 歌单全量曲目及封面。接受裸 id 或完整 URL。
 // 用 /playlist/track/all 分页（/playlist/detail 的 tracks 只有前 10 首）。
-func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (string, []provider.Track, error) {
+func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (string, string, []provider.Track, error) {
 	m := playlistIDRe.FindStringSubmatch(playlistID)
 	if m == nil {
-		return "", nil, fmt.Errorf("cannot parse playlist id from %q", playlistID)
+		return "", "", nil, fmt.Errorf("cannot parse playlist id from %q", playlistID)
 	}
 	id := m[1]
 
 	// 歌单名
 	var detail struct {
 		Playlist struct {
-			Name string `json:"name"`
+			Name        string `json:"name"`
+			CoverImgURL string `json:"coverImgUrl"`
 		} `json:"playlist"`
 	}
 	if err := p.get(ctx, "/playlist/detail", url.Values{"id": {id}}, p.cookie.Load().(string), &detail); err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	name := detail.Playlist.Name
 	if name == "" {
@@ -57,7 +58,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 		}
 		q := url.Values{"id": {id}, "limit": {strconv.Itoa(pageSize)}, "offset": {strconv.Itoa(offset)}}
 		if err := p.get(ctx, "/playlist/track/all", q, p.cookie.Load().(string), &resp); err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 		for _, s := range resp.Songs {
 			tracks = append(tracks, provider.Track{
@@ -75,7 +76,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 			break
 		}
 	}
-	return name, tracks, nil
+	return name, detail.Playlist.CoverImgURL, tracks, nil
 }
 
 // ---------- 曲目源工厂（provider.SourceFactory） ----------
@@ -106,7 +107,7 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 		if arg == "" {
 			return nil, fmt.Errorf("playlist source requires an id: ncm:playlist:<playlist_id>")
 		}
-		name, tracks, err := p.ImportPlaylist(ctx, arg)
+		name, _, tracks, err := p.ImportPlaylist(ctx, arg)
 		if err != nil {
 			return nil, fmt.Errorf("playlist source: %w", err)
 		}

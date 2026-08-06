@@ -997,6 +997,8 @@ type Playlist struct {
 	BoundRemoteID string `json:"bound_remote_id,omitempty"`
 	LastSyncAt    int64  `json:"last_sync_at,omitempty"`
 	LastSyncError string `json:"last_sync_error,omitempty"`
+	CoverURL      string `json:"cover_url,omitempty"`
+	CoverPath     string `json:"cover_path,omitempty"`
 }
 
 type PlaylistItem struct {
@@ -1016,10 +1018,10 @@ func (s *Store) CreatePlaylist(ctx context.Context, p Playlist) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO playlists
 		 (id, name, description, created_by, created_at, updated_at,
-		  bound_provider, bound_remote_id, last_sync_at, last_sync_error)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		  bound_provider, bound_remote_id, last_sync_at, last_sync_error, cover_url, cover_path)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.Description, p.CreatedBy, p.CreatedAt, p.UpdatedAt,
-		p.BoundProvider, p.BoundRemoteID, p.LastSyncAt, p.LastSyncError)
+		p.BoundProvider, p.BoundRemoteID, p.LastSyncAt, p.LastSyncError, p.CoverURL, p.CoverPath)
 	return err
 }
 
@@ -1028,15 +1030,24 @@ func (s *Store) DeletePlaylist(ctx context.Context, id string) error {
 	return err
 }
 
+func (s *Store) SetPlaylistCover(ctx context.Context, id, coverURL, coverPath string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE playlists SET cover_url = ?, cover_path = ? WHERE id = ?`,
+		coverURL, coverPath, id)
+	return err
+}
+
 func (s *Store) GetPlaylist(ctx context.Context, id string) (Playlist, error) {
 	var p Playlist
 	err := s.db.QueryRowContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
+		        p.cover_url, p.cover_path,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p WHERE p.id = ?`, id).
 		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
-			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount)
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError,
+			&p.CoverURL, &p.CoverPath, &p.TrackCount)
 	return p, err
 }
 
@@ -1044,6 +1055,7 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
+		        p.cover_url, p.cover_path,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p ORDER BY p.created_at`)
 	if err != nil {
@@ -1054,7 +1066,8 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 	for rows.Next() {
 		var p Playlist
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
-			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount); err != nil {
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError,
+			&p.CoverURL, &p.CoverPath, &p.TrackCount); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -1067,11 +1080,13 @@ func (s *Store) GetPlaylistByBinding(ctx context.Context, providerID, remoteID s
 	err := s.db.QueryRowContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
+		        p.cover_url, p.cover_path,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p WHERE p.bound_provider = ? AND p.bound_remote_id = ?`,
 		providerID, remoteID).
 		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
-			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount)
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError,
+			&p.CoverURL, &p.CoverPath, &p.TrackCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Playlist{}, false, nil
 	}
@@ -1130,7 +1145,7 @@ func (s *Store) ReplacePlaylistItems(ctx context.Context, playlistID string, ite
 	return tx.Commit()
 }
 
-func (s *Store) SetPlaylistSyncResult(ctx context.Context, id, name string, at int64, syncErr error) error {
+func (s *Store) SetPlaylistSyncResult(ctx context.Context, id, name, coverURL string, at int64, syncErr error) error {
 	if syncErr != nil {
 		_, err := s.db.ExecContext(ctx,
 			`UPDATE playlists SET last_sync_at = ?, last_sync_error = ? WHERE id = ?`,
@@ -1140,9 +1155,11 @@ func (s *Store) SetPlaylistSyncResult(ctx context.Context, id, name string, at i
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playlists
 		 SET last_sync_at = ?, last_sync_error = '',
-		     name = CASE WHEN ? != '' THEN ? ELSE name END
+		     name = CASE WHEN ? != '' THEN ? ELSE name END,
+		     cover_url = CASE WHEN ? != '' THEN ? ELSE cover_url END,
+		     cover_path = ''
 		 WHERE id = ?`,
-		at, name, name, id)
+		at, name, name, coverURL, coverURL, id)
 	return err
 }
 

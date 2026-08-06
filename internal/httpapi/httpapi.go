@@ -16,6 +16,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
+	"github.com/youwenqwq/yuzu-jukebox/internal/coverurl"
 	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
@@ -41,8 +42,11 @@ type Server struct {
 
 	ncmCoverDirect bool
 
-	// coverSecret 实体封面 token 的 HMAC 密钥材料（secret_key 派生，app 装配时注入）。
-	coverSecret []byte
+	// coverSigner 签发并校验实体封面代理 token。
+	coverSigner *coverurl.Signer
+
+	// playlistCoverDir 保存自建歌单上传的封面文件。
+	playlistCoverDir string
 
 	distribution         *distribution.Service
 	accelerationRegistry *distribution.Registry
@@ -55,9 +59,12 @@ func (s *Server) ConfigureDistribution(service *distribution.Service, registry *
 	s.accelerationRegistry = registry
 }
 
-// SetCoverSecret 注入实体封面 token 的密钥材料（secret_key 的字节形式）。
-// 未注入时实体封面不做代理改写（保持原始 URL，与旧版行为一致）。
-func (s *Server) SetCoverSecret(secret []byte) { s.coverSecret = secret }
+// SetCoverSecret 以 secret_key 的字节形式配置实体封面 token 签发器。
+// 空密钥保留旧行为：实体封面 URL 不做代理改写。
+func (s *Server) SetCoverSecret(secret []byte) { s.coverSigner = coverurl.New(secret) }
+
+// SetPlaylistCoverDir 配置自建歌单封面的文件目录。
+func (s *Server) SetPlaylistCoverDir(dir string) { s.playlistCoverDir = dir }
 
 func NewServer(
 	st *store.Store,
@@ -162,6 +169,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/playlists", s.listPlaylists)
 	mux.HandleFunc("POST /api/v1/playlists", s.createPlaylist)
 	mux.HandleFunc("POST /api/v1/playlists/bind", s.bindPlaylist)
+	mux.HandleFunc("PUT /api/v1/playlists/{id}/cover", s.setPlaylistCover)
+	mux.HandleFunc("DELETE /api/v1/playlists/{id}/cover", s.clearPlaylistCover)
 	mux.HandleFunc("POST /api/v1/playlists/{id}/sync", s.syncPlaylist)
 	mux.HandleFunc("POST /api/v1/playlists/{id}/detach", s.detachPlaylist)
 	mux.HandleFunc("GET /api/v1/playlists/{id}", s.getPlaylist)
@@ -173,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /stream/v1/{ref}", s.stream)
 	mux.HandleFunc("GET /api/v1/cover/{ref}", s.cover)
 	mux.HandleFunc("GET /api/v1/cover/ext/{token}", s.coverExt)
+	mux.HandleFunc("GET /api/v1/cover/playlist/{id}", s.playlistCover)
 	mux.HandleFunc("GET /api/v1/lyrics", s.lyrics)
 	mux.HandleFunc("GET /api/v1/players", s.listPlayers)
 	mux.HandleFunc("POST /api/v1/players", s.createPlayer)

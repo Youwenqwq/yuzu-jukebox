@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -115,7 +118,7 @@ func (s *Server) bindPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, pl.ID)
+	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, s.coverSigner, pl.ID)
 	if err != nil {
 		if rollbackErr := s.st.DeletePlaylist(r.Context(), pl.ID); rollbackErr != nil {
 			writeErr(w, http.StatusBadGateway, "provider_error",
@@ -150,7 +153,7 @@ func (s *Server) syncPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "playlist is not provider-bound")
 		return
 	}
-	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, pl.ID)
+	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, s.coverSigner, pl.ID)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 		return
@@ -209,6 +212,146 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"playlist": pl, "items": items, "offset": offset, "limit": limit,
 	})
+}
+
+const maxPlaylistCoverBytes int64 = 8 << 20
+
+// setPlaylistCover 为自建歌单保存上传封面。
+func (s *Server) setPlaylistCover(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider != "" {
+		writeErr(w, http.StatusConflict, "playlist_bound",
+			"playlist is provider-bound; detach first")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxPlaylistCoverBytes)
+	if err := r.ParseMultipartForm(maxPlaylistCoverBytes); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid multipart form")
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "file field required")
+		return
+	}
+	defer file.Close()
+
+	var sniff [512]byte
+	n, readErr := file.Read(sniff[:])
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid image file")
+		return
+	}
+	if contentType := http.DetectContentType(sniff[:n]); !strings.HasPrefix(contentType, "image/") {
+		writeErr(w, http.StatusBadRequest, "bad_request", "file must be an image")
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid image file")
+		return
+	}
+
+	if s.playlistCoverDir == "" {
+		writeErr(w, http.StatusInternalServerError, "internal", "playlist cover directory is not configured")
+		return
+	}
+	coverDir, err := filepath.Abs(s.playlistCoverDir)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := os.MkdirAll(coverDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	target := filepath.Join(coverDir, pl.ID)
+	tmp, err := os.CreateTemp(coverDir, "."+pl.ID+".tmp-*")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	written, err := io.Copy(tmp, io.LimitReader(file, maxPlaylistCoverBytes+1))
+	if err != nil {
+		tmp.Close()
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if written > maxPlaylistCoverBytes {
+		tmp.Close()
+		writeErr(w, http.StatusBadRequest, "bad_request", "image exceeds 8MB limit")
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	coverURL := "/api/v1/cover/playlist/" + pl.ID
+	if err := s.st.SetPlaylistCover(r.Context(), pl.ID, coverURL, target); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.st.Audit(r.Context(), identity.ID, "playlist.cover.set", pl.ID, "{}")
+	writeJSON(w, http.StatusOK, map[string]any{"cover_url": coverURL})
+}
+
+// clearPlaylistCover 清除自建歌单封面。
+func (s *Server) clearPlaylistCover(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	if !ok {
+		return
+	}
+	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return
+	}
+	if pl.BoundProvider != "" {
+		writeErr(w, http.StatusConflict, "playlist_bound",
+			"playlist is provider-bound; detach first")
+		return
+	}
+	if err := s.st.SetPlaylistCover(r.Context(), pl.ID, "", ""); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if pl.CoverPath != "" {
+		if err := os.Remove(pl.CoverPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+	}
+	s.st.Audit(r.Context(), identity.ID, "playlist.cover.clear", pl.ID, "{}")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// playlistCover 公开提供已上传的歌单封面。
+func (s *Server) playlistCover(w http.ResponseWriter, r *http.Request) {
+	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
+	if err != nil || pl.CoverPath == "" {
+		writeErr(w, http.StatusNotFound, "not_found", "no cover")
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=2592000")
+	http.ServeFile(w, r, pl.CoverPath)
 }
 
 func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +555,7 @@ func (s *Server) importPlaylist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var err error
-		name, tracks, err = imp.ImportPlaylist(ctx, body.PlaylistID)
+		name, _, tracks, err = imp.ImportPlaylist(ctx, body.PlaylistID)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
 			return

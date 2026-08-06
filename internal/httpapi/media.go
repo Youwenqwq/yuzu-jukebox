@@ -1,9 +1,6 @@
 package httpapi
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"io"
 	"net/http"
 	"net/url"
@@ -55,7 +52,11 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 // 客户端只能回放服务端签发过的目标，无法指定任意 URL——
 // 拒绝做成 url 透传式开放代理（SSRF 面）。
 func (s *Server) coverExt(w http.ResponseWriter, r *http.Request) {
-	pid, rawURL, ok := s.openCoverToken(r.PathValue("token"))
+	if s.coverSigner == nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid cover token")
+		return
+	}
+	pid, rawURL, ok := s.coverSigner.Open(r.PathValue("token"))
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid cover token")
 		return
@@ -111,57 +112,13 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	io.Copy(w, io.LimitReader(resp.Body, 20<<20))
 }
 
-// ---------- 实体封面 token ----------
-
-// coverTokenHMAC 派生实体封面 token 的 HMAC 密钥（域分离）。
-func (s *Server) coverTokenHMAC(payload string) string {
-	mac := hmac.New(sha256.New, s.coverSecret)
-	mac.Write([]byte("cover-ext\n"))
-	mac.Write([]byte(payload))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-// mintCoverToken 签发实体封面 token；coverSecret 未配置时返回空串
-// （调用方保持原始 URL，行为与旧版一致）。
-func (s *Server) mintCoverToken(providerID, rawURL string) string {
-	if len(s.coverSecret) == 0 || rawURL == "" {
-		return ""
-	}
-	payload := providerID + "\n" + rawURL
-	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + s.coverTokenHMAC(payload)
-}
-
-// openCoverToken 校验并解出 token 内的 provider 与源站 URL。
-func (s *Server) openCoverToken(token string) (providerID, rawURL string, ok bool) {
-	if len(s.coverSecret) == 0 {
-		return "", "", false
-	}
-	body, sig, found := strings.Cut(token, ".")
-	if !found {
-		return "", "", false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(body)
-	if err != nil {
-		return "", "", false
-	}
-	payload := string(raw)
-	if !hmac.Equal([]byte(sig), []byte(s.coverTokenHMAC(payload))) {
-		return "", "", false
-	}
-	pid, u, found := strings.Cut(payload, "\n")
-	if !found || pid == "" || u == "" {
-		return "", "", false
-	}
-	return pid, u, true
-}
-
 // proxiedEntityCover 把实体封面改写为 /api/v1/cover/ext/{token} 代理路径；
 // 无法签发（无密钥）或已是代理/相对路径时原样返回。
 func (s *Server) proxiedEntityCover(providerID, rawURL string) string {
-	if rawURL == "" || strings.HasPrefix(rawURL, "/") {
+	if rawURL == "" || strings.HasPrefix(rawURL, "/") || s.coverSigner == nil {
 		return rawURL
 	}
-	if token := s.mintCoverToken(providerID, rawURL); token != "" {
+	if token := s.coverSigner.Mint(providerID, rawURL); token != "" {
 		return "/api/v1/cover/ext/" + token
 	}
 	return rawURL

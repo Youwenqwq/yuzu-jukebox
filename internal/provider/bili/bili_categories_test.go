@@ -135,12 +135,15 @@ func TestImportPlaylist(t *testing.T) {
 		}))
 		defer server.Close()
 
-		name, tracks, err := testProvider(server, "SESSDATA=favorite").ImportPlaylist(context.Background(), "2468")
+		name, coverURL, tracks, err := testProvider(server, "SESSDATA=favorite").ImportPlaylist(context.Background(), "2468")
 		if err != nil {
 			t.Fatalf("ImportPlaylist: %v", err)
 		}
 		if name != "" {
 			t.Errorf("name = %q, want empty sidecar title", name)
+		}
+		if coverURL != "" {
+			t.Errorf("coverURL = %q, want empty until sidecar exposes folder cover", coverURL)
 		}
 		if requests != 2 {
 			t.Fatalf("requests = %d, want 2", requests)
@@ -167,9 +170,12 @@ func TestImportPlaylist(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, tracks, err := testProvider(server, "cookie").ImportPlaylist(context.Background(), "1")
+		_, coverURL, tracks, err := testProvider(server, "cookie").ImportPlaylist(context.Background(), "1")
 		if err != nil {
 			t.Fatalf("ImportPlaylist: %v", err)
+		}
+		if coverURL != "" {
+			t.Errorf("coverURL = %q, want empty until sidecar exposes folder cover", coverURL)
 		}
 		if requests != 50 || len(tracks) != 1000 {
 			t.Fatalf("requests = %d, tracks = %d; want 50 and 1000", requests, len(tracks))
@@ -185,7 +191,7 @@ func TestImportPlaylist(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, _, err := testProvider(server, "").ImportPlaylist(context.Background(), "42")
+		_, _, _, err := testProvider(server, "").ImportPlaylist(context.Background(), "42")
 		if err == nil {
 			t.Fatal("ImportPlaylist unexpectedly succeeded")
 		}

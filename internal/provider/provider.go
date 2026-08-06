@@ -179,7 +179,8 @@ type SourceCatalog interface {
 type PlaylistImporter interface {
 	Provider
 	// ImportPlaylist 拉取外部歌单全量曲目；playlistID 可为裸 id 或完整 URL。
-	ImportPlaylist(ctx context.Context, playlistID string) (name string, tracks []Track, err error)
+	// coverURL 为外部歌单封面（原始源站 URL，调用方负责代理改写）；无封面返回空串。
+	ImportPlaylist(ctx context.Context, playlistID string) (name, coverURL string, tracks []Track, err error)
 }
 
 // CoverAware 是可选接口：源站封面需要特定请求头（如 Referer）的

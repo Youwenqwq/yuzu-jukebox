@@ -292,20 +292,21 @@ func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory
 }
 
 // ImportPlaylist 把 B 站收藏夹 media_id 导入为普通歌单。
-func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (string, []provider.Track, error) {
+func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (string, string, []provider.Track, error) {
 	if !isDecimalID(playlistID) {
-		return "", nil, fmt.Errorf("invalid bili favorite media_id %q: want digits", playlistID)
+		return "", "", nil, fmt.Errorf("invalid bili favorite media_id %q: want digits", playlistID)
 	}
 	cookie := p.cookie.Load().(string)
 	if strings.TrimSpace(cookie) == "" {
-		return "", nil, fmt.Errorf("bili 收藏夹导入需要登录 cookie")
+		return "", "", nil, fmt.Errorf("bili 收藏夹导入需要登录 cookie")
 	}
 	tracks, err := p.favoriteTracks(ctx, playlistID, cookie)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	// sidecar 响应不含收藏夹标题；HTTP 导入流程允许空名称并支持调用方覆盖。
-	return "", tracks, nil
+	// 上游侧无封面路径；sidecar 补 /fav/folder/info 后可在此接上。
+	return "", "", tracks, nil
 }
 
 // favoriteTracks 通过收藏夹分页接口物化全部可用曲目。

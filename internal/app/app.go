@@ -9,12 +9,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/config"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
+	"github.com/youwenqwq/yuzu-jukebox/internal/coverurl"
 	"github.com/youwenqwq/yuzu-jukebox/internal/credmon"
 	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
@@ -46,6 +48,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secret_key: %w", err)
 	}
+	coverSigner := coverurl.New(key)
 	st, err := store.Open(cfg.DBPath, key)
 	if err != nil {
 		return nil, err
@@ -90,7 +93,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	mon := credmon.New(reg, st)
 	go mon.Run(ctx)
 	if cfg.PlaylistSyncIntervalMinutes > 0 {
-		syncer := plsync.New(reg, st)
+		syncer := plsync.New(reg, st, coverSigner)
 		syncer.SetInterval(time.Duration(cfg.PlaylistSyncIntervalMinutes) * time.Minute)
 		go syncer.Run(ctx)
 	}
@@ -104,6 +107,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	ws := wsapi.NewServer(authm, playerAuth, controls, st)
 	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping, cfg.NCM.CoverDirect)
 	api.SetCoverSecret(key)
+	api.SetPlaylistCoverDir(filepath.Join(cfg.MediaDir, "playlist_covers"))
 	api.ConfigureDistribution(distributionService, accelerationRegistry)
 
 	if cfg.CacheAutoPruneDays > 0 {
