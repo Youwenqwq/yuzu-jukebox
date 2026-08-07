@@ -350,6 +350,16 @@ func TestIntegrationManagementLinksDefaultRoomAndControllerGrant(t *testing.T) {
 	if err != nil || !granted {
 		t.Fatalf("stored grant = %v, %v", granted, err)
 	}
+
+	// H2：guest 主身份名字可派生（可伪造），controller 能力禁止授予 guest。
+	guestID, _ := e.guestAuth("guest-for-grant", "")
+	guestGrantPath := "/api/v1/rooms/room-1/grants/" + guestID
+	guestGrantBody := map[string]any{
+		"room_id": "room-1", "principal_id": guestID, "capability": control.CapabilityController,
+	}
+	resp = integrationJSONRequest(t, e, http.MethodPut, adminToken, guestGrantPath, guestGrantBody)
+	assertIntegrationAPIError(t, resp, http.StatusBadRequest, "bad_request")
+
 	mismatchedGrant := map[string]any{
 		"room_id": "other-room", "principal_id": oidcIdentity.ID, "capability": control.CapabilityController,
 	}

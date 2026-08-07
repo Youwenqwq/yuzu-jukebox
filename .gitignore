@@ -9,6 +9,8 @@ TODO.md
 .vscode/
 .idea/
 .DS_Store
+*.env
+.env.*
 *.exe
 *.test
 *.out

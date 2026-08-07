@@ -152,7 +152,7 @@ func (s *Server) getAcceleration(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	actor, ok := s.requireRole(w, r, auth.RoleSysAdmin)
 	if !ok {
 		return
 	}
@@ -272,7 +272,7 @@ func (s *Server) createAcceleration(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	actor, ok := s.requireRole(w, r, auth.RoleSysAdmin)
 	if !ok {
 		return
 	}
@@ -427,7 +427,7 @@ func (s *Server) updateAcceleration(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteAcceleration(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	actor, ok := s.requireRole(w, r, auth.RoleSysAdmin)
 	if !ok {
 		return
 	}
@@ -449,7 +449,7 @@ func (s *Server) deleteAcceleration(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareAccelerationCredential(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	actor, ok := s.requireRole(w, r, auth.RoleSysAdmin)
 	if !ok {
 		return
 	}
@@ -473,7 +473,7 @@ func (s *Server) prepareAccelerationCredential(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) activateAccelerationCredential(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	actor, ok := s.requireRole(w, r, auth.RoleSysAdmin)
 	if !ok {
 		return
 	}
@@ -654,7 +654,7 @@ func (s *Server) cancelAccelerationRequest(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) refreshAccelerationInventory(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	actor, ok := s.requireRole(w, r, auth.RoleSysAdmin)
 	if !ok {
 		return
 	}
@@ -746,8 +746,29 @@ func validateAccelerationURL(raw string) (string, error) {
 		return "", errors.New("absolute URL without credentials, query, or fragment required")
 	}
 	host := parsed.Hostname()
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (host == "localhost" || net.ParseIP(host) != nil)) {
-		return "", errors.New("https is required except for localhost or IP development endpoints")
+	switch parsed.Scheme {
+	case "https":
+		// 任意 https 目标放行；该入口本身已由 sys_admin 门控。
+	case "http":
+		ip := net.ParseIP(host)
+		if host != "localhost" && ip == nil {
+			return "", errors.New("http is only allowed for localhost or IP development endpoints")
+		}
+		if ip != nil && unsafeAccelerationIP(ip) {
+			return "", errors.New("http is not allowed for unspecified, broadcast, multicast or link-local addresses")
+		}
+	default:
+		return "", errors.New("only http and https are supported")
 	}
 	return raw, nil
+}
+
+// unsafeAccelerationIP reports addresses that must never receive acceleration
+// control traffic: unspecified, broadcast, multicast and link-local ranges
+// (169.254.0.0/16 含云元数据 169.254.169.254、fe80::/10、224.0.0.0/4、ff00::/8)。
+// 环回与私网保留给开发部署。
+func unsafeAccelerationIP(ip net.IP) bool {
+	return ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.Equal(net.IPv4bcast)
 }

@@ -38,12 +38,25 @@ func TestAccelerationManagementLifecycle(t *testing.T) {
 	defer st.Close()
 	authm := auth.NewManager("", st)
 	adminToken := authm.IssueSession(auth.Identity{
+		ID: "sys-admin", Name: "Sys Admin", Roles: []string{auth.RoleMediaAdmin, auth.RoleSysAdmin},
+	})
+	// H1 门控：media_admin（无 sys_admin）不得创建/修改外部加速。
+	mediaAdminToken := authm.IssueSession(auth.Identity{
 		ID: "media-admin", Name: "Media Admin", Roles: []string{auth.RoleMediaAdmin},
 	})
 	service := distribution.New(st)
 	server := &Server{st: st, authm: authm}
 	server.ConfigureDistribution(service, distribution.NewRegistry(st))
 	handler := server.Handler()
+
+	forbidden := authenticatedJSONRequest(t, handler, http.MethodPost, "/api/v1/accelerations", mediaAdminToken, map[string]any{
+		"id": "edgeone-main", "name": "Main EdgeOne", "kind": "edgeone",
+		"control_base_url": health.URL + "/yuzu-edge",
+		"backend_base_url": health.URL + "/yuzu-blob",
+	})
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("media_admin create = %d, want 403: %s", forbidden.Code, forbidden.Body.String())
+	}
 
 	created := authenticatedJSONRequest(t, handler, http.MethodPost, "/api/v1/accelerations", adminToken, map[string]any{
 		"id": "edgeone-main", "name": "Main EdgeOne", "kind": "edgeone",
@@ -279,6 +292,37 @@ func TestValidateAccelerationCachePolicy(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validate(%q, %d, %d, %d) = %v, wantErr %v",
 					tc.mode, tc.horizon, tc.share, low, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateAccelerationURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"https 任意主机", "https://edge.example.com/base", false},
+		{"http localhost", "http://localhost:8080/base", false},
+		{"http 环回 IP", "http://127.0.0.1:8080/base", false},
+		{"http 私网 IP 开发", "http://192.168.1.10:8080/base", false},
+		{"http 云元数据被拒", "http://169.254.169.254/latest/meta-data/", true},
+		{"http 链路本地被拒", "http://169.254.0.10/health", true},
+		{"http IPv6 链路本地被拒", "http://[fe80::1]/health", true},
+		{"http 组播被拒", "http://224.0.0.1/health", true},
+		{"http 未指定被拒", "http://0.0.0.0/health", true},
+		{"http 广播被拒", "http://255.255.255.255/health", true},
+		{"http 主机名被拒", "http://edge.example.com/base", true},
+		{"带用户信息被拒", "https://user@edge.example.com/base", true},
+		{"带查询被拒", "https://edge.example.com/base?x=1", true},
+		{"非 http(s) 被拒", "ftp://edge.example.com/base", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validateAccelerationURL(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateAccelerationURL(%q) = %v, wantErr %v", tc.raw, err, tc.wantErr)
 			}
 		})
 	}

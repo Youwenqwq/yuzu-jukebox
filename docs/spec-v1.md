@@ -128,7 +128,7 @@ should_be = position_ms                                        (paused 时)
   } }
 ```
 
-- `password` 字段是**全局管理员口令**（可选）：不传或错误时签发普通 guest Principal（`g_` + `sha256("guest:"+name)` 前 12 hex，`kind=guest`，roles 为 `listener+requester`）；命中 `admin_password` 时签发独立 password Principal（`p_` + `sha256("password:"+name)` 前 12 hex，`kind=password`），追加 `room_admin+media_admin`。两种 Principal 即使显示名相同也绝不共享身份或角色。
+- `password` 字段是**全局管理员口令**（可选）：不传或错误时签发普通 guest Principal（`g_` + `sha256("guest:"+name)` 前 12 hex，`kind=guest`，roles 为 `listener+requester`）；命中 `admin_password` 时签发独立 password Principal（`p_` + `sha256("password:"+name)` 前 12 hex，`kind=password`），追加 `room_admin+media_admin+sys_admin`。两种 Principal 即使显示名相同也绝不共享身份或角色。
 - **房间访问凭据不在此处传递**——它只作为受保护 Room 的 `room.join.password` 最终 fallback；身份具备免密准入条件时无需提供（见 4.2、6.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
 - 普通 guest 身份 ID 由名字确定性派生，同名重连仍是同一人；管理员口令身份使用上述独立 `password` 命名空间。
@@ -173,7 +173,8 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>", "access_token":
 | `requester` | 点歌以及搜索、Provider/歌单读取等 requester 操作 |
 | `room_admin` | 全局 Room 管理员；是所有 Room 的 controller，并可管理 Integration 映射与 Room grant |
 | `media_admin` | Provider 凭据、本地媒体、缓存与歌单写操作 |
-| Room grant `controller` | 不是 role；只让指定 Principal 控制指定 Room |
+| `sys_admin` | 加速/分发控制面专属：创建/修改/删除 acceleration、control/backend URL、交付凭据与库存刷新。仅口令管理员（§3.1）或 OIDC `role_mapping` 授予；`media_admin` 不可触及（防凭据型 SSRF）。加速 URL 校验：`http` 仅允许 localhost/环回/私网 IP，拒绝链路本地（含云元数据）、组播、未指定与广播地址 |
+| Room grant `controller` | 不是 role；只让指定 Principal 控制指定 Room。**不可授予 `kind=guest` 主身份**（guest ID 由名字确定性派生、可伪造，见 §3.1） |
 
 Room 控制授权的完整判定是：
 

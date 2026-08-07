@@ -634,11 +634,20 @@ func (s *Server) manageRoomGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load room")
 		return
 	}
-	if _, err := s.st.GetPrincipal(r.Context(), body.PrincipalID); errors.Is(err, sql.ErrNoRows) {
+	principal, err := s.st.GetPrincipal(r.Context(), body.PrincipalID)
+	if errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, http.StatusNotFound, "not_found", "principal not found")
 		return
 	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to load principal")
+		return
+	}
+	// Guest 主身份是显示名的确定性派生（sha256("guest:"+name) 前 12 hex），
+	// 任何人用同一名字登录即得到同一主身份；给 guest 授 controller 等于把房间
+	// 交给任何知道该名字的人。拒绝新授，已存在的历史 grant 保持原语义。
+	if body.Capability == control.CapabilityController && principal.Kind == "guest" {
+		writeErr(w, http.StatusBadRequest, "bad_request",
+			"controller capability cannot be granted to a guest principal (name-derived identity is forgeable)")
 		return
 	}
 

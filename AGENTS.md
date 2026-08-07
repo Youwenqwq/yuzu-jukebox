@@ -178,6 +178,7 @@ go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone   # optional: EdgeOne media offl
 | `requester` | Add to queue, remove own entries |
 | `room_admin` | Manage rooms, integrations and grants; controller in every Room |
 | `media_admin` | Manage media, upload, provider credentials |
+| `sys_admin` | Manage the acceleration/distribution control plane: create/modify/delete accelerations, control/backend URLs, delivery credentials, inventory refresh. Granted to password-authenticated admins and via OIDC `role_mapping`; deliberately NOT granted to `media_admin` (credentialed-SSRF surface) |
 | Room grant `controller` | Control playback, radio and queue ordering in one Room; not a global role |
 
 ## Identity Follow-ups
