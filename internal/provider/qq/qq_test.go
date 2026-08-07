@@ -454,7 +454,7 @@ func TestQRLoginStartAndPoll(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/login/qrcode/qq":
-			_, _ = w.Write([]byte(envelope(map[string]any{"qr_type": "qq", "identifier": "id-1", "mimetype": "image/png", "data": "aGVsbG8=", "img": "data:image/png;base64,aGVsbG8="})))
+			_, _ = w.Write([]byte(envelope(map[string]any{"qr_type": "qq", "identifier": "id-1", "mimetype": "image/png", "data": qrPNGFixture, "img": "data:image/png;base64," + qrPNGFixture})))
 		case "/login/qrcode/qq/status":
 			if got := r.URL.Query().Get("identifier"); got != "id-1" {
 				t.Errorf("identifier = %q, want id-1", got)
@@ -475,8 +475,10 @@ func TestQRLoginStartAndPoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QRLoginStart() error = %v", err)
 	}
-	if key != "id-1" || qr != "data:image/png;base64,aGVsbG8=" {
-		t.Fatalf("QRLoginStart() = %q %q", key, qr)
+	// qrContent 必须是扫码内容文本（客户端按 ncm/bili 契约把它编码成二维码），
+	// 绝不能是 data URL——手机端会把 "data:image/..." 当文本提示而不是授权。
+	if key != "id-1" || qr != qrTextFixture {
+		t.Fatalf("QRLoginStart() = %q %q, want %q", key, qr, qrTextFixture)
 	}
 	status, msg, err := p.QRLoginPoll(context.Background(), key)
 	if err != nil {
@@ -489,6 +491,34 @@ func TestQRLoginStartAndPoll(t *testing.T) {
 		t.Fatalf("credential after QR = %q, want MK_TEST", got)
 	}
 }
+
+func TestDecodeQRContent(t *testing.T) {
+	got, err := decodeQRContent(qrPNGFixture)
+	if err != nil {
+		t.Fatalf("decodeQRContent() error = %v", err)
+	}
+	if got != qrTextFixture {
+		t.Fatalf("decodeQRContent() = %q, want %q", got, qrTextFixture)
+	}
+
+	// data: URL 前缀兼容
+	got, err = decodeQRContent("data:image/png;base64," + qrPNGFixture)
+	if err != nil || got != qrTextFixture {
+		t.Fatalf("decodeQRContent(data url) = %q err=%v", got, err)
+	}
+
+	for _, bad := range []string{"", "not-base64!!", "aGVsbG8=" /* 合法 base64 但非 PNG */} {
+		if _, err := decodeQRContent(bad); err == nil {
+			t.Errorf("decodeQRContent(%q) unexpectedly succeeded", bad)
+		}
+	}
+}
+
+// qrTextFixture 是二维码 PNG 中编码的内容（腾讯授权 URL 形态）。
+const qrTextFixture = "http://txz.qq.com/p?k=FIXTUREKEY123&f=1"
+
+// qrPNGFixture 是内容为 qrTextFixture 的 111x111 PNG（base64）。
+const qrPNGFixture = "iVBORw0KGgoAAAANSUhEUgAAAXIAAAFyAQAAAADAX2ykAAACe0lEQVR4nO2bTW6cQBBGX6WRZgnSHMBHgRvkSFGOlBvQR/EBLNFLS6Avi+6GmdiWbWU8gahqMYLhLUoqfV1/YOIzFr99CgfnnXfeeeedd/4t3oo1EDuAZAapyVfZhjv64/yN+V6SNIENqaHEksVsIEiSdM1/tT/O35hPRaHStFh9GKQxq7u5tz/OfxEfuyCN7ZxP6qrkf+eP83/FN3/cW6/FFL8/YbAp+W7+OH9bvsa3FZBAAJb/b5/y08sRyN78d/5DfDQzsw5sSCfRT0H0jyflIsvM7Jr/an+cvxGPXrFaWoUXT8a9+e/8R/jSFaUmK1kjQK/nXFPbsGXiffrv/JtWdJmvZqQJsn41hXxSa2yl3CK7fg/G5wrK+uk8GwQBYYZ0xvpfINJi9I9rIb03/51/x6p+a9fbr/otqp3R2M54/j0kn+NWo1qtn4K247oE3uN7WF4/H9YIrkqOdhKxC4J08vnzsfl0UlkYQVki9ZqxIUv32evnY/K1/51CrZApoc1ZdyQIPP8elb+sr7Qm4X4baFAyseffQ/IX8yuoBTO0JbQF2dS9N/+df8e2+lmqs4x8tR7cXj8fl6/nc1t+YFXtSKiNk+ffo/JVvyqjjTLLmMq4MttFOt6b/86/Yy9WRxdDrBLafOvn8xH5Mn8ud2EWqUHxQRAHgHSeiQ9z7Yz35r/zH+LX9yehnbEf02J5tFHkHHx+dWy+vj+Zl8BQVoNEMyN2vv/9T/g8iYbFiN0r24e9++/8tb14f5I2iNhNApZGsDSQzrL7+OP8bfm1P3plqgGlZ8qbQq+fD8hz+fHJtkuYypKhTCp9fnVU3vz7buedd955552/O/8bga4YqD+xMokAAAAASUVORK5CYII="
 
 func TestQRLoginStatusMapping(t *testing.T) {
 	cases := []struct {

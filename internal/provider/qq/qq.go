@@ -12,9 +12,13 @@
 package qq
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/png" // 注册 PNG 解码器（QR 图片）
 	"net/http"
 	"net/url"
 	"strconv"
@@ -23,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/makiuchi-d/gozxing"
+	"github.com/makiuchi-d/gozxing/qrcode"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
@@ -406,19 +412,63 @@ func (p *Provider) accountProfile(ctx context.Context, cred *qqCredential) store
 
 // ---------- 二维码登录（provider.QRLoginAware） ----------
 
-// QRLoginStart 生成二维码：返回 identifier（轮询用）与 img（Data URL，渲染用）。
+// QRLoginStart 生成二维码：返回 identifier（轮询用）与扫码内容文本（渲染二维码用）。
+//
+// QQ 上游与 ncm/bili 不同：sidecar 只返回**已编码的二维码 PNG**，扫码内容
+// （腾讯的 txz.qq.com 授权 URL）从不以文本形式暴露，qrsig/identifier 只是
+// 轮询键。yuzu 客户端按 ncm/bili 的契约把 qrContent 当文本编码成二维码，
+// 因此这里用 gozxing 解码 PNG 还原内容；解码失败（上游异常）报错让用户重试。
 func (p *Provider) QRLoginStart(ctx context.Context) (key, qrContent string, err error) {
 	var data struct {
 		Identifier string `json:"identifier"`
-		Img        string `json:"img"`
+		Data       string `json:"data"` // base64 PNG
+		Img        string `json:"img"`  // data URL（备用）
 	}
 	if err := p.get(ctx, p.client, "/login/qrcode/qq", nil, nil, &data); err != nil {
 		return "", "", err
 	}
-	if data.Identifier == "" || data.Img == "" {
-		return "", "", fmt.Errorf("qq qr: empty identifier/img")
+	if data.Identifier == "" {
+		return "", "", fmt.Errorf("qq qr: empty identifier")
 	}
-	return data.Identifier, data.Img, nil
+	content, err := decodeQRContent(data.Data)
+	if err != nil {
+		// img 是同一张图的 Data URL；data 缺省时兜底尝试
+		if imgData, ok := strings.CutPrefix(data.Img, "data:image/png;base64,"); ok {
+			content, err = decodeQRContent(imgData)
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("qq qr: decode content: %w", err)
+		}
+	}
+	return data.Identifier, content, nil
+}
+
+// decodeQRContent 把 base64 编码的二维码 PNG 解码为内容文本。
+// 兼容 "data:image/png;base64," 前缀（防御性）。
+func decodeQRContent(b64 string) (string, error) {
+	b64 = strings.TrimSpace(b64)
+	b64, _ = strings.CutPrefix(b64, "data:image/png;base64,")
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return "", fmt.Errorf("invalid base64: %w", err)
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("invalid image: %w", err)
+	}
+	bitmap, err := gozxing.NewBinaryBitmapFromImage(img)
+	if err != nil {
+		return "", err
+	}
+	result, err := qrcode.NewQRCodeReader().DecodeWithoutHints(bitmap)
+	if err != nil {
+		return "", fmt.Errorf("not a readable QR: %w", err)
+	}
+	text := result.GetText()
+	if text == "" {
+		return "", fmt.Errorf("empty QR content")
+	}
+	return text, nil
 }
 
 // QRLoginPoll 轮询扫码状态。status 为 expired|waiting|scanned|ok；
