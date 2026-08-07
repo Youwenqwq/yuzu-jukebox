@@ -152,7 +152,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/radio", s.idempotent(s.radioStop))
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/search/entity", s.searchEntity)
+	mux.HandleFunc("GET /api/v1/radio/tracks", s.radioTracks)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
+	mux.HandleFunc("GET /api/v1/providers/{id}/similar", s.similarProviderTracks)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
 	mux.HandleFunc("POST /api/v1/providers/{id}/like", s.likeProviderTrack)
 	mux.HandleFunc("POST /api/v1/providers/{id}/playlist-add", s.addProviderTrackToPlaylist)
@@ -727,6 +729,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		RadioSources     []provider.RadioSource    `json:"radio_sources,omitempty"`
 		SearchCategories []provider.SearchCategory `json:"search_categories,omitempty"`
 		EntityAlbums     bool                      `json:"entity_albums,omitempty"`
+		Similar          bool                      `json:"similar,omitempty"`
 	}
 	// account 是凭据账号快照（昵称/头像，登录时写入）。
 	// 只对凭据所有者可见（per-principal），不含 UID——客户端无消费方，
@@ -772,12 +775,14 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 			searchCategories = searcher.SearchCategories()
 		}
 		_, entityAlbums := p.(provider.EntityAlbumLister)
-		if len(accountWrite) > 0 || len(radioSources) > 0 || len(searchCategories) > 0 || entityAlbums {
+		_, similar := p.(provider.SimilarQuerier)
+		if len(accountWrite) > 0 || len(radioSources) > 0 || len(searchCategories) > 0 || entityAlbums || similar {
 			entry.Capabilities = &capabilities{
 				AccountWrite:     accountWrite,
 				RadioSources:     radioSources,
 				SearchCategories: searchCategories,
 				EntityAlbums:     entityAlbums,
+				Similar:          similar,
 			}
 		}
 		out = append(out, entry)

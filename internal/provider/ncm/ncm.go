@@ -36,6 +36,7 @@ var (
 	_ provider.SourceCatalog     = (*Provider)(nil)
 	_ provider.CategorySearcher  = (*Provider)(nil)
 	_ provider.EntityAlbumLister = (*Provider)(nil)
+	_ provider.SimilarQuerier    = (*Provider)(nil)
 )
 
 func New(baseURL, level string, st *store.Store) *Provider {

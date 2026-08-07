@@ -421,7 +421,7 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 // RadioSources 报告 B 站支持的电台源。
 func (p *Provider) RadioSources() []provider.RadioSource {
 	return []provider.RadioSource{
-		{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true},
+		{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true, RequiresCredential: true},
 	}
 }
 
@@ -434,6 +434,11 @@ type favoriteSource struct {
 
 func (s *favoriteSource) Description() string { return "B 站收藏夹 " + s.mediaID }
 func (s *favoriteSource) Finite() bool        { return true }
+func (s *favoriteSource) Total() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tracks), true
+}
 
 func (s *favoriteSource) NextBatch(_ context.Context, n int, _ provider.TrackRef) ([]provider.Track, bool, error) {
 	s.mu.Lock()

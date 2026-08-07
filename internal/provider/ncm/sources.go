@@ -120,10 +120,10 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 // RadioSources 返回客户端可配置的网易云电台源。
 func (p *Provider) RadioSources() []provider.RadioSource {
 	return []provider.RadioSource{
-		{Spec: "daily", Name: "每日推荐", Finite: true},
-		{Spec: "fm", Name: "私人 FM", Finite: false},
-		{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false},
-		{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false},
+		{Spec: "daily", Name: "每日推荐", Finite: true, RequiresCredential: true},
+		{Spec: "fm", Name: "私人 FM", Finite: false, RequiresCredential: true},
+		{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false, RequiresCredential: true},
+		{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false, RequiresCredential: true},
 		{Spec: "playlist", Arg: "playlist_id", Name: "歌单电台", Finite: true},
 	}
 }
@@ -140,6 +140,11 @@ type playlistSource struct {
 
 func (s *playlistSource) Description() string { return "网易云歌单《" + s.name + "》" }
 func (s *playlistSource) Finite() bool        { return true }
+func (s *playlistSource) Total() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tracks), true
+}
 
 func (s *playlistSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef) ([]provider.Track, bool, error) {
 	s.mu.Lock()
@@ -166,6 +171,11 @@ type dailySource struct {
 
 func (s *dailySource) Description() string { return "网易云每日推荐" }
 func (s *dailySource) Finite() bool        { return true }
+func (s *dailySource) Total() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tracks), s.fetchedAt != ""
+}
 
 func (s *dailySource) NextBatch(ctx context.Context, n int, seed provider.TrackRef) ([]provider.Track, bool, error) {
 	s.mu.Lock()
@@ -274,6 +284,60 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 	return out, false, nil
 }
 
+// Similar 一次性查询相似曲目，不复用 chainedSource 的 seed/seen 状态。
+func (p *Provider) Similar(ctx context.Context, trackID string, limit int) ([]provider.Track, error) {
+	trackID = strings.TrimSpace(trackID)
+	if trackID == "" {
+		return nil, fmt.Errorf("similar query requires a track id")
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	cookie := p.cookie.Load().(string)
+	if cookie == "" {
+		return nil, fmt.Errorf("similar query requires login (configure ncm credential)")
+	}
+	tracks, err := p.fetchSimilar(ctx, trackID, cookie)
+	if err != nil {
+		return nil, err
+	}
+	if len(tracks) > limit {
+		tracks = tracks[:limit]
+	}
+	return tracks, nil
+}
+
+func (p *Provider) fetchSimilar(ctx context.Context, trackID, cookie string) ([]provider.Track, error) {
+	var resp struct {
+		Songs []struct {
+			ID       int64  `json:"id"`
+			Name     string `json:"name"`
+			Duration int64  `json:"duration"`
+			Album    ncmAl  `json:"album"`
+			Artists  []struct {
+				Name string `json:"name"`
+			} `json:"artists"`
+		} `json:"songs"`
+	}
+	if err := p.get(ctx, "/simi/song", url.Values{"id": {trackID}}, cookie, &resp); err != nil {
+		return nil, err
+	}
+	tracks := make([]provider.Track, 0, len(resp.Songs))
+	for _, song := range resp.Songs {
+		tracks = append(tracks, provider.Track{
+			Ref:          provider.NewRef(p.ID(), strconv.FormatInt(song.ID, 10)),
+			Title:        song.Name,
+			Artist:       joinArtists(namesOf(song.Artists)),
+			DurationMs:   song.Duration,
+			Album:        song.Album.Name,
+			CoverURL:     song.Album.PicURL,
+			SourceURL:    sourceURL(song.ID),
+			Contributors: artistContributors(song.Artists),
+		})
+	}
+	return tracks, nil
+}
+
 // ---------- 链式源（相似歌曲 / 心动模式） ----------
 
 // chainedSource 以房间当前播放曲目为种子的无限游走源。
@@ -342,29 +406,13 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 	var out []provider.Track
 	switch s.kind {
 	case "simi":
-		var resp struct {
-			Songs []struct {
-				ID       int64  `json:"id"`
-				Name     string `json:"name"`
-				Duration int64  `json:"duration"`
-				Album    ncmAl  `json:"album"`
-				Artists  []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
-			} `json:"songs"`
-		}
-		if err := s.p.get(ctx, "/simi/song", url.Values{"id": {useSeed}}, cookie, &resp); err != nil {
+		tracks, err := s.p.fetchSimilar(ctx, useSeed, cookie)
+		if err != nil {
 			return nil, false, err
 		}
-		for _, song := range resp.Songs {
-			ref := provider.NewRef(s.p.ID(), strconv.FormatInt(song.ID, 10))
-			if s.seen.Add(ref.String()) {
-				out = append(out, provider.Track{
-					Ref: ref, Title: song.Name,
-					Artist: joinArtists(namesOf(song.Artists)), DurationMs: song.Duration,
-					Album: song.Album.Name, CoverURL: song.Album.PicURL,
-					SourceURL: sourceURL(song.ID), Contributors: artistContributors(song.Artists),
-				})
+		for _, track := range tracks {
+			if s.seen.Add(track.Ref.String()) {
+				out = append(out, track)
 			}
 		}
 	case "heart":
