@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -467,6 +468,7 @@ func isDecimalID(s string) bool {
 
 var (
 	_ provider.CategorySearcher = (*Provider)(nil)
+	_ provider.CoverThumbnailer = (*Provider)(nil)
 	_ provider.PlaylistImporter = (*Provider)(nil)
 	_ provider.SourceFactory    = (*Provider)(nil)
 	_ provider.SourceCatalog    = (*Provider)(nil)
@@ -600,6 +602,31 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 // CoverHeaders 实现 provider.CoverAware：B 站图床（hdslb.com）无 Referer 会 403，
 // 与拉流复用同一组头。
 func (p *Provider) CoverHeaders() http.Header { return streamHeaders }
+
+const defaultCoverThumbnailSuffix = "@672w_378h_1c.webp"
+
+var coverVariantSuffix = regexp.MustCompile(`@\d+w_\d+h(?:_[^/]*)?(?:\.[^/]*)?$`)
+
+// ThumbnailCoverURL asks Bilibili's image CDN for its standard video-cover
+// thumbnail. Foreign hosts and URLs that already carry a dimension variant
+// are deliberately left unchanged.
+func (*Provider) ThumbnailCoverURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !isBilibiliImageHost(u.Hostname()) || coverVariantSuffix.MatchString(u.Path) {
+		return raw
+	}
+	u.Path += defaultCoverThumbnailSuffix
+	u.RawPath = ""
+	return u.String()
+}
+
+func isBilibiliImageHost(host string) bool {
+	host = strings.ToLower(host)
+	return strings.HasSuffix(host, ".hdslb.com") || strings.HasSuffix(host, ".biliimg.com")
+}
 
 // videoURL 返回视频页地址（Track.SourceURL）。
 func videoURL(bvid string) string {

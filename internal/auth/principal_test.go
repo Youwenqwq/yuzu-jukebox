@@ -51,6 +51,66 @@ func TestSessionUsesCurrentPrincipalState(t *testing.T) {
 	}
 }
 
+func TestSessionTokenStoredAsDigestAndLifecycleUsesRawToken(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "session-token.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	manager := NewManager("", st)
+	token := manager.IssueSession(Identity{
+		ID: "hashed-session", Name: "Hashed Session", Kind: "guest",
+		Roles: []string{RoleListener, RoleRequester},
+	})
+	if token == "" {
+		t.Fatal("IssueSession returned an empty raw token")
+	}
+	digest := sessionTokenDigest(token)
+	if _, ok := manager.sessions[digest]; !ok {
+		t.Fatal("in-memory session is not keyed by the token digest")
+	}
+	if _, ok := manager.sessions[token]; ok {
+		t.Fatal("raw token was retained as an in-memory session key")
+	}
+
+	var persistedToken string
+	if err := st.DB().QueryRowContext(ctx, `SELECT token FROM sessions`).Scan(&persistedToken); err != nil {
+		t.Fatal(err)
+	}
+	if persistedToken != digest {
+		t.Fatalf("persisted session token = %q, want digest %q", persistedToken, digest)
+	}
+	if persistedToken == token {
+		t.Fatal("raw session token was persisted")
+	}
+	if _, err := manager.Session(token); err != nil {
+		t.Fatalf("fresh raw-token lookup failed: %v", err)
+	}
+	if _, err := manager.Session(digest); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("stored digest authenticated as a bearer token: %v", err)
+	}
+
+	reloaded := NewManager("", st)
+	if _, err := reloaded.Session(token); err != nil {
+		t.Fatalf("raw-token lookup after manager reload failed: %v", err)
+	}
+	reloaded.Revoke(token)
+	if _, err := reloaded.Session(token); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("revoked session error = %v, want ErrSessionNotFound", err)
+	}
+	var persistedCount int
+	if err := st.DB().QueryRowContext(
+		ctx, `SELECT COUNT(*) FROM sessions WHERE token = ?`, digest,
+	).Scan(&persistedCount); err != nil {
+		t.Fatal(err)
+	}
+	if persistedCount != 0 {
+		t.Fatalf("persisted session rows after revoke = %d, want 0", persistedCount)
+	}
+}
+
 func TestExistingSessionMigratesPrincipal(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "migration.db"), nil)
 	if err != nil {
@@ -67,7 +127,7 @@ func TestExistingSessionMigratesPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.SaveSession(
-		context.Background(), "legacy-token", string(payload), time.Now().Add(time.Hour).UnixMilli(),
+		context.Background(), sessionTokenDigest("legacy-token"), string(payload), time.Now().Add(time.Hour).UnixMilli(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -153,13 +213,13 @@ func TestIssueSessionWithTTLReturnsExactShortExpiry(t *testing.T) {
 	if expiresAt < before+90 || expiresAt > time.Now().UnixMilli()+110 {
 		t.Fatalf("expires_at = %d, want about 100ms from issuance", expiresAt)
 	}
-	stored := manager.sessions[token]
+	stored := manager.sessions[sessionTokenDigest(token)]
 	if stored.expiresAt.UnixMilli() != expiresAt {
 		t.Fatalf("stored expiry = %d, returned expiry = %d", stored.expiresAt.UnixMilli(), expiresAt)
 	}
 
 	normalToken := manager.IssueSession(identity)
-	normalTTL := time.Until(manager.sessions[normalToken].expiresAt)
+	normalTTL := time.Until(manager.sessions[sessionTokenDigest(normalToken)].expiresAt)
 	if normalTTL < 23*time.Hour+59*time.Minute || normalTTL > 24*time.Hour {
 		t.Fatalf("normal session TTL = %v, want 24h", normalTTL)
 	}
@@ -214,10 +274,10 @@ func TestLegacyPrincipalUsesLatestSessionSnapshot(t *testing.T) {
 	oldPayload, _ := json.Marshal(oldIdentity)
 	currentPayload, _ := json.Marshal(currentIdentity)
 	now := time.Now()
-	if err := st.SaveSession(context.Background(), "old-token", string(oldPayload), now.Add(time.Hour).UnixMilli()); err != nil {
+	if err := st.SaveSession(context.Background(), sessionTokenDigest("old-token"), string(oldPayload), now.Add(time.Hour).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SaveSession(context.Background(), "current-token", string(currentPayload), now.Add(2*time.Hour).UnixMilli()); err != nil {
+	if err := st.SaveSession(context.Background(), sessionTokenDigest("current-token"), string(currentPayload), now.Add(2*time.Hour).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 

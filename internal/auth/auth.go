@@ -304,6 +304,7 @@ func (m *Manager) issueSession(
 	id.IntegrationScopeType = source.ScopeType
 	id.IntegrationScopeID = source.ScopeID
 	token := randHex(16)
+	tokenDigest := sessionTokenDigest(token)
 	expiresAt := time.Now().Add(ttl).UTC().Truncate(time.Millisecond)
 	expiresAtMS := expiresAt.UnixMilli()
 	if m.st != nil {
@@ -313,7 +314,7 @@ func (m *Manager) issueSession(
 		}
 		if err := m.st.SaveSessionWithActorSource(
 			context.Background(),
-			token,
+			tokenDigest,
 			string(data),
 			store.SessionSource{
 				IntegrationID: source.IntegrationID,
@@ -327,18 +328,19 @@ func (m *Manager) issueSession(
 		}
 	}
 	m.mu.Lock()
-	m.sessions[token] = session{identity: id, source: source, expiresAt: expiresAt}
+	m.sessions[tokenDigest] = session{identity: id, source: source, expiresAt: expiresAt}
 	m.mu.Unlock()
 	return token, expiresAtMS, nil
 }
 
 // Revoke 吊销会话（logout）。幂等。
 func (m *Manager) Revoke(token string) {
+	tokenDigest := sessionTokenDigest(token)
 	m.mu.Lock()
-	delete(m.sessions, token)
+	delete(m.sessions, tokenDigest)
 	m.mu.Unlock()
 	if m.st != nil {
-		_ = m.st.DeleteSession(context.Background(), token)
+		_ = m.st.DeleteSession(context.Background(), tokenDigest)
 	}
 }
 
@@ -379,10 +381,11 @@ func (m *Manager) PruneExpired(ctx context.Context, now time.Time) error {
 
 // Session 按 token 取身份。
 func (m *Manager) Session(token string) (Identity, error) {
+	tokenDigest := sessionTokenDigest(token)
 	m.mu.Lock()
-	s, ok := m.sessions[token]
+	s, ok := m.sessions[tokenDigest]
 	if ok && time.Now().After(s.expiresAt) {
-		delete(m.sessions, token)
+		delete(m.sessions, tokenDigest)
 		ok = false
 	}
 	m.mu.Unlock()
@@ -466,6 +469,11 @@ func (m *Manager) RevokeTrack(trackRef string) {
 			delete(m.tickets, k)
 		}
 	}
+}
+
+func sessionTokenDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
 }
 
 func randHex(n int) string {

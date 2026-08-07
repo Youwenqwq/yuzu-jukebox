@@ -21,6 +21,49 @@ func testProvider(server *httptest.Server, cookie string) *Provider {
 	return p
 }
 
+func TestThumbnailCoverURL(t *testing.T) {
+	p := &Provider{}
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "plain jpg",
+			raw:  "https://i0.hdslb.com/bfs/archive/cover.jpg",
+			want: "https://i0.hdslb.com/bfs/archive/cover.jpg@672w_378h_1c.webp",
+		},
+		{
+			name: "already suffixed",
+			raw:  "https://i1.hdslb.com/bfs/archive/cover.jpg@672w_378h_1c.webp",
+			want: "https://i1.hdslb.com/bfs/archive/cover.jpg@672w_378h_1c.webp",
+		},
+		{
+			name: "preserves query",
+			raw:  "https://archive.biliimg.com/bfs/archive/cover.jpg?token=abc",
+			want: "https://archive.biliimg.com/bfs/archive/cover.jpg@672w_378h_1c.webp?token=abc",
+		},
+		{name: "empty", raw: "", want: ""},
+		{
+			name: "unparseable",
+			raw:  "https://i0.hdslb.com/%zz",
+			want: "https://i0.hdslb.com/%zz",
+		},
+		{
+			name: "foreign host",
+			raw:  "https://not-hdslb.com/cover.jpg",
+			want: "https://not-hdslb.com/cover.jpg",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.ThumbnailCoverURL(tt.raw); got != tt.want {
+				t.Fatalf("ThumbnailCoverURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSearchCategoryArtistMapping(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

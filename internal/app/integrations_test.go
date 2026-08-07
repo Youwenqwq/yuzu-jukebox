@@ -3,6 +3,8 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -165,13 +167,24 @@ func TestIntegrationActorGuestIsStableStandardAndShortLived(t *testing.T) {
 		t.Fatalf("actor response leaked integration secret: %s", raw)
 	}
 	var persistedExpiresAt int64
+	digest := hex.EncodeToString(func() []byte { h := sha256.Sum256([]byte(first.ActorToken)); return h[:] }())
+	// M3：sessions.token 只存 SHA-256 摘要，原始 Bearer 令牌不再落库。
 	if err := e.a.Store.DB().QueryRow(
-		"SELECT expires_at FROM sessions WHERE token = ?", first.ActorToken,
+		"SELECT expires_at FROM sessions WHERE token = ?", digest,
 	).Scan(&persistedExpiresAt); err != nil {
 		t.Fatal(err)
 	}
 	if persistedExpiresAt != first.ExpiresAt {
 		t.Fatalf("persisted expiry = %d, response expiry = %d", persistedExpiresAt, first.ExpiresAt)
+	}
+	var rawCount int
+	if err := e.a.Store.DB().QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE token = ?", first.ActorToken,
+	).Scan(&rawCount); err != nil {
+		t.Fatal(err)
+	}
+	if rawCount != 0 {
+		t.Fatalf("raw bearer token found at rest (%d rows)", rawCount)
 	}
 
 	resp := e.get(first.ActorToken, "/api/v1/rooms")

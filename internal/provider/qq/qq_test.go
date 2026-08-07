@@ -56,6 +56,20 @@ func songFixture(mid, name string, id, interval int64, singerName string) map[st
 	}
 }
 
+func TestThumbnailCoverURL(t *testing.T) {
+	p := &Provider{}
+	tests := []string{
+		"https://y.gtimg.cn/music/photo_new/T002R300x300M000002.jpg",
+		"https://example.com/cover.jpg?size=custom",
+		"",
+	}
+	for _, raw := range tests {
+		if got := p.ThumbnailCoverURL(raw); got != raw {
+			t.Errorf("ThumbnailCoverURL(%q) = %q, want unchanged input", raw, got)
+		}
+	}
+}
+
 func TestSearchParamsAndMapping(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search/search_by_type" {

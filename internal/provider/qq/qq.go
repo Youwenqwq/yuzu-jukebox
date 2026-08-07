@@ -81,6 +81,7 @@ var (
 	_ provider.QRLoginAware     = (*Provider)(nil)
 	_ provider.LyricsProvider   = (*Provider)(nil)
 	_ provider.CategorySearcher = (*Provider)(nil)
+	_ provider.CoverThumbnailer = (*Provider)(nil)
 	_ provider.SourceCatalog    = (*Provider)(nil)
 	_ provider.PlaylistImporter = (*Provider)(nil)
 	_ provider.AccountWriter    = (*Provider)(nil)
@@ -124,6 +125,11 @@ func New(baseURL string, fileType int, st *store.Store) *Provider {
 }
 
 func (p *Provider) ID() string { return "qq" }
+
+// ThumbnailCoverURL implements provider.CoverThumbnailer as a no-op: QQ cover
+// URLs are already size-bounded by construction (T00xR300x300M000), so the
+// cover proxy's ?size=original escape hatch has no visible effect for QQ.
+func (*Provider) ThumbnailCoverURL(raw string) string { return raw }
 
 // ---------- 凭据（provider.CredentialAware） ----------
 

@@ -13,6 +13,8 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/pressly/goose/v3"
+
+	_ "github.com/youwenqwq/yuzu-jukebox/internal/store/migrations"
 )
 
 //go:embed migrations/*.sql
