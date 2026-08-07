@@ -66,6 +66,7 @@ var (
 	ErrTicketInvalid            = errors.New("ticket invalid")
 	ErrPasswordProbeRateLimited = errors.New("too many incorrect admin password attempts; try again later")
 	ErrGuestAuthRateLimited     = errors.New("too many guest login attempts; try again later")
+	ErrInvalidGuestName         = errors.New("guest name must be 1 to 64 bytes and contain no control characters")
 )
 
 type session struct {
@@ -170,8 +171,25 @@ func identityFromPrincipal(p store.Principal) Identity {
 	}
 }
 
+// ValidateGuestName applies the shared guest display-name boundary used by
+// direct guest authentication and synthetic Integration actors.
+func ValidateGuestName(name string) error {
+	if len(name) == 0 || len(name) > 64 {
+		return ErrInvalidGuestName
+	}
+	for i := range len(name) {
+		if name[i] < 0x20 || name[i] == 0x7f {
+			return ErrInvalidGuestName
+		}
+	}
+	return nil
+}
+
 // GuestAuth 访客认证。adminPassword 命中全局管理员口令时授予管理角色。
 func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, string, error) {
+	if err := ValidateGuestName(name); err != nil {
+		return Identity{}, "", err
+	}
 	adminMatched := false
 	if m.adminPassword != "" {
 		adminMatched = subtle.ConstantTimeCompare([]byte(adminPassword), []byte(m.adminPassword)) == 1
@@ -181,9 +199,6 @@ func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, s
 			return Identity{}, "", ErrGuestAuthRateLimited
 		}
 		return Identity{}, "", ErrPasswordProbeRateLimited
-	}
-	if name == "" {
-		return Identity{}, "", errors.New("name required")
 	}
 	roles := []string{RoleListener, RoleRequester}
 	kind := "guest"

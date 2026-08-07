@@ -163,7 +163,7 @@ func (s *Server) getRoomAccessCode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "conflict", "rotating room code is not enabled")
 		return
 	case err != nil:
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "read room access code", err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

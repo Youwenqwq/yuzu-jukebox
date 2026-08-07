@@ -30,7 +30,7 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 	}
 	playlists, err := s.st.ListPlaylists(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "list playlists", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
@@ -55,10 +55,10 @@ func (s *Server) createPlaylist(w http.ResponseWriter, r *http.Request) {
 		CreatedBy: id.ID, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.st.CreatePlaylist(r.Context(), pl); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "create playlist", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "playlist.create", pl.ID, "{}")
+	s.audit(r.Context(), id.ID, "playlist.create", pl.ID, nil)
 	writeJSON(w, http.StatusCreated, map[string]any{"playlist": pl})
 }
 
@@ -95,7 +95,7 @@ func (s *Server) bindPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	existing, found, err := s.st.GetPlaylistByBinding(r.Context(), body.Provider, body.PlaylistID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "check provider playlist binding", err)
 		return
 	}
 	if found {
@@ -115,26 +115,26 @@ func (s *Server) bindPlaylist(w http.ResponseWriter, r *http.Request) {
 		BoundRemoteID: body.PlaylistID,
 	}
 	if err := s.st.CreatePlaylist(r.Context(), pl); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "create bound playlist", err)
 		return
 	}
 	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, s.coverSigner, pl.ID)
 	if err != nil {
 		if rollbackErr := s.st.DeletePlaylist(r.Context(), pl.ID); rollbackErr != nil {
-			writeErr(w, http.StatusBadGateway, "provider_error",
-				err.Error()+"; rollback failed: "+rollbackErr.Error())
+			s.providerError(w, r, "sync bound playlist and roll back", fmt.Errorf(
+				"sync provider playlist: %w; rollback failed: %v", err, rollbackErr,
+			))
 			return
 		}
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "sync bound playlist", err)
 		return
 	}
 	pl, err = s.st.GetPlaylist(r.Context(), pl.ID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "load bound playlist", err)
 		return
 	}
-	s.st.Audit(r.Context(), identity.ID, "playlist.bind", pl.ID,
-		`{"count":`+strconv.Itoa(synced)+`}`)
+	s.audit(r.Context(), identity.ID, "playlist.bind", pl.ID, map[string]any{"count": synced})
 	writeJSON(w, http.StatusOK, map[string]any{"playlist": pl, "synced": synced})
 }
 
@@ -155,11 +155,10 @@ func (s *Server) syncPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	synced, err := plsync.SyncOne(r.Context(), s.st, s.reg, s.coverSigner, pl.ID)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "sync provider playlist", err)
 		return
 	}
-	s.st.Audit(r.Context(), identity.ID, "playlist.sync", pl.ID,
-		`{"count":`+strconv.Itoa(synced)+`}`)
+	s.audit(r.Context(), identity.ID, "playlist.sync", pl.ID, map[string]any{"count": synced})
 	writeJSON(w, http.StatusOK, map[string]any{"synced": synced})
 }
 
@@ -179,10 +178,10 @@ func (s *Server) detachPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.ClearPlaylistBinding(r.Context(), pl.ID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "detach provider playlist", err)
 		return
 	}
-	s.st.Audit(r.Context(), identity.ID, "playlist.detach", pl.ID, "{}")
+	s.audit(r.Context(), identity.ID, "playlist.detach", pl.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"detached": pl.ID})
 }
 
@@ -206,7 +205,7 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.st.PlaylistItems(r.Context(), id, offset, limit)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "list playlist items", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -269,17 +268,17 @@ func (s *Server) setPlaylistCover(w http.ResponseWriter, r *http.Request) {
 	}
 	coverDir, err := filepath.Abs(s.playlistCoverDir)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "resolve playlist cover directory", err)
 		return
 	}
 	if err := os.MkdirAll(coverDir, 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "create playlist cover directory", err)
 		return
 	}
 	target := filepath.Join(coverDir, pl.ID)
 	tmp, err := os.CreateTemp(coverDir, "."+pl.ID+".tmp-*")
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "create playlist cover temporary file", err)
 		return
 	}
 	tmpPath := tmp.Name()
@@ -287,7 +286,7 @@ func (s *Server) setPlaylistCover(w http.ResponseWriter, r *http.Request) {
 	written, err := io.Copy(tmp, io.LimitReader(file, maxPlaylistCoverBytes+1))
 	if err != nil {
 		tmp.Close()
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "write playlist cover temporary file", err)
 		return
 	}
 	if written > maxPlaylistCoverBytes {
@@ -296,20 +295,20 @@ func (s *Server) setPlaylistCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := tmp.Close(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "close playlist cover temporary file", err)
 		return
 	}
 	if err := os.Rename(tmpPath, target); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "install playlist cover", err)
 		return
 	}
 
 	coverURL := "/api/v1/cover/playlist/" + pl.ID
 	if err := s.st.SetPlaylistCover(r.Context(), pl.ID, coverURL, target); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "persist playlist cover", err)
 		return
 	}
-	s.st.Audit(r.Context(), identity.ID, "playlist.cover.set", pl.ID, "{}")
+	s.audit(r.Context(), identity.ID, "playlist.cover.set", pl.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"cover_url": coverURL})
 }
 
@@ -330,16 +329,16 @@ func (s *Server) clearPlaylistCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.SetPlaylistCover(r.Context(), pl.ID, "", ""); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "clear playlist cover", err)
 		return
 	}
 	if pl.CoverPath != "" {
 		if err := os.Remove(pl.CoverPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			s.internalError(w, r, "remove playlist cover file", err)
 			return
 		}
 	}
-	s.st.Audit(r.Context(), identity.ID, "playlist.cover.clear", pl.ID, "{}")
+	s.audit(r.Context(), identity.ID, "playlist.cover.clear", pl.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -361,10 +360,10 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	plID := r.PathValue("id")
 	if err := s.st.DeletePlaylist(r.Context(), plID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "delete playlist", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "playlist.delete", plID, "{}")
+	s.audit(r.Context(), id.ID, "playlist.delete", plID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": plID})
 }
 
@@ -407,7 +406,7 @@ func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
 		}
 		track, err := p.GetTrack(r.Context(), provider.TrackRef(ref))
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "provider_error", ref+": "+err.Error())
+			s.providerError(w, r, "fetch playlist track "+ref, err)
 			return
 		}
 		items = append(items, store.PlaylistItem{
@@ -416,11 +415,10 @@ func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if err := s.st.AppendPlaylistItems(r.Context(), plID, items); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "append playlist items", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "playlist.add_items", plID,
-		`{"count":`+strconv.Itoa(len(items))+`}`)
+	s.audit(r.Context(), id.ID, "playlist.add_items", plID, map[string]any{"count": len(items)})
 	writeJSON(w, http.StatusOK, map[string]any{"added": len(items)})
 }
 
@@ -449,7 +447,7 @@ func (s *Server) deletePlaylistItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "item not found")
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "playlist.delete_item", plID, "{}")
+	s.audit(r.Context(), id.ID, "playlist.delete_item", plID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": ord})
 }
 
@@ -489,11 +487,12 @@ func (s *Server) movePlaylistItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "move playlist item", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "playlist.move_item", plID,
-		`{"ord":`+strconv.Itoa(ord)+`,"to_ord":`+strconv.Itoa(finalOrd)+`}`)
+	s.audit(r.Context(), id.ID, "playlist.move_item", plID, map[string]any{
+		"ord": ord, "to_ord": finalOrd,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"moved": ord, "to_ord": finalOrd})
 }
 
@@ -535,7 +534,7 @@ func (s *Server) importPlaylist(w http.ResponseWriter, r *http.Request) {
 		for len(tracks) < 500 {
 			batch, exhausted, err := src.NextBatch(ctx, 50, "")
 			if err != nil {
-				writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+				s.providerError(w, r, "materialize playlist source", err)
 				return
 			}
 			tracks = append(tracks, batch...)
@@ -557,7 +556,7 @@ func (s *Server) importPlaylist(w http.ResponseWriter, r *http.Request) {
 		var err error
 		name, _, tracks, err = imp.ImportPlaylist(ctx, body.PlaylistID)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			s.providerError(w, r, "import provider playlist", err)
 			return
 		}
 	default:
@@ -574,7 +573,7 @@ func (s *Server) importPlaylist(w http.ResponseWriter, r *http.Request) {
 		CreatedBy: id.ID, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.st.CreatePlaylist(ctx, pl); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "create imported playlist", err)
 		return
 	}
 	items := make([]store.PlaylistItem, 0, len(tracks))
@@ -585,11 +584,10 @@ func (s *Server) importPlaylist(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if err := s.st.AppendPlaylistItems(ctx, pl.ID, items); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "append imported playlist items", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "playlist.import", pl.ID,
-		`{"count":`+strconv.Itoa(len(items))+`}`)
+	s.audit(r.Context(), id.ID, "playlist.import", pl.ID, map[string]any{"count": len(items)})
 	pl.TrackCount = len(items)
 	writeJSON(w, http.StatusCreated, map[string]any{"playlist": pl})
 }

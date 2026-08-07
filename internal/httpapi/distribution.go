@@ -188,7 +188,7 @@ func (s *Server) distributionSource(w http.ResponseWriter, r *http.Request) {
 	ref := provider.TrackRef(lease.TrackRef)
 	file, err := s.cache.Open(r.Context(), ref)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "open distribution source", err)
 		return
 	}
 	defer file.Close()

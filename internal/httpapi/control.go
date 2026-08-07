@@ -25,7 +25,7 @@ func (s *Server) roomCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	capabilities, err := s.controls.RoomCapabilities(r.Context(), roomID, identity)
 	if err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -45,7 +45,7 @@ func (s *Server) roomState(w http.ResponseWriter, r *http.Request) {
 
 	snapshot, err := s.controls.RoomSnapshot(r.Context(), roomID, identity)
 	if err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot)
@@ -89,7 +89,7 @@ func (s *Server) queueAdd(w http.ResponseWriter, r *http.Request) {
 
 	entryIDs, err := s.controls.QueueAdd(r.Context(), roomID, identity, refs)
 	if err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -108,7 +108,7 @@ func (s *Server) queueClear(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.controls.QueueClear(r.Context(), roomID, identity); err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -129,7 +129,7 @@ func (s *Server) queueRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.controls.QueueRemove(r.Context(), roomID, identity, entryID); err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -157,7 +157,7 @@ func (s *Server) queueMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.controls.QueueMove(r.Context(), roomID, identity, entryID, *body.ToIndex); err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -202,7 +202,7 @@ func (s *Server) playbackControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -228,7 +228,7 @@ func (s *Server) radioPlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.controls.RadioPlay(r.Context(), roomID, identity, body.Source, body.Shuffle, body.Once); err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -245,7 +245,7 @@ func (s *Server) radioStop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.controls.RadioStop(r.Context(), roomID, identity); err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -304,7 +304,7 @@ func requireControlJSONEnd(decoder *json.Decoder) error {
 	return nil
 }
 
-func writeControlErr(w http.ResponseWriter, err error) {
+func (s *Server) writeControlErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, control.ErrInvalidArgument),
 		errors.Is(err, room.ErrInvalidSource),
@@ -322,7 +322,7 @@ func writeControlErr(w http.ResponseWriter, err error) {
 		errors.Is(err, room.ErrNoPlayback):
 		writeErr(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, control.ErrProvider):
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "execute room control operation", err)
 	default:
 		writeErr(w, http.StatusInternalServerError, "internal", "internal server error")
 	}

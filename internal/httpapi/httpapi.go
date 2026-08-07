@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -125,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare", s.prepareAccelerationCredential)
 	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/activate", s.activateAccelerationCredential)
 	mux.HandleFunc("GET /api/v1/principals", s.listPrincipals)
+	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	mux.HandleFunc("GET /api/v1/history", s.requesterHistory)
 	mux.HandleFunc("GET /api/v1/stats/hot", s.hotTracks)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
@@ -263,11 +265,8 @@ func (s *Server) guestAuth(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.audit(r.Context(), "", "auth.login_failed", "", map[string]any{"reason": "invalid_payload"})
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
-		return
-	}
-	if len(body.Name) > 64 {
-		writeErr(w, http.StatusBadRequest, "bad_request", "name must not exceed 64 bytes")
 		return
 	}
 	id, token, err := s.authm.GuestAuth(body.Name, body.Password, r.RemoteAddr)
@@ -276,8 +275,20 @@ func (s *Server) guestAuth(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusTooManyRequests, "rate_limited", err.Error())
 			return
 		}
+		reason := "authentication_failed"
+		if errors.Is(err, auth.ErrInvalidGuestName) {
+			reason = "invalid_name"
+		}
+		s.audit(r.Context(), "", "auth.login_failed", body.Name, map[string]any{"reason": reason})
+		if errors.Is(err, auth.ErrInvalidGuestName) {
+			writeErr(w, http.StatusBadRequest, "invalid_name", err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
+	}
+	if body.Password != "" && !id.HasRole(auth.RoleRoomAdmin) {
+		s.audit(r.Context(), id.ID, "auth.login_failed", body.Name, map[string]any{"reason": "invalid_admin_password"})
 	}
 	auth.LogAdminGrant(id, "guest-password", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
@@ -300,6 +311,7 @@ func (s *Server) oidcConfig(w http.ResponseWriter, r *http.Request) {
 // 服务端验签 + 角色映射后签发 yuzu 会话。未启用 OIDC 时 404。
 func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	if s.oidc == nil {
+		s.audit(r.Context(), "", "auth.login_failed", "", map[string]any{"reason": "oidc_not_enabled"})
 		writeErr(w, http.StatusNotFound, "not_found", "oidc not enabled")
 		return
 	}
@@ -308,11 +320,13 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 		AccessToken string `json:"access_token"` // 可选：id_token 缺 preferred_username 时用于 userinfo 兜底
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IDToken == "" {
+		s.audit(r.Context(), "", "auth.login_failed", "", map[string]any{"reason": "invalid_oidc_payload"})
 		writeErr(w, http.StatusBadRequest, "bad_request", "id_token required")
 		return
 	}
 	claims, err := s.oidc.Validate(r.Context(), body.IDToken)
 	if err != nil {
+		s.audit(r.Context(), "", "auth.login_failed", "", map[string]any{"reason": "oidc_validation_failed"})
 		writeErr(w, http.StatusUnauthorized, "unauthorized", err.Error())
 		return
 	}
@@ -325,6 +339,8 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 		if info, err := s.oidc.Userinfo(r.Context(), body.AccessToken); err == nil {
 			userinfoSub, _ := info["sub"].(string)
 			if userinfoSub == "" || userinfoSub != claims.Sub {
+				s.audit(r.Context(), "", "auth.login_failed", auth.OIDCIdentity(claims, nil).ID,
+					map[string]any{"reason": "oidc_subject_mismatch"})
 				writeErr(w, http.StatusUnauthorized, "unauthorized", "userinfo subject does not match id_token")
 				return
 			}
@@ -344,11 +360,12 @@ func (s *Server) oidcAuth(w http.ResponseWriter, r *http.Request) {
 	id := auth.OIDCIdentity(claims, roles)
 	token, err := s.authm.IssueAuthenticatedSession(id)
 	if err != nil {
+		s.audit(r.Context(), id.ID, "auth.login_failed", id.ID, map[string]any{"reason": "session_issue_failed"})
 		writeErr(w, http.StatusInternalServerError, "internal", "failed to issue session")
 		return
 	}
 	auth.LogAdminGrant(id, "oidc", r.RemoteAddr)
-	s.st.Audit(r.Context(), id.ID, "auth.oidc", "", `{"name":`+strconv.Quote(id.Name)+`}`)
+	s.audit(r.Context(), id.ID, "auth.oidc", "", map[string]any{"name": id.Name})
 	writeJSON(w, http.StatusOK, map[string]any{"identity": id, "session_token": token})
 }
 
@@ -409,7 +426,7 @@ func (s *Server) getRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, err := rm.DirectorySnapshot()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "snapshot room directory", err)
 		return
 	}
 	access := rm.AccessConfig()
@@ -468,7 +485,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.rooms.Spawn(row)
-	s.st.Audit(r.Context(), id.ID, "room.create", row.ID, `{"name":`+strconv.Quote(row.Name)+`}`)
+	s.audit(r.Context(), id.ID, "room.create", row.ID, map[string]any{"name": row.Name})
 	writeJSON(w, http.StatusCreated, map[string]any{"room": map[string]any{
 		"id": row.ID, "name": row.Name, "guest_access": accessResponse(access),
 	}})
@@ -529,20 +546,20 @@ func (s *Server) updateRoom(w http.ResponseWriter, r *http.Request) {
 	row.CodePeriodSeconds = access.CodePeriodSeconds
 	row.TrustedRoles = access.TrustedRoles
 	if err := s.st.UpdateRoom(r.Context(), row); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "update room", err)
 		return
 	}
 	if err := rm.ApplyAccessConfig(access); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "apply room access configuration", err)
 		return
 	}
 	if body.Policy != nil {
 		if err := rm.SetPolicy(*body.Policy); err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			s.internalError(w, r, "apply room policy", err)
 			return
 		}
 	}
-	s.st.Audit(r.Context(), id.ID, "room.update", roomID, "{}")
+	s.audit(r.Context(), id.ID, "room.update", roomID, map[string]any{})
 	writeJSON(w, http.StatusOK, map[string]any{"room": map[string]any{
 		"id": roomID, "name": name, "guest_access": accessResponse(access),
 	}})
@@ -569,16 +586,27 @@ func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	s.rooms.Delete(roomID)
 	if err := s.st.DeleteRoom(r.Context(), roomID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "delete room", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "room.delete", roomID, "{}")
+	s.audit(r.Context(), id.ID, "room.delete", roomID, map[string]any{})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // roomHistory 房间播放历史（最新在前）。
 func (s *Server) roomHistory(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
+	identity, ok := s.requireRole(w, r, auth.RoleListener)
+	if !ok {
+		return
+	}
+	roomID := r.PathValue("id")
+	allowed, err := s.controls.CanReadRoomScopedData(r.Context(), roomID, identity)
+	if err != nil {
+		s.writeControlErr(w, r, err)
+		return
+	}
+	if !allowed {
+		writeErr(w, http.StatusForbidden, "forbidden", "room access required")
 		return
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -589,9 +617,9 @@ func (s *Server) roomHistory(w http.ResponseWriter, r *http.Request) {
 	if limit > 200 {
 		limit = 200
 	}
-	rows, err := s.st.PlayHistory(r.Context(), r.PathValue("id"), offset, limit)
+	rows, err := s.st.PlayHistory(r.Context(), roomID, offset, limit)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "list room history", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": rows})
@@ -599,7 +627,18 @@ func (s *Server) roomHistory(w http.ResponseWriter, r *http.Request) {
 
 // roomStats 房间曲目热度榜（首播时间、播放次数、最近播放）。
 func (s *Server) roomStats(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, auth.RoleListener); !ok {
+	identity, ok := s.requireRole(w, r, auth.RoleListener)
+	if !ok {
+		return
+	}
+	roomID := r.PathValue("id")
+	allowed, err := s.controls.CanReadRoomScopedData(r.Context(), roomID, identity)
+	if err != nil {
+		s.writeControlErr(w, r, err)
+		return
+	}
+	if !allowed {
+		writeErr(w, http.StatusForbidden, "forbidden", "room access required")
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -609,9 +648,9 @@ func (s *Server) roomStats(w http.ResponseWriter, r *http.Request) {
 	if limit > 100 {
 		limit = 100
 	}
-	stats, err := s.st.PlayStats(r.Context(), r.PathValue("id"), limit)
+	stats, err := s.st.PlayStats(r.Context(), roomID, limit)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "load room statistics", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
@@ -637,7 +676,7 @@ func (s *Server) requesterHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.st.PlayHistoryByRequester(r.Context(), id.ID, offset, limit)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "list requester history", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": rows})
@@ -683,7 +722,7 @@ func (s *Server) hotTracks(w http.ResponseWriter, r *http.Request) {
 	}
 	tracks, err := s.st.HotTracks(r.Context(), sinceMs, limit, offset)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "list hot tracks", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks})
@@ -728,7 +767,7 @@ func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "player.command", playerID, `{"op":`+strconv.Quote(body.Op)+`}`)
+	s.audit(r.Context(), id.ID, "player.command", playerID, map[string]any{"op": body.Op})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -833,11 +872,11 @@ func (s *Server) setCredential(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	if err := ca.SetCredential(ctx, body.Payload); err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "set provider credential", err)
 		return
 	}
 	_ = s.st.SetCredentialOwner(ctx, pid, id.ID)
-	s.st.Audit(r.Context(), id.ID, "provider.set_credential", pid, "{}")
+	s.audit(r.Context(), id.ID, "provider.set_credential", pid, map[string]any{})
 	writeJSON(w, http.StatusOK, map[string]any{"provider": pid, "status": "ok"})
 }
 
@@ -851,7 +890,7 @@ func (s *Server) qrLoginStart(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	key, content, err := qa.QRLoginStart(ctx)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "start provider QR login", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"key": key, "qr_content": content})
@@ -867,11 +906,14 @@ func (s *Server) qrLoginPoll(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	status, message, err := qa.QRLoginPoll(ctx, r.PathValue("key"))
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "poll provider QR login", err)
 		return
 	}
 	if status == "ok" {
 		_ = s.st.SetCredentialOwner(ctx, r.PathValue("id"), identity.ID)
+		s.audit(r.Context(), identity.ID, "provider.credential.qr_login", r.PathValue("id"), map[string]any{
+			"owner_principal_id": identity.ID,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": status, "message": message})
 }
@@ -914,11 +956,10 @@ func (s *Server) likeProviderTrack(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	if err := aw.Like(ctx, body.Track); err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "like provider track", err)
 		return
 	}
-	detail, _ := json.Marshal(body)
-	_ = s.st.Audit(r.Context(), identity.ID, "provider.like", providerID, string(detail))
+	s.audit(r.Context(), identity.ID, "provider.like", providerID, body)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -943,11 +984,10 @@ func (s *Server) addProviderTrackToPlaylist(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	if err := aw.AddToPlaylist(ctx, body.PlaylistID, body.Track); err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "add provider track to playlist", err)
 		return
 	}
-	detail, _ := json.Marshal(body)
-	_ = s.st.Audit(r.Context(), identity.ID, "provider.playlist_add", providerID, string(detail))
+	s.audit(r.Context(), identity.ID, "provider.playlist_add", providerID, body)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -961,7 +1001,7 @@ func (s *Server) listProviderAccountPlaylists(w http.ResponseWriter, r *http.Req
 	defer cancel()
 	playlists, err := aw.AccountPlaylists(ctx)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "list provider account playlists", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
@@ -982,7 +1022,7 @@ func (s *Server) checkProviderTrackLiked(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 	liked, err := aw.LikeCheck(ctx, trackID)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "check provider track like", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"liked": liked})
@@ -1063,7 +1103,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if category == "" || category == provider.SearchCategorySong {
 		tracks, err := p.Search(r.Context(), q, limit, offset)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			s.providerError(w, r, "search provider tracks", err)
 			return
 		}
 		proxiedSearchTracks(tracks)
@@ -1101,7 +1141,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	results, err := searcher.SearchCategory(r.Context(), category, q, limit, offset)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "search provider category", err)
 		return
 	}
 	s.proxiedSearchResults(providerID, results)
@@ -1168,7 +1208,7 @@ func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			s.providerError(w, r, "search provider entity", err)
 			return
 		}
 		s.proxiedSearchResults(providerID, results)
@@ -1186,7 +1226,7 @@ func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "search provider entity tracks", err)
 		return
 	}
 	proxiedSearchTracks(tracks)
@@ -1228,7 +1268,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "media.upload", track.Ref.String(), "{}")
+	s.audit(r.Context(), id.ID, "media.upload", track.Ref.String(), map[string]any{})
 	writeJSON(w, http.StatusCreated, map[string]any{"track": track})
 }
 
@@ -1238,7 +1278,7 @@ func (s *Server) listCache(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.st.ListCacheRows(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "load media cache statistics", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1264,16 +1304,15 @@ func (s *Server) pruneCache(w http.ResponseWriter, r *http.Request) {
 
 	evicted, freed, err := s.cache.PruneUnused(r.Context(), time.Duration(*body.UnusedDays)*24*time.Hour)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "prune media cache", err)
 		return
 	}
 	result := map[string]any{"evicted": evicted, "freed_bytes": freed}
-	detail, _ := json.Marshal(map[string]any{
+	s.audit(r.Context(), id.ID, "media.cache_prune", "", map[string]any{
 		"unused_days": *body.UnusedDays,
 		"evicted":     evicted,
 		"freed_bytes": freed,
 	})
-	s.st.Audit(r.Context(), id.ID, "media.cache_prune", "", string(detail))
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -1288,10 +1327,10 @@ func (s *Server) evictCache(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found", "not cached")
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "evict media cache entry", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "media.cache_evict", ref, "{}")
+	s.audit(r.Context(), id.ID, "media.cache_evict", ref, map[string]any{})
 	writeJSON(w, http.StatusOK, map[string]any{"evicted": ref})
 }
 
@@ -1318,7 +1357,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		// Range 请求需要完整文件（可能触发同步拉取）
 		f, err := s.cache.Open(r.Context(), ref)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			s.providerError(w, r, "open local stream", err)
 			return
 		}
 		defer f.Close()
@@ -1329,7 +1368,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 
 	rc, err := s.cache.OpenStream(r.Context(), ref)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "open provider stream", err)
 		return
 	}
 	defer rc.Close()
@@ -1347,6 +1386,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
+}
+
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
+	s.loggedError(w, r, http.StatusInternalServerError, "internal", "internal error", operation, err)
+}
+
+func (s *Server) providerError(w http.ResponseWriter, r *http.Request, operation string, err error) {
+	s.loggedError(w, r, http.StatusBadGateway, "provider_error", "provider request failed", operation, err)
+}
+
+func (s *Server) loggedError(
+	w http.ResponseWriter,
+	r *http.Request,
+	status int,
+	code, message, operation string,
+	err error,
+) {
+	log.Printf("http request error method=%s path=%q operation=%q: %v", r.Method, r.URL.Path, operation, err)
+	writeErr(w, status, code, message)
 }
 
 func slugify(s string) string {

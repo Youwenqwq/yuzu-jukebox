@@ -191,11 +191,45 @@ func TestOIDCAuthUserinfoSubjectMismatch(t *testing.T) {
 	idp := newOIDCTestIdP(t, map[string]any{
 		"sub": "someone-else", "preferred_username": "evil",
 	})
-	s, _ := newOIDCTestServer(t, idp, nil)
+	s, st := newOIDCTestServer(t, idp, nil)
 
 	rec := performOIDCLogin(t, s, idp.token(nil), "access-token-1")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body = %s", rec.Code, rec.Body.String())
+	}
+	expectedTarget := auth.OIDCIdentity(auth.OIDCClaims{Sub: "user-42"}, nil).ID
+	entries, err := st.QueryAudit(context.Background(), store.AuditFilter{
+		Action: "auth.login_failed",
+		Target: expectedTarget,
+	}, 50, 0)
+	if err != nil {
+		t.Fatalf("query failed OIDC audit: %v", err)
+	}
+	if len(entries) != 1 || !strings.Contains(string(entries[0].Detail), "oidc_subject_mismatch") {
+		t.Fatalf("failed OIDC audit entries = %#v", entries)
+	}
+}
+
+func TestOIDCAuthInvalidTokenAuditedWithoutToken(t *testing.T) {
+	idp := newOIDCTestIdP(t, nil)
+	s, st := newOIDCTestServer(t, idp, nil)
+
+	rec := performOIDCLogin(t, s, "not.a.valid-token", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body = %s", rec.Code, rec.Body.String())
+	}
+	entries, err := st.QueryAudit(context.Background(), store.AuditFilter{
+		Action: "auth.login_failed",
+	}, 50, 0)
+	if err != nil {
+		t.Fatalf("query failed OIDC audit: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Target != "" ||
+		!strings.Contains(string(entries[0].Detail), "oidc_validation_failed") {
+		t.Fatalf("invalid-token audit entries = %#v", entries)
+	}
+	if strings.Contains(string(entries[0].Detail), "not.a.valid-token") {
+		t.Fatal("invalid OIDC token leaked into audit detail")
 	}
 }
 

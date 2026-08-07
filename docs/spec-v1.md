@@ -665,14 +665,15 @@ played_ms >= min(total_ms / 2, 240000)
 | `GET /api/v1/integrations/{id}/subjects` | `room_admin` | 该 Integration 的全部 external subject→Principal 链接，稳定排序 |
 | `PUT/DELETE /api/v1/integrations/{id}/subjects` | `room_admin` | 链接/解绑 external subject 与 Principal |
 | `GET /api/v1/principals?q=&limit=` | `room_admin` | 按 ID 或名称可选搜索 Principal；默认/上限 100，稳定排序；不返回 OIDC subject |
+| `GET /api/v1/audit?actor_id=&action=&target=&limit=&offset=` | `room_admin` | 审计日志查询（`audit_log`：actor_id/action/target 精确过滤，created_at 倒序稳定排序；默认 50，上限 200）。失败登录与 QR 凭据获取均写入 audit；detail 永不包含口令/token |
 | `GET /api/v1/rooms` / `GET /api/v1/rooms/{id}` | `listener` | 房间目录/单房间信息；字段合同见下文；绝不含静态密码、当前动态码或 `stream_url` |
 | `POST /api/v1/rooms` / `PATCH /api/v1/rooms/{id}` | `room_admin` | 建/改房间名称、访问模式、`trusted_roles` 及 policy；访问配置热更新 |
 | `GET /api/v1/rooms/{id}/access-code` | `room_admin`，或当前 scope 映射到该 Room 的 Integration actor | 返回当前动态验证码与有效期，供分享给走 guest fallback 的用户；`Cache-Control: no-store` |
 | `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
 | `GET /api/v1/rooms/{id}/grants` | `room_admin` | 该 Room 的全部显式 `controller` grants，稳定排序 |
 | `PUT/DELETE /api/v1/rooms/{id}/grants/{principal_id}` | `room_admin` | 授予/撤销该 Principal 的 Room `controller` capability |
-| `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` | 播放历史，最新在前（默认 50，上限 200） |
-| `GET /api/v1/rooms/{id}/stats?limit=` | `listener` | 曲目热度榜（默认 20，上限 100） |
+| `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` + 房间准入 | 播放历史，最新在前（默认 50，上限 200）。受保护房间（口令/动态码/trusted_roles/凭据）仅对免密准入者（controller、同房 Integration actor、trusted role）开放，其余 403 `forbidden`；开放房间任意已认证 listener 可读 |
+| `GET /api/v1/rooms/{id}/stats?limit=` | `listener` + 房间准入 | 曲目热度榜（默认 20，上限 100），准入规则同上 |
 | `GET /api/v1/history?requester=me&offset=&limit=` | `requester` | 跨房间个人播放历史（`requested_by` = 当前 Principal），最新在前（默认 50，上限 200）；`requester` 只接受 `me` |
 | `GET /api/v1/stats/hot?days=&limit=&offset=` | `requester` | 全局热门曲目（跨房间 `play_history` 聚合：`track_ref`/`title`/`play_count`/`last_played_at`，与 `queue.add` 的 ref 体系兼容）；`days` 缺省 7、0 = 全部时间；`limit` 缺省 20，上限 100；`offset` 缺省 0（首页热门翻页用） |
 | `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability（`controller`、`radio`，后者按 4.7 `radio_control` 推导）；Room 不存在为 404 |

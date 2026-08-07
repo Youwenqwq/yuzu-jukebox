@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -89,7 +90,7 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	}
 	req, err := http.NewRequestWithContext(r.Context(), "GET", rawURL, nil)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "build provider cover request", err)
 		return
 	}
 	if ca, ok := p.(provider.CoverAware); ok {
@@ -101,12 +102,12 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	}
 	resp, err := coverClient.Do(req)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "fetch provider cover", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		writeErr(w, http.StatusBadGateway, "provider_error", "cover fetch: "+resp.Status)
+		s.providerError(w, r, "fetch provider cover", fmt.Errorf("unexpected upstream status %s", resp.Status))
 		return
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" && strings.HasPrefix(ct, "image/") {
@@ -179,7 +180,7 @@ func (s *Server) lyrics(w http.ResponseWriter, r *http.Request) {
 	}
 	l, err := lp.Lyrics(r.Context(), ref)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "fetch provider lyrics", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, l)

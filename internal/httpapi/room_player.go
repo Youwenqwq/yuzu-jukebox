@@ -230,7 +230,7 @@ func (s *Server) requireRoomOutputVolume(
 ) bool {
 	capabilities, err := s.controls.RoomCapabilities(r.Context(), roomID, identity)
 	if err != nil {
-		writeControlErr(w, err)
+		s.writeControlErr(w, r, err)
 		return false
 	}
 	if capabilities.Controller {

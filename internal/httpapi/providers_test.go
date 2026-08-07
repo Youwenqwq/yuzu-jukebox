@@ -405,6 +405,24 @@ func TestProviderCredentialOwnerRebinding(t *testing.T) {
 	if err != nil || !exists || owner.PrincipalID != "provider-other" {
 		t.Fatalf("owner after qr login = %#v, exists = %v, err = %v", owner, exists, err)
 	}
+	entries, err := f.st.QueryAudit(context.Background(), store.AuditFilter{
+		ActorID: "provider-other",
+		Action:  "provider.credential.qr_login",
+		Target:  f.writer.ID(),
+	}, 50, 0)
+	if err != nil {
+		t.Fatalf("query qr login audit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("qr login audit entries = %d, want 1", len(entries))
+	}
+	var detail map[string]string
+	if err := json.Unmarshal(entries[0].Detail, &detail); err != nil {
+		t.Fatalf("decode qr login audit detail: %v", err)
+	}
+	if detail["owner_principal_id"] != "provider-other" {
+		t.Fatalf("qr login audit detail = %#v", detail)
+	}
 }
 
 func TestProviderAccountWriteEndpoints(t *testing.T) {

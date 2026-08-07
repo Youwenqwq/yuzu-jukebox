@@ -9,10 +9,14 @@ import (
 	"testing"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
+	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
+	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type historyEndpointFixture struct {
@@ -173,5 +177,121 @@ func TestHotTracksEndpoint(t *testing.T) {
 	rec = historyEndpointRequest(t, f, "/api/v1/stats/hot?days=0&offset=-1")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative offset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+type roomScopedReadFixture struct {
+	handler http.Handler
+	tokens  map[string]string
+}
+
+func setupRoomScopedReadEndpoints(t *testing.T) roomScopedReadFixture {
+	t.Helper()
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(root, "room-scoped-read.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = st.Close()
+	})
+
+	authm := auth.NewManager("", st)
+	reg := provider.NewRegistry()
+	roomCache := cache.New(filepath.Join(root, "cache"), 1<<20, 0, st, reg)
+	rooms := room.NewManager(ctx, st, authm, roomCache, reg, nil)
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("room-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomRows := []store.Room{
+		{
+			ID: "open-room", Name: "Open", AccessMode: string(room.AccessModeOpen),
+			CodePeriodSeconds: room.DefaultCodePeriodSeconds, CreatedAt: 1,
+		},
+		{
+			ID: "protected-room", Name: "Protected", PasswordHash: string(passwordHash),
+			AccessMode: string(room.AccessModeStaticPassword), CodePeriodSeconds: room.DefaultCodePeriodSeconds,
+			TrustedRoles: []string{"staff"}, CreatedAt: 2,
+		},
+	}
+	for _, row := range roomRows {
+		if err := st.CreateRoom(ctx, row); err != nil {
+			t.Fatalf("create %s: %v", row.ID, err)
+		}
+		rooms.Spawn(row)
+		if err := st.AddPlayHistory(ctx, row.ID, "test:track", "Track", "requester", 10, 20, "finished"); err != nil {
+			t.Fatalf("seed %s history: %v", row.ID, err)
+		}
+	}
+
+	identities := map[string]auth.Identity{
+		"guest": {
+			ID: "guest", Name: "Guest", Kind: "guest", Roles: []string{auth.RoleListener},
+		},
+		"controller": {
+			ID: "controller", Name: "Controller", Kind: "oidc", Roles: []string{auth.RoleListener},
+		},
+		"trusted": {
+			ID: "trusted", Name: "Trusted", Kind: "oidc", Roles: []string{auth.RoleListener, "staff"},
+		},
+	}
+	tokens := make(map[string]string, len(identities))
+	for name, identity := range identities {
+		tokens[name] = authm.IssueSession(identity)
+		if tokens[name] == "" {
+			t.Fatalf("issue %s session", name)
+		}
+	}
+	if err := st.GrantRoomGrant(ctx, "protected-room", identities["controller"].ID, control.CapabilityController); err != nil {
+		t.Fatalf("grant protected-room controller: %v", err)
+	}
+
+	controls := control.NewService(rooms, reg, control.NewAuthorizer(st))
+	s := &Server{
+		st: st, authm: authm, rooms: rooms, reg: reg, cache: roomCache, controls: controls,
+		ws: wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
+	}
+	return roomScopedReadFixture{handler: s.Handler(), tokens: tokens}
+}
+
+func TestRoomHistoryAndStatsRequireRoomAdmission(t *testing.T) {
+	f := setupRoomScopedReadEndpoints(t)
+	cases := []struct {
+		name, roomID, tokenName string
+		wantStatus              int
+	}{
+		{name: "open guest", roomID: "open-room", tokenName: "guest", wantStatus: http.StatusOK},
+		{name: "protected guest", roomID: "protected-room", tokenName: "guest", wantStatus: http.StatusForbidden},
+		{name: "protected controller", roomID: "protected-room", tokenName: "controller", wantStatus: http.StatusOK},
+		{name: "protected trusted role", roomID: "protected-room", tokenName: "trusted", wantStatus: http.StatusOK},
+	}
+	for _, tc := range cases {
+		for _, endpoint := range []string{"history", "stats"} {
+			t.Run(tc.name+" "+endpoint, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+tc.roomID+"/"+endpoint, nil)
+				req.Header.Set("Authorization", "Bearer "+f.tokens[tc.tokenName])
+				rec := httptest.NewRecorder()
+				f.handler.ServeHTTP(rec, req)
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if tc.wantStatus == http.StatusForbidden {
+					var body struct {
+						Error struct {
+							Code string `json:"code"`
+						} `json:"error"`
+					}
+					if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+						t.Fatal(err)
+					}
+					if body.Error.Code != "forbidden" {
+						t.Fatalf("error code = %q, want forbidden", body.Error.Code)
+					}
+				}
+			})
+		}
 	}
 }

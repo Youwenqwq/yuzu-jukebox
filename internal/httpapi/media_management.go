@@ -26,7 +26,7 @@ func (s *Server) listMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	files, err := s.local.List(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "list local media", err)
 		return
 	}
 	media := make([]localMediaResponse, 0, len(files))
@@ -57,14 +57,14 @@ func (s *Server) deleteMedia(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, local.ErrNotFound):
 			writeErr(w, http.StatusNotFound, "not_found", "media not found")
 		default:
-			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			s.internalError(w, r, "delete local media", err)
 		}
 		return
 	}
 	if err := s.cache.EvictTrack(r.Context(), ref); err != nil && !errors.Is(err, cache.ErrNotFound) {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		s.internalError(w, r, "evict deleted media from cache", err)
 		return
 	}
-	s.st.Audit(r.Context(), id.ID, "media.delete", ref.String(), "{}")
+	s.audit(r.Context(), id.ID, "media.delete", ref.String(), nil)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": ref.String()})
 }

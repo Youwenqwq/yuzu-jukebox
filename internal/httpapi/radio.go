@@ -35,7 +35,7 @@ func (s *Server) radioTracks(w http.ResponseWriter, r *http.Request) {
 	source, providerFailure, err := s.newFiniteRadioSource(r.Context(), spec)
 	if err != nil {
 		if providerFailure {
-			writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+			s.providerError(w, r, "create radio source", err)
 		} else {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		}
@@ -43,7 +43,7 @@ func (s *Server) radioTracks(w http.ResponseWriter, r *http.Request) {
 	}
 	tracks, total, err := materializeRadioSource(r.Context(), source, limit, offset)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "materialize radio source", err)
 		return
 	}
 	proxiedSearchTracks(tracks)
@@ -190,7 +190,7 @@ func (s *Server) similarProviderTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_error", err.Error())
+		s.providerError(w, r, "find similar provider tracks", err)
 		return
 	}
 	if tracks == nil {

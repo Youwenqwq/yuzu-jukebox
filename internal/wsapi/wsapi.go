@@ -306,6 +306,10 @@ func (c *client) dispatch(typ, ref string, data json.RawMessage) {
 		}
 		id, token, err := c.server.authm.GuestAuth(d.Name, d.Password, c.remote)
 		if err != nil {
+			if errors.Is(err, auth.ErrInvalidGuestName) {
+				c.replyErr(ref, "bad_request", err.Error())
+				return
+			}
 			if errors.Is(err, auth.ErrPasswordProbeRateLimited) {
 				c.replyErr(ref, "rate_limited", err.Error())
 				return

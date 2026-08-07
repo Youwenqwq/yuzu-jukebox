@@ -861,6 +861,71 @@ func (s *Store) Audit(ctx context.Context, actorID, action, target, detailJSON s
 	return err
 }
 
+// AuditFilter narrows audit-log queries by exact field matches.
+type AuditFilter struct {
+	ActorID string
+	Action  string
+	Target  string
+}
+
+// AuditEntry is one persisted audit event.
+type AuditEntry struct {
+	ActorID   string          `json:"actor_id"`
+	Action    string          `json:"action"`
+	Target    string          `json:"target"`
+	Detail    json.RawMessage `json:"detail"`
+	CreatedAt int64           `json:"created_at"`
+}
+
+// QueryAudit returns audit events newest-first. Paging is bounded here as well
+// as at the HTTP boundary so non-HTTP callers cannot accidentally issue an
+// unbounded query.
+func (s *Store) QueryAudit(ctx context.Context, filter AuditFilter, limit, offset int) ([]AuditEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := `SELECT actor_id, action, target, detail_json, created_at FROM audit_log WHERE 1=1`
+	args := make([]any, 0, 5)
+	if filter.ActorID != "" {
+		query += ` AND actor_id = ?`
+		args = append(args, filter.ActorID)
+	}
+	if filter.Action != "" {
+		query += ` AND action = ?`
+		args = append(args, filter.Action)
+	}
+	if filter.Target != "" {
+		query += ` AND target = ?`
+		args = append(args, filter.Target)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var entry AuditEntry
+		var detailJSON string
+		if err := rows.Scan(&entry.ActorID, &entry.Action, &entry.Target, &detailJSON, &entry.CreatedAt); err != nil {
+			return nil, err
+		}
+		entry.Detail = json.RawMessage(detailJSON)
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 // ---------- 媒体文件（local provider） ----------
 
 type MediaFile struct {

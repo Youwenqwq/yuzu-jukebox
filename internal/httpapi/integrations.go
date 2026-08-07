@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -329,6 +330,37 @@ func (s *Server) listPrincipals(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"principals": principals})
 }
+func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
+		return
+	}
+
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit <= 0 {
+		limit = 50
+	} else if limit > 200 {
+		limit = 200
+	}
+	offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	entries, err := s.st.QueryAudit(r.Context(), store.AuditFilter{
+		ActorID: r.URL.Query().Get("actor_id"),
+		Action:  r.URL.Query().Get("action"),
+		Target:  r.URL.Query().Get("target"),
+	}, limit, offset)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to query audit log")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
 
 func (s *Server) listRoomGrants(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRoomAdmin); !ok {
@@ -371,6 +403,10 @@ func (s *Server) resolveIntegrationActor(w http.ResponseWriter, r *http.Request)
 	}
 	if anyBlank(body.AdapterID, body.Scope.Type, body.Scope.ID, body.Subject.ID, body.Subject.DisplayName) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "adapter_id, scope.type, scope.id, subject.id and subject.display_name are required")
+		return
+	}
+	if err := auth.ValidateGuestName(body.Subject.DisplayName); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
 
@@ -683,11 +719,18 @@ func (s *Server) audit(
 	actorID, action, target string,
 	detail any,
 ) {
-	encoded, err := json.Marshal(detail)
-	if err != nil {
+	if s.st == nil {
+		log.Printf("audit write skipped action=%q target=%q: store unavailable", action, target)
 		return
 	}
-	_ = s.st.Audit(ctx, actorID, action, target, string(encoded))
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		log.Printf("audit detail encode failed action=%q target=%q: %v", action, target, err)
+		return
+	}
+	if err := s.st.Audit(ctx, actorID, action, target, string(encoded)); err != nil {
+		log.Printf("audit write failed action=%q target=%q: %v", action, target, err)
+	}
 }
 
 func (s *Server) authenticateIntegration(w http.ResponseWriter, r *http.Request) (string, bool) {

@@ -3,6 +3,7 @@ package wsapi
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
@@ -35,9 +36,44 @@ func TestGuestAuthPasswordProbeRateLimit(t *testing.T) {
 	}
 }
 
+func TestGuestAuthNameValidation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		guest    string
+		wantType string
+		wantCode string
+	}{
+		{name: "70 bytes rejected", guest: strings.Repeat("a", 70), wantType: "error", wantCode: "bad_request"},
+		{name: "control character rejected", guest: "line\nbreak", wantType: "error", wantCode: "bad_request"},
+		{name: "64 bytes accepted", guest: strings.Repeat("a", 64), wantType: "auth.ok"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := dispatchGuestAuthName(t, auth.NewManager("", nil), test.guest, "", "198.51.100.8:6000")
+			if response["type"] != test.wantType {
+				t.Fatalf("response type = %v, want %s", response["type"], test.wantType)
+			}
+			if test.wantCode == "" {
+				return
+			}
+			data, ok := response["data"].(map[string]any)
+			if !ok {
+				t.Fatalf("response data = %#v", response["data"])
+			}
+			if data["code"] != test.wantCode {
+				t.Fatalf("response code = %v, want %s", data["code"], test.wantCode)
+			}
+		})
+	}
+}
+
 func dispatchGuestAuth(t *testing.T, authm *auth.Manager, password, remoteAddr string) map[string]any {
 	t.Helper()
-	payload, err := json.Marshal(map[string]string{"name": "visitor", "password": password})
+	return dispatchGuestAuthName(t, authm, "visitor", password, remoteAddr)
+}
+
+func dispatchGuestAuthName(t *testing.T, authm *auth.Manager, name, password, remoteAddr string) map[string]any {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{"name": name, "password": password})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -206,7 +206,9 @@ func setupPlaylistBindingEndpoints(t *testing.T) playlistBindingFixture {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	authm := auth.NewManager("", st)
+	// 认证走纯内存（nil store）：TestListPlaylistsHidesStoreError 关闭 st 后
+	// 认证仍通过，store 错误只影响查询路径。
+	authm := auth.NewManager("", nil)
 	adminToken := authm.IssueSession(auth.Identity{
 		ID: "playlist-admin", Name: "Admin", Kind: "password",
 		Roles: []string{auth.RoleMediaAdmin},
@@ -300,6 +302,27 @@ func bindTestPlaylist(t *testing.T, f playlistBindingFixture, remoteID string) s
 	return pl
 }
 
+func TestListPlaylistsHidesStoreError(t *testing.T) {
+	f := setupPlaylistBindingEndpoints(t)
+	if err := f.st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := playlistEndpointRequest(
+		t, f, http.MethodGet, "/api/v1/playlists", f.requesterToken, nil,
+	)
+	body := playlistResponse(t, rec)
+	if rec.Code != http.StatusInternalServerError || errCode(t, body) != "internal" {
+		t.Fatalf("status = %d, body = %v", rec.Code, body)
+	}
+	if message := playlistErrorMessage(t, body); message != "internal error" {
+		t.Fatalf("internal error message = %q", message)
+	}
+	if strings.Contains(rec.Body.String(), "database is closed") {
+		t.Fatalf("response leaked store error: %s", rec.Body.String())
+	}
+}
+
 func TestBindPlaylistEndpoint(t *testing.T) {
 	f := setupPlaylistBindingEndpoints(t)
 	rec := playlistEndpointRequest(t, f, http.MethodPost, "/api/v1/playlists/bind",
@@ -356,7 +379,9 @@ func TestBindPlaylistEndpoint(t *testing.T) {
 	failed := playlistEndpointRequest(t, f, http.MethodPost, "/api/v1/playlists/bind",
 		f.adminToken, map[string]string{"provider": f.failing.ID(), "playlist_id": "remote-bad"})
 	failedBody := playlistResponse(t, failed)
-	if failed.Code != http.StatusBadGateway || errCode(t, failedBody) != "provider_error" {
+	if failed.Code != http.StatusBadGateway || errCode(t, failedBody) != "provider_error" ||
+		playlistErrorMessage(t, failedBody) != "provider request failed" ||
+		strings.Contains(failed.Body.String(), f.failing.importErr.Error()) {
 		t.Fatalf("failed bind status = %d, body = %v", failed.Code, failedBody)
 	}
 	_, found, err = f.st.GetPlaylistByBinding(context.Background(), f.failing.ID(), "remote-bad")
@@ -403,7 +428,9 @@ func TestSyncPlaylistEndpoint(t *testing.T) {
 	failed := playlistEndpointRequest(t, f, http.MethodPost,
 		"/api/v1/playlists/"+pl.ID+"/sync", f.adminToken, nil)
 	failedBody := playlistResponse(t, failed)
-	if failed.Code != http.StatusBadGateway || errCode(t, failedBody) != "provider_error" {
+	if failed.Code != http.StatusBadGateway || errCode(t, failedBody) != "provider_error" ||
+		playlistErrorMessage(t, failedBody) != "provider request failed" ||
+		strings.Contains(failed.Body.String(), f.importer.importErr.Error()) {
 		t.Fatalf("failed sync status = %d, body = %v", failed.Code, failedBody)
 	}
 

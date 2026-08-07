@@ -553,3 +553,181 @@ func TestSmokeEndToEnd(t *testing.T) {
 	}
 	fmt.Println("smoke test OK")
 }
+
+func TestAuditQueryAuthorizationFilteringAndPaging(t *testing.T) {
+	e := newEnv(t)
+	adminID, adminToken := e.guestAuth("audit-admin", "admin123")
+	_, listenerToken := e.guestAuth("audit-listener", "")
+
+	resp := e.get(listenerToken, "/api/v1/audit")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("listener audit query status = %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	ctx := context.Background()
+	for _, event := range []struct {
+		actor, action, target, detail string
+	}{
+		{adminID, "audit.filter.match", "room-a", `{"result":"match"}`},
+		{adminID, "audit.filter.other", "room-a", `{"result":"wrong-action"}`},
+		{"other-actor", "audit.filter.match", "room-a", `{"result":"wrong-actor"}`},
+		{adminID, "audit.filter.match", "room-b", `{"result":"wrong-target"}`},
+	} {
+		if err := e.a.Store.Audit(ctx, event.actor, event.action, event.target, event.detail); err != nil {
+			t.Fatalf("seed audit event: %v", err)
+		}
+	}
+
+	type auditEntry struct {
+		ActorID string            `json:"actor_id"`
+		Action  string            `json:"action"`
+		Target  string            `json:"target"`
+		Detail  map[string]string `json:"detail"`
+	}
+	var filtered struct {
+		Entries []auditEntry `json:"entries"`
+		Limit   int          `json:"limit"`
+		Offset  int          `json:"offset"`
+	}
+	resp = e.get(adminToken, "/api/v1/audit?actor_id="+adminID+"&action=audit.filter.match&target=room-a")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin audit query status = %d, want 200", resp.StatusCode)
+	}
+	decode(t, resp, &filtered)
+	if len(filtered.Entries) != 1 {
+		t.Fatalf("filtered audit entries = %d, want 1", len(filtered.Entries))
+	}
+	entry := filtered.Entries[0]
+	if entry.ActorID != adminID || entry.Action != "audit.filter.match" || entry.Target != "room-a" ||
+		entry.Detail["result"] != "match" {
+		t.Fatalf("filtered audit entry = %#v", entry)
+	}
+	if filtered.Limit != 50 || filtered.Offset != 0 {
+		t.Fatalf("default audit paging = limit %d offset %d, want 50/0", filtered.Limit, filtered.Offset)
+	}
+
+	for i := range 205 {
+		if err := e.a.Store.Audit(ctx, adminID, "audit.paging", fmt.Sprintf("event-%03d", i), "{}"); err != nil {
+			t.Fatalf("seed paging audit event %d: %v", i, err)
+		}
+	}
+	var page struct {
+		Entries []auditEntry `json:"entries"`
+		Limit   int          `json:"limit"`
+		Offset  int          `json:"offset"`
+	}
+	resp = e.get(adminToken, "/api/v1/audit?action=audit.paging&limit=999")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("capped audit query status = %d, want 200", resp.StatusCode)
+	}
+	decode(t, resp, &page)
+	if page.Limit != 200 || len(page.Entries) != 200 {
+		t.Fatalf("capped audit page = limit %d entries %d, want 200/200", page.Limit, len(page.Entries))
+	}
+	if page.Entries[0].Target != "event-204" || page.Entries[199].Target != "event-005" {
+		t.Fatalf("newest-first audit page bounds = %q..%q, want event-204..event-005",
+			page.Entries[0].Target, page.Entries[199].Target)
+	}
+
+	resp = e.get(adminToken, "/api/v1/audit?action=audit.paging&limit=200&offset=200")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("offset audit query status = %d, want 200", resp.StatusCode)
+	}
+	page = struct {
+		Entries []auditEntry `json:"entries"`
+		Limit   int          `json:"limit"`
+		Offset  int          `json:"offset"`
+	}{}
+	decode(t, resp, &page)
+	if page.Offset != 200 || len(page.Entries) != 5 {
+		t.Fatalf("offset audit page = offset %d entries %d, want 200/5", page.Offset, len(page.Entries))
+	}
+	if page.Entries[0].Target != "event-004" || page.Entries[4].Target != "event-000" {
+		t.Fatalf("offset audit page bounds = %q..%q, want event-004..event-000",
+			page.Entries[0].Target, page.Entries[4].Target)
+	}
+}
+
+func TestFailedGuestLoginAuditing(t *testing.T) {
+	e := newEnv(t)
+	_, adminToken := e.guestAuth("audit-reader", "admin123")
+
+	resp := e.post("", "/api/v1/auth/guest", map[string]any{
+		"name": "password-probe", "password": "definitely-wrong",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("wrong admin password guest fallback status = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err := http.NewRequest(http.MethodPost, e.srv.URL+"/api/v1/auth/guest", strings.NewReader("{"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("invalid guest auth request: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid guest payload status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	var out struct {
+		Entries []struct {
+			Target string            `json:"target"`
+			Detail map[string]string `json:"detail"`
+		} `json:"entries"`
+	}
+	resp = e.get(adminToken, "/api/v1/audit?action=auth.login_failed&target=password-probe")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("failed-login audit query status = %d, want 200", resp.StatusCode)
+	}
+	decode(t, resp, &out)
+	if len(out.Entries) != 1 || out.Entries[0].Target != "password-probe" ||
+		out.Entries[0].Detail["reason"] != "invalid_admin_password" {
+		t.Fatalf("password-probe audit entries = %#v", out.Entries)
+	}
+
+	var invalidPayloadCount int
+	if err := e.a.Store.DB().QueryRow(
+		`SELECT COUNT(*) FROM audit_log WHERE action = 'auth.login_failed' AND json_extract(detail_json, '$.reason') = 'invalid_payload'`,
+	).Scan(&invalidPayloadCount); err != nil {
+		t.Fatalf("query invalid-payload audit: %v", err)
+	}
+	if invalidPayloadCount != 1 {
+		t.Fatalf("invalid-payload audit count = %d, want 1", invalidPayloadCount)
+	}
+}
+
+func TestRateLimitedGuestLoginRejectNotAudited(t *testing.T) {
+	e := newEnv(t)
+	for i := range 10 {
+		resp := e.post("", "/api/v1/auth/guest", map[string]any{
+			"name": "bounded-probe", "password": fmt.Sprintf("wrong-%d", i),
+		})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("password probe %d status = %d, want 200", i+1, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	resp := e.post("", "/api/v1/auth/guest", map[string]any{
+		"name": "bounded-probe", "password": "rate-limited",
+	})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited password probe status = %d, want 429", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	var count int
+	if err := e.a.Store.DB().QueryRow(
+		`SELECT COUNT(*) FROM audit_log WHERE action = 'auth.login_failed' AND target = 'bounded-probe'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query bounded probe audits: %v", err)
+	}
+	if count != 10 {
+		t.Fatalf("bounded probe audit count = %d, want 10 (rate-limited reject omitted)", count)
+	}
+}

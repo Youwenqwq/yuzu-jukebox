@@ -211,6 +211,17 @@ func TestServiceRoomSnapshotRedactsProtectedRoomStreamURL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("protect room: %v", err)
 	}
+	assertCanRead := func(label string, principal auth.Identity, want bool) {
+		t.Helper()
+		got, err := service.CanReadRoomScopedData(ctx, "room-a", principal)
+		if err != nil {
+			t.Fatalf("%s read admission: %v", label, err)
+		}
+		if got != want {
+			t.Fatalf("%s read admission = %v, want %v", label, got, want)
+		}
+	}
+	assertCanRead("protected guest", guest, false)
 
 	snapshot, err := service.RoomSnapshot(ctx, "room-a", guest)
 	if err != nil {
@@ -227,6 +238,7 @@ func TestServiceRoomSnapshotRedactsProtectedRoomStreamURL(t *testing.T) {
 	grants.grants[grantKey{
 		roomID: "room-a", principalID: controller.ID, capability: CapabilityController,
 	}] = true
+	assertCanRead("room controller", controller, true)
 	snapshot, err = service.RoomSnapshot(ctx, "room-a", controller)
 	if err != nil {
 		t.Fatal(err)
@@ -236,6 +248,7 @@ func TestServiceRoomSnapshotRedactsProtectedRoomStreamURL(t *testing.T) {
 	}
 
 	trustedOIDC := auth.Identity{ID: "staff-user", Kind: "oidc", Roles: []string{"staff"}}
+	assertCanRead("trusted role", trustedOIDC, true)
 	snapshot, err = service.RoomSnapshot(ctx, "room-a", trustedOIDC)
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +260,7 @@ func TestServiceRoomSnapshotRedactsProtectedRoomStreamURL(t *testing.T) {
 	if err := r.ApplyAccessConfig(room.AccessConfig{Mode: room.AccessModeOpen}); err != nil {
 		t.Fatalf("open room: %v", err)
 	}
+	assertCanRead("open guest", guest, true)
 	snapshot, err = service.RoomSnapshot(ctx, "room-a", guest)
 	if err != nil {
 		t.Fatal(err)

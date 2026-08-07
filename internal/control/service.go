@@ -110,6 +110,34 @@ func (s *Service) RoomCapabilities(ctx context.Context, roomID string, principal
 	return capabilities, nil
 }
 
+// CanReadRoomScopedData reports whether the caller may read data whose
+// contents are scoped to a room. Open rooms are readable by any authenticated
+// caller; protected rooms require the same identity bypass used by room.join.
+func (s *Service) CanReadRoomScopedData(ctx context.Context, roomID string, principal auth.Identity) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	r, err := s.GetRoom(roomID)
+	if err != nil {
+		return false, err
+	}
+	return s.canReadRoomScopedData(ctx, roomID, principal, r)
+}
+
+func (s *Service) canReadRoomScopedData(
+	ctx context.Context,
+	roomID string,
+	principal auth.Identity,
+	r *room.Room,
+) (bool, error) {
+	access := r.AccessConfig()
+	protected := access.Mode != room.AccessModeOpen || access.PasswordHash != ""
+	if !protected {
+		return true, nil
+	}
+	return s.authorizer.BypassesRoomCredential(ctx, roomID, principal, access.TrustedRoles)
+}
+
 // RoomSnapshot returns a complete, identity-specific state projection without
 // joining the caller to the room listener set. Protected rooms expose a stream
 // URL only to identities that bypass the room credential during room.join.
@@ -121,16 +149,11 @@ func (s *Service) RoomSnapshot(ctx context.Context, roomID string, principal aut
 	if err != nil {
 		return room.Snapshot{}, err
 	}
-	access := r.AccessConfig()
-	protected := access.Mode != room.AccessModeOpen || access.PasswordHash != ""
-	if !protected {
-		return r.Snapshot(principal)
-	}
-	bypass, err := s.authorizer.BypassesRoomCredential(ctx, roomID, principal, access.TrustedRoles)
+	canRead, err := s.canReadRoomScopedData(ctx, roomID, principal, r)
 	if err != nil {
 		return room.Snapshot{}, err
 	}
-	if bypass {
+	if canRead {
 		return r.Snapshot(principal)
 	}
 	snapshot, err := r.SnapshotWithoutStreamURL(principal)
