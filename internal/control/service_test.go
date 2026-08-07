@@ -83,7 +83,8 @@ func (*staticProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provi
 	}, nil
 }
 func (*staticProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
-	return provider.StreamLocator{}, errors.New("not needed in control test")
+	// 预检要求当前曲目可播；control 测试不真正拉流。
+	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
 }
 
 type staticTrackSource struct{}

@@ -26,6 +26,20 @@ func (c *directoryClient) Interests() room.RoomInterest {
 	return room.InterestAll
 }
 
+// playableRoomTestProvider 让房间测试的虚构 ref 通过可播性预检。
+type playableRoomTestProvider struct{}
+
+func (*playableRoomTestProvider) ID() string { return "local" }
+func (*playableRoomTestProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
+	return nil, nil
+}
+func (*playableRoomTestProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
+	return provider.Track{Ref: ref, Title: ref.String()}, nil
+}
+func (*playableRoomTestProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
+}
+
 type roomsResponse struct {
 	Rooms []struct {
 		ID            string          `json:"id"`
@@ -59,6 +73,8 @@ func TestListRoomsIncludesLiveDirectorySummary(t *testing.T) {
 
 	authm := auth.NewManager("test", st)
 	reg := provider.NewRegistry()
+	// 预检会对当前曲目调 Resolve；注册可播 fake 防虚构 ref 被自动跳过。
+	reg.Register(&playableRoomTestProvider{})
 	roomCache := cache.New(filepath.Join(dir, "cache"), 1<<30, st, reg)
 	rooms := room.NewManager(ctx, st, authm, roomCache, reg, nil)
 	for i, row := range []store.Room{

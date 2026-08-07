@@ -160,6 +160,7 @@ const (
 	actSeek
 	actSkip
 	actTimerEnd
+	actUnplayable // 预检失败：当前曲目无可播地址，自动跳过
 	actRadioPlay
 	actRadioStop
 	actSetPolicy
@@ -178,6 +179,7 @@ type action struct {
 	toIndex   int
 	posMs     int64
 	timerID   uint64
+	ref       string // actUnplayable：预检失败的 track_ref
 	// radio
 	source        string
 	shuffle       bool
@@ -836,6 +838,9 @@ func (r *Room) Run(ctx context.Context) {
 				log.Printf("room %s: persist radio refill: %v", r.ID, err)
 			}
 		}
+		// 当前曲目就位：异步预检可播性（已缓存直接放行；Resolve 失败——
+		// 如 qq 无凭据的 104003——回报 actor 自动跳过，不卡到时长耗尽）。
+		go r.preflightCurrent(provider.TrackRef(next.TrackRef))
 		// queue 此刻已不含当前曲目，队首就是下一首：提前把它拉进本地缓存。
 		if len(queue) > 0 {
 			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
@@ -854,6 +859,7 @@ func (r *Room) Run(ctx context.Context) {
 		playback = &Playback{
 			Current: resumed, PositionMs: -policy.startLeadMs(), UpdatedAt: now, Playing: true, Rate: 1.0,
 		}
+		go r.preflightCurrent(provider.TrackRef(resumed.TrackRef))
 		go r.cache.Prefetch(provider.TrackRef(resumed.TrackRef))
 		if len(queue) > 0 {
 			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
@@ -1070,6 +1076,20 @@ func (r *Room) Run(ctx context.Context) {
 					log.Printf("room %s: timer advance: %v", r.ID, err)
 				}
 
+			case actUnplayable:
+				// 预检失败：仅当该 ref 仍是当前曲目时跳过（竞态防护）。
+				// a.result 可空（preflight goroutine 投递路径），nil 检查防阻塞。
+				var skipErr error
+				if playback != nil && playback.Current != nil && playback.Current.TrackRef == a.ref {
+					skipErr = advance("unplayable")
+					if skipErr != nil {
+						log.Printf("room %s: unplayable advance: %v", r.ID, skipErr)
+					}
+				}
+				if a.result != nil {
+					a.result <- skipErr
+				}
+
 			case actRadioPlay:
 				sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 				src, err := NewSourceFromSpec(sctx, a.source, r.st, r.reg, a.shuffle, a.once)
@@ -1143,6 +1163,44 @@ func (r *Room) Run(ctx context.Context) {
 func (r *Room) streamURL(id auth.Identity, trackRef string) string {
 	ticket := r.authm.IssueTicket(id.ID, trackRef)
 	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + ticket
+}
+
+// preflightCurrent 对刚就位的当前曲目做可播性预检：已缓存直接放行；
+// provider Resolve 失败（源无效，如 qq 无凭据的 104003、local 文件缺失）
+// 时回报 actor 自动跳过——否则房间会卡在无效曲目上直到时长耗尽。
+// 竞态防护：回报携带 ref，actor 只跳过仍匹配当前曲目的情况
+// （用户预检期间手动切走则不误伤新曲目）。
+func (r *Room) preflightCurrent(ref provider.TrackRef) {
+	if r.cache == nil {
+		return
+	}
+	if r.cache.Lookup(context.Background(), ref) != "" {
+		return // 已缓存，直接可播
+	}
+	pid, _, err := ref.Split()
+	if err != nil {
+		r.reportUnplayable(ref)
+		return
+	}
+	p, ok := r.reg.Get(pid)
+	if !ok {
+		r.reportUnplayable(ref)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := p.Resolve(ctx, ref); err != nil {
+		log.Printf("room %s: current %s unplayable: %v", r.ID, ref, err)
+		r.reportUnplayable(ref)
+	}
+}
+
+// reportUnplayable 把预检失败送回 actor（房间关闭时不阻塞）。
+func (r *Room) reportUnplayable(ref provider.TrackRef) {
+	select {
+	case r.inbound <- action{kind: actUnplayable, ref: ref.String()}:
+	case <-r.done:
+	}
 }
 
 // loadQueue 读取持久队列，并按 current_entry_id 把当前曲目从待播队列中切分出来。

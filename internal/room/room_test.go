@@ -26,6 +26,9 @@ func newTestRoom(t *testing.T, policyRaw string) (*Room, *store.Store) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	reg := provider.NewRegistry()
+	// 预检会对当前曲目调 Resolve；注册一个始终可播的 fake，
+	// 否则队列里的虚构 ref 会被自动跳过。
+	reg.Register(&playableTestProvider{})
 	authm := auth.NewManager("pw", st)
 	c := cache.New(filepath.Join(dir, "cache"), 1<<30, st, reg)
 	r := New("r1", "room", "", policyRaw, st, authm, c, reg)
@@ -36,6 +39,22 @@ func newTestRoom(t *testing.T, policyRaw string) (*Room, *store.Store) {
 		st.Close()
 	})
 	return r, st
+}
+
+// playableTestProvider 是 newTestRoom 的通用可播 fake（ID "local"，
+// 匹配 mkEntry 的 "local:tN" ref）。Resolve 恒成功，预检不会跳过曲目。
+type playableTestProvider struct{}
+
+func (*playableTestProvider) ID() string { return "local" }
+func (*playableTestProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
+	return nil, nil
+}
+func (*playableTestProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
+	return provider.Track{Ref: ref, Title: ref.String()}, nil
+}
+func (*playableTestProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	// 测试不真正拉流；file:// 短路路径在 cache 里失败也静默。
+	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
 }
 
 var guest = auth.Identity{ID: "u1", Name: "u1", Kind: "guest", Roles: []string{"requester"}}
@@ -756,7 +775,8 @@ func (*recordingPlayProvider) GetTrack(_ context.Context, ref provider.TrackRef)
 	return provider.Track{Ref: ref}, nil
 }
 func (*recordingPlayProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
-	return provider.StreamLocator{}, errors.New("测试不需要解析播放地址")
+	// 预检要求当前曲目可播；测试只关心 scrobble 上报路径。
+	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
 }
 func (p *recordingPlayProvider) ReportPlay(_ context.Context, id string, playedMs, totalMs int64) error {
 	p.calls <- playReportCall{id: id, playedMs: playedMs, totalMs: totalMs}
@@ -773,7 +793,7 @@ func (*nonReportingProvider) GetTrack(_ context.Context, ref provider.TrackRef) 
 	return provider.Track{Ref: ref}, nil
 }
 func (*nonReportingProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
-	return provider.StreamLocator{}, errors.New("测试不需要解析播放地址")
+	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
 }
 
 // TestFinishCurrentScrobble 验证播放结束上报只对凭据所有者和达到阈值的曲目触发。
