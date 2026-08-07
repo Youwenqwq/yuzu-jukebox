@@ -48,6 +48,8 @@ type Config struct {
 	NCM NCMConfig `json:"ncm"`
 	// Bili Provider（bilibili-api sidecar 实例）
 	Bili BiliConfig `json:"bili"`
+	// QQ Provider（QQMusicApi sidecar 实例）
+	QQ QQConfig `json:"qq"`
 }
 
 type OIDCConfig struct {
@@ -74,6 +76,14 @@ type BiliConfig struct {
 	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3002
 }
 
+type QQConfig struct {
+	Enabled bool   `json:"enabled"`
+	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:8080
+	// 音质档位（明文格式，0-16）。12=MP3_320 13=MP3_128 14=ACC_192 7=FLAC；
+	// 17+ 为加密格式（需 ekey 解密），播放器无法拉流，拒绝配置。默认 12。
+	FileType int `json:"file_type"`
+}
+
 func Default() Config {
 	return Config{
 		Addr:                        ":8080",
@@ -96,6 +106,11 @@ func Default() Config {
 		Bili: BiliConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3002",
+		},
+		QQ: QQConfig{
+			Enabled:  false,
+			BaseURL:  "http://127.0.0.1:8080",
+			FileType: 12,
 		},
 	}
 }

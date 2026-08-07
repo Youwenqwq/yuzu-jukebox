@@ -728,10 +728,18 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		SearchCategories []provider.SearchCategory `json:"search_categories,omitempty"`
 		EntityAlbums     bool                      `json:"entity_albums,omitempty"`
 	}
+	// account 是凭据账号快照（昵称/头像，登录时写入）。
+	// 只对凭据所有者可见（per-principal），不含 UID——客户端无消费方，
+	// 最小暴露；uid 泄漏等于暴露服务器登录的是哪个平台账号。
+	type accountInfo struct {
+		Name   string `json:"name,omitempty"`
+		Avatar string `json:"avatar,omitempty"`
+	}
 	type info struct {
 		ID               string        `json:"id"`
 		CredentialStatus string        `json:"credential_status,omitempty"` // 仅 CredentialAware provider 有此字段
 		Owned            bool          `json:"owned"`                       // 按当前用户逐请求计算，绝不能跨用户缓存
+		Account          *accountInfo  `json:"account,omitempty"`           // 仅凭据所有者可见
 		Capabilities     *capabilities `json:"capabilities,omitempty"`
 	}
 	out := []info{}
@@ -742,8 +750,11 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 				entry.CredentialStatus = status
 			}
 		}
-		if owner, exists, err := s.st.GetCredentialOwner(r.Context(), p.ID()); err == nil {
-			entry.Owned = exists && owner.PrincipalID == identity.ID
+		if owner, exists, err := s.st.GetCredentialOwner(r.Context(), p.ID()); err == nil && exists {
+			entry.Owned = owner.PrincipalID == identity.ID
+			if entry.Owned && (owner.Account.Name != "" || owner.Account.Avatar != "") {
+				entry.Account = &accountInfo{Name: owner.Account.Name, Avatar: owner.Account.Avatar}
+			}
 		}
 		var accountWrite []string
 		if _, ok := p.(provider.PlayReporter); ok {

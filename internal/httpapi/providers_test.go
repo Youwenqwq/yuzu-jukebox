@@ -486,6 +486,10 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if owned, ok := writer["owned"].(bool); !ok || owned != writerOwned {
 			t.Fatalf("writer owned = %#v, want %v", writer["owned"], writerOwned)
 		}
+		// 快照未设置：任何用户都不应看到 account 块
+		if _, ok := writer["account"]; ok {
+			t.Fatalf("writer account present without snapshot: %#v", writer["account"])
+		}
 		capabilities, ok := writer["capabilities"].(map[string]any)
 		if !ok {
 			t.Fatalf("writer capabilities = %#v", writer["capabilities"])
@@ -551,6 +555,82 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 	})
 	t.Run("other principal", func(t *testing.T) {
 		assertList(t, f.otherToken, false)
+	})
+
+	t.Run("account snapshot is owner-only and uid-free", func(t *testing.T) {
+		ctx := context.Background()
+		if err := f.st.SetCredentialAccount(ctx, f.writer.ID(), store.AccountProfile{
+			UID: "9988", Name: "小明", Avatar: "https://av/1",
+		}); err != nil {
+			t.Fatalf("SetCredentialAccount: %v", err)
+		}
+
+		owner := providerEndpointRequest(t, f, http.MethodGet, "/api/v1/providers", f.ownerToken, nil)
+		if owner.Code != http.StatusOK {
+			t.Fatalf("owner list status = %d", owner.Code)
+		}
+		var ownerBody struct {
+			Providers []map[string]any `json:"providers"`
+		}
+		if err := json.Unmarshal(owner.Body.Bytes(), &ownerBody); err != nil {
+			t.Fatal(err)
+		}
+		var ownerEntry map[string]any
+		for _, entry := range ownerBody.Providers {
+			if entry["id"] == "writer" {
+				ownerEntry = entry
+			}
+		}
+		account, ok := ownerEntry["account"].(map[string]any)
+		if !ok {
+			t.Fatalf("owner writer account = %#v, want snapshot", ownerEntry["account"])
+		}
+		if account["name"] != "小明" || account["avatar"] != "https://av/1" {
+			t.Fatalf("owner account = %#v, want name+avatar", account)
+		}
+		if _, leaked := account["uid"]; leaked {
+			t.Fatalf("account leaks uid: %#v", account)
+		}
+		if strings.Contains(owner.Body.String(), "9988") {
+			t.Fatalf("response leaks uid 9988: %s", owner.Body.String())
+		}
+
+		// 非所有者看不到 account 块
+		other := providerEndpointRequest(t, f, http.MethodGet, "/api/v1/providers", f.otherToken, nil)
+		var otherBody struct {
+			Providers []map[string]any `json:"providers"`
+		}
+		if err := json.Unmarshal(other.Body.Bytes(), &otherBody); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range otherBody.Providers {
+			if entry["id"] == "writer" {
+				if _, ok := entry["account"]; ok {
+					t.Fatalf("non-owner sees writer account: %#v", entry["account"])
+				}
+			}
+		}
+	})
+
+	t.Run("empty snapshot omits account block", func(t *testing.T) {
+		ctx := context.Background()
+		if err := f.st.SetCredentialAccount(ctx, f.writer.ID(), store.AccountProfile{UID: "9988"}); err != nil {
+			t.Fatalf("SetCredentialAccount: %v", err)
+		}
+		rec := providerEndpointRequest(t, f, http.MethodGet, "/api/v1/providers", f.ownerToken, nil)
+		var body struct {
+			Providers []map[string]any `json:"providers"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range body.Providers {
+			if entry["id"] == "writer" {
+				if _, ok := entry["account"]; ok {
+					t.Fatalf("empty snapshot still emits account: %#v", entry["account"])
+				}
+			}
+		}
 	})
 }
 

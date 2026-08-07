@@ -129,11 +129,17 @@ ws := wsapi.NewServer(authm, playerAuth, controlService, playerBindings)
   "bili": {
     "enabled": true,
     "base_url": "http://127.0.0.1:3002"
+  },
+  "qq": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:8080",
+    "file_type": 12
   }
 }
 ```
 
 All fields optional if not needed. `secret_key` auto-generated on first run.
+`qq.file_type`: 明文音质档位 0-16（12=MP3_320 默认 / 13=MP3_128 / 14=AAC_192 / 7=FLAC）；17+ 为加密格式，播放器无法解码。
 
 ## Database
 
@@ -162,6 +168,7 @@ go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone   # optional: EdgeOne media offl
 
 - **NCM provider**: requires [NeteaseCloudMusicApi](http://127.0.0.1:3000) running (config `ncm.enabled` + `ncm.base_url`)
 - **Bili provider**: requires [bilibili-api](http://127.0.0.1:3002) sidecar (config `bili.enabled` + `bili.base_url`)
+- **QQ provider**: requires [QQMusicApi](http://127.0.0.1:8080) web sidecar (config `qq.enabled` + `qq.base_url`; run `uv sync --group web --no-dev && uv run --no-sync web/run.py` in the QQMusicApi repo). Sidecar defaults: `security.enabled=true` with IP-based rate limit 60/min/IP — whitelist the yuzu host via `rate_limit_exempt_ips` in its `config.toml` (or rely on yuzu's audio cache dedup, which resolves each track once).
 
 ## Roles
 
@@ -195,14 +202,14 @@ Still planned:
 - **`position_ms` can be negative**: on track switch the room schedules position 0 at `updated_at + start_lead_ms` (room policy `start_lead_ms`, default 600ms) so clients can load and all start on time without losing the head of the track. A negative computed `should_be` means "starts in |x| ms" — clients load-and-pause, skip drift correction, and clamp to 0 when rendering. See `docs/spec-v1.md` §2.2
 - **Room actor**: per-room goroutine. Queue entries persisted in SQLite. Radio mode state is runtime-only (lost on restart)
 - **Current track stays in the queue**: `room_queue` holds the playing entry plus everything upcoming; `is_current` marks the cursor. The wire format is unchanged — `queue.snapshot`/`queue.patch` still carry upcoming entries only, and the playing entry is delivered via `playback.changed`. Persisting it means the playing track is queryable in SQL (acceleration pins the object being streamed) and a restart resumes that track instead of skipping to the next one. `position_ms` is still runtime-only, so resume starts from the head
-- **TrackRef format**: `provider:id` — opaque string below the API layer (e.g. `ncm:347230`, `bili:BV1xx`, `local:<uuid>`)
+- **TrackRef format**: `provider:id` — opaque string below the API layer (e.g. `ncm:347230`, `bili:BV1xx`, `qq:<song mid>`, `local:<uuid>`)
 - **All timestamps**: Unix milliseconds (UTC)
 
 ### Provider Credential Ownership
 - **Singleton owner**: a provider credential is server-wide; every human-driven credential write (direct set or successful QR login) re-binds it to the writing Principal. Credential monitoring and row rotation preserve the owner/account binding.
 - **Whitelisted writes only**: interactive like/playlist-add requests require the acting Principal to equal the credential owner; automatic play reporting instead requires the track's requester to be that owner. These are the complete whitelist—never expose a generic NCM endpoint/cookie proxy; the cookie stays server-side.
 - **Scrobble rule**: report only tracks personally requested by the owner, after `played_ms >= min(total_ms/2, 240000)`; unknown duration uses 240000 ms. Reporting is fire-and-forget, audited, and never blocks playback.
-- **Per-principal discovery**: `owned` in `GET /api/v1/providers` is computed for the requesting Principal and must never be cached across users.
+- **Per-principal discovery**: `owned` in `GET /api/v1/providers` is computed for the requesting Principal and must never be cached across users. The `account` block (`name`/`avatar`, from the credential row's `account_*` snapshot) is emitted **only to the credential owner** and deliberately excludes the platform UID — the client has no consumer for it, and leaking it would reveal which external account the server is logged in as. Empty snapshots (no name/avatar) omit the block.
 
 ### Roaming Experience Backend (WebUI home feed)
 - **Radio authorization is policy-driven**: room policy `radio_control` (`"controller"` default | `"requester"`) widens `radio.play`/`radio.stop` beyond controllers; REST and WS share the single path in `control.Service.radioRoom`. Clients gate the radio button on `GET /api/v1/rooms/{id}/capabilities` → `radio`, never on local role guesses.
@@ -215,6 +222,11 @@ Still planned:
 - **Two-level model**: category search returns discriminated `SearchResult` entities (song wraps a queueable `track`; artist/album/playlist carry `entity_id`); drill = `GET /api/v1/search/entity` (artist/album only). All search/drill endpoints take `limit` (default 30, max 100) + `offset` — upstream-paged where available (ncm `/search`, `/artist/album`; bili `/search`, `/space/videos`, sidecar `/search/up?pn=`), locally sliced `[offset:offset+limit]` where not (ncm artist/top/song, `/album`). Artist→albums drill = `?into=albums` (returns album entities, drillable again to tracks — endpoint stays normalized); capability via `capabilities.entity_albums` (`provider.EntityAlbumLister`), bili does not implement it. Playlist entities have three paths by role: media_admin imports/binds them; any radio-allowed caller plays them as `ncm:playlist:<id>` / `bili:fav:<media_id>` sources; small entities can be looped into `queue.add` client-side.
 - **Legacy path is frozen**: `/api/v1/search` without `category` (or `category=song`) keeps the exact `{"tracks":[...]}` contract — app_test.go pins it.
 - **Bili sidecar contract**: `/search/up`, `/space/videos`, `/fav/resource/list`, `/fav/folders` live in the bilibili-api sidecar (WBI signing there); yuzu parses snake_case fields, normalizes protocol-relative covers, and requires a login cookie for favorites import. The sidecar has no folder-cover endpoint yet — bili `ImportPlaylist` returns an empty coverURL (a `/fav/folder/info` sidecar endpoint would close the gap).
+- **QQ sidecar contract**: QQMusicApi's web layer wraps every response in `{code:0,msg,data}`; success payloads serialize with pydantic field names (snake_case) — except `Credential`, which serializes six fields with their aliases (`musickeyCreateTime`, `keyExpiresIn`, `bindAccountType`, `needRefreshKeyIn`, `encryptUin`, `loginType`) because the app does not set `response_model_by_alias=false`. The `qq` provider normalizes these at parse time (`qqCredential.UnmarshalJSON` camel→snake) and sends credentials back as cookies (`musicid`+`musickey` pair, snake_case names, exactly what sidecar `auth.py` reads). TrackRef = `qq:<mid>` (song mid, stable across search/detail/lyric/url); account writes need the numeric id, re-read via detail.
+- **QQ anonymous playback is blocked**: the sidecar returns `result=104003` (无权限) for ANY unauthenticated stream request — QQ Music has no guest tier. `Resolve` tries the configured tier then MP3_320→MP3_128 and errors with the standard "可能需要登录或会员" message when all fail. Search/detail/lyrics/covers work anonymously. This is a real behavioral difference from ncm (which serves low quality anonymously).
+- **QQ quality tiers**: `file_type` integers 0–16 are plain formats (12=MP3_320 default, 13=MP3_128, 14=AAC_192, 7=FLAC); 17+ are encrypted (need `ekey` decryption, unusable by players) — `qq.New` clamps out-of-range to the default and `Resolve`'s fallback chain only walks plain tiers. Stream URLs are CDN host + relative `purl`; the host comes from `/song/get_cdn_dispatch` `sip[]` (30-min cached, `https://isure.stream.qqmusic.qq.com` fallback), and `expiration` seconds maps to `StreamLocator.ExpiresAt`.
+- **QQ credential validation is asymmetric**: sidecar `check_expired` and `get_vip_info` both accept garbage musickey (return null/zeros), only `refresh_credential` discriminates (401 on invalid) — but it rotates the key. `SetCredential` therefore refreshes-and-stores when the credential carries `refresh_token`/`refresh_key` (QR logins always do), and falls back to structural validation (musicid+musickey present) for minimal admin-pasted cookies. `CredentialStatus` does a local expiry check via `musickey_create_time`+`key_expires_in` before attempting refresh. QR login content is a `data:image/png;base64,...` URL (not scannable text like ncm/bili) — clients must render it as an image.
+- **QQ account ops**: `AccountPlaylist.ID` is a composite `"tid:dirid"` (QQ's add_songs needs both the diss TID and folder dirid; dirid 201 is the fixed "我喜欢" list used by Like). `LikeCheck` pulls the full fav list (`/user/{euin}/fav/songs`, paged) since QQ has no per-song like-state endpoint. No `PlayReporter` — QQ Music exposes no scrobble endpoint, so the provider intentionally doesn't implement it (capability simply absent, room treats it as no-op).
 - **Playlist covers**: `playlists.cover_url` stores the FINAL proxy path, never a raw source URL — uploaded covers become `/api/v1/cover/playlist/{id}` (+ `cover_path` on disk), external bound covers are HMAC-minted `/api/v1/cover/ext/<token>` at sync time (survives detach; empty provider covers preserve the previous one). Upload on a bound playlist is 409. `coverurl.Signer` is the single mint/verify implementation shared by httpapi and plsync.
 
 ### Provider-Bound Playlists

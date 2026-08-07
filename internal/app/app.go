@@ -25,6 +25,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/bili"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/ncm"
+	"github.com/youwenqwq/yuzu-jukebox/internal/provider/qq"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
@@ -67,6 +68,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 	if cfg.Bili.Enabled {
 		reg.Register(bili.New(cfg.Bili.BaseURL, st))
+	}
+	if cfg.QQ.Enabled {
+		reg.Register(qq.New(cfg.QQ.BaseURL, cfg.QQ.FileType, st))
 	}
 
 	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, st, reg)
