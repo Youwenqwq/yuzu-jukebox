@@ -121,7 +121,7 @@ func TestRadioSources(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
 	got := testProvider(server, "").RadioSources()
-	want := []provider.RadioSource{{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true}}
+	want := []provider.RadioSource{{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true, RequiresCredential: true}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RadioSources() = %+v, want %+v", got, want)
 	}

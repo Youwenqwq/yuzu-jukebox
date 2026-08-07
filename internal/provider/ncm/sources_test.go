@@ -22,22 +22,22 @@ func TestRadioSources(t *testing.T) {
 	}{
 		{
 			name:   "daily",
-			want:   provider.RadioSource{Spec: "daily", Name: "每日推荐", Finite: true},
+			want:   provider.RadioSource{Spec: "daily", Name: "每日推荐", Finite: true, RequiresCredential: true},
 			source: &dailySource{p: p},
 		},
 		{
 			name:   "fm",
-			want:   provider.RadioSource{Spec: "fm", Name: "私人 FM", Finite: false},
+			want:   provider.RadioSource{Spec: "fm", Name: "私人 FM", Finite: false, RequiresCredential: true},
 			source: &fmSource{p: p},
 		},
 		{
 			name:   "simi",
-			want:   provider.RadioSource{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false},
+			want:   provider.RadioSource{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false, RequiresCredential: true},
 			source: &chainedSource{p: p, kind: "simi"},
 		},
 		{
 			name:   "heart",
-			want:   provider.RadioSource{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false},
+			want:   provider.RadioSource{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false, RequiresCredential: true},
 			source: &chainedSource{p: p, kind: "heart"},
 		},
 		{
@@ -58,6 +58,62 @@ func TestRadioSources(t *testing.T) {
 				t.Fatalf("catalog Finite = %v, source Finite() = %v", got[i].Finite, tt.source.Finite())
 			}
 		})
+	}
+}
+
+func TestSimilarQueriesOnceAndLimits(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/simi/song" {
+			t.Errorf("path = %q, want /simi/song", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("id"); got != "347230" {
+			t.Errorf("id = %q, want 347230", got)
+		}
+		if got := r.URL.Query().Get("cookie"); got != "MUSIC_U=test" {
+			t.Errorf("cookie = %q, want MUSIC_U=test", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"songs":[
+			{"id":11,"name":"相似一","duration":111000,"album":{"name":"专辑一","picUrl":"https://cover/11"},"artists":[{"name":"甲"},{"name":"乙"}]},
+			{"id":12,"name":"相似二","duration":222000,"album":{"name":"专辑二","picUrl":"https://cover/12"},"artists":[{"name":"丙"}]}
+		]}`))
+	}))
+	defer server.Close()
+
+	p := &Provider{base: server.URL, client: server.Client()}
+	p.cookie.Store("MUSIC_U=test")
+	tracks, err := p.Similar(context.Background(), "347230", 1)
+	if err != nil {
+		t.Fatalf("Similar() error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("len(tracks) = %d, want 1", len(tracks))
+	}
+	want := provider.Track{
+		Ref:          "ncm:11",
+		Title:        "相似一",
+		Artist:       "甲/乙",
+		DurationMs:   111000,
+		Album:        "专辑一",
+		CoverURL:     "https://cover/11",
+		SourceURL:    "https://music.163.com/song?id=11",
+		Contributors: []provider.Contributor{{Role: "artist", Name: "甲"}, {Role: "artist", Name: "乙"}},
+	}
+	if !reflect.DeepEqual(tracks[0], want) {
+		t.Fatalf("track = %#v, want %#v", tracks[0], want)
+	}
+
+	p.cookie.Store("")
+	if _, err := p.Similar(context.Background(), "347230", 1); err == nil || !strings.Contains(err.Error(), "requires login") {
+		t.Fatalf("Similar() without credential error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("missing credential called upstream; requests = %d", requests)
 	}
 }
 

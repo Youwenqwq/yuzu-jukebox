@@ -55,9 +55,10 @@ func NewSourceFromSpec(ctx context.Context, spec string, st *store.Store, reg *p
 // 顺序模式：游标推进，循环回卷或 once 耗尽。
 // 随机模式：洗牌袋（全量索引打乱，耗尽重洗或 once 停止）。
 type playlistSource struct {
-	st   *store.Store
-	id   string
-	name string
+	st    *store.Store
+	id    string
+	name  string
+	total int
 
 	shuffle bool
 	once    bool
@@ -75,7 +76,7 @@ func newPlaylistSource(st *store.Store, id string, shuffle, once bool) (*playlis
 		return nil, fmt.Errorf("playlist not found: %s", id)
 	}
 	return &playlistSource{
-		st: st, id: id, name: pl.Name,
+		st: st, id: id, name: pl.Name, total: pl.TrackCount,
 		shuffle: shuffle, once: once,
 		rng: rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()>>32))),
 	}, nil
@@ -83,6 +84,7 @@ func newPlaylistSource(st *store.Store, id string, shuffle, once bool) (*playlis
 
 func (s *playlistSource) Description() string { return "歌单《" + s.name + "》" }
 func (s *playlistSource) Finite() bool        { return true }
+func (s *playlistSource) Total() (int, bool)  { return s.total, true }
 
 func (s *playlistSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef) ([]provider.Track, bool, error) {
 	pl, err := s.st.GetPlaylist(ctx, s.id)
@@ -90,6 +92,7 @@ func (s *playlistSource) NextBatch(ctx context.Context, n int, seed provider.Tra
 		return nil, false, fmt.Errorf("playlist %s: %w", s.id, err)
 	}
 	count := pl.TrackCount
+	s.total = count
 	if count == 0 {
 		return nil, true, nil
 	}

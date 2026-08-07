@@ -97,15 +97,17 @@ func (p *Provider) RadioSources() []provider.RadioSource {
 
 // topSource 分页游走榜单曲目。首请求记录 total_num，供耗尽判定。
 type topSource struct {
-	p       *Provider
-	id      string
-	page    int
-	fetched int
-	total   int
+	p          *Provider
+	id         string
+	page       int
+	fetched    int
+	total      int
+	totalKnown bool
 }
 
 func (s *topSource) Description() string { return "QQ 排行榜 " + s.id }
 func (s *topSource) Finite() bool        { return true }
+func (s *topSource) Total() (int, bool)  { return s.total, s.totalKnown }
 
 func (s *topSource) NextBatch(ctx context.Context, n int, _ provider.TrackRef) ([]provider.Track, bool, error) {
 	if n <= 0 {
@@ -119,7 +121,7 @@ func (s *topSource) NextBatch(ctx context.Context, n int, _ provider.TrackRef) (
 	var data struct {
 		Info struct {
 			Name     string `json:"name"`
-			TotalNum int    `json:"total_num"`
+			TotalNum *int   `json:"total_num"`
 		} `json:"info"`
 		Songs []qqSong `json:"songs"`
 	}
@@ -131,10 +133,11 @@ func (s *topSource) NextBatch(ctx context.Context, n int, _ provider.TrackRef) (
 		tracks = append(tracks, s.p.songTrack(song))
 	}
 	s.fetched += len(tracks)
-	if s.page == 1 && data.Info.TotalNum > 0 {
-		s.total = data.Info.TotalNum
+	if s.page == 1 && data.Info.TotalNum != nil {
+		s.total = *data.Info.TotalNum
+		s.totalKnown = true
 	}
-	exhausted := len(tracks) < n || (s.total > 0 && s.fetched >= s.total)
+	exhausted := len(tracks) < n || (s.totalKnown && s.fetched >= s.total)
 	return tracks, exhausted, nil
 }
 
@@ -147,15 +150,21 @@ type newsongSource struct {
 	mu     sync.Mutex
 	tracks []provider.Track
 	cursor int
+	loaded bool
 }
 
 func (s *newsongSource) Description() string { return "QQ 新歌推荐" }
 func (s *newsongSource) Finite() bool        { return true }
+func (s *newsongSource) Total() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tracks), s.loaded
+}
 
 func (s *newsongSource) NextBatch(ctx context.Context, n int, _ provider.TrackRef) ([]provider.Track, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.tracks) == 0 {
+	if !s.loaded {
 		var data struct {
 			Songs []qqSong `json:"songs"`
 		}
@@ -168,6 +177,7 @@ func (s *newsongSource) NextBatch(ctx context.Context, n int, _ provider.TrackRe
 				s.tracks = append(s.tracks, s.p.songTrack(song))
 			}
 		}
+		s.loaded = true
 	}
 	if s.cursor >= len(s.tracks) {
 		return nil, true, nil

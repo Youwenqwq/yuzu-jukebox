@@ -112,6 +112,13 @@ type EntityAlbumLister interface {
 	EntityAlbums(ctx context.Context, artistID string, limit, offset int) ([]SearchResult, error)
 }
 
+// SimilarQuerier 是可选接口：按 Provider 作用域内的裸曲目 ID
+// 一次性查询相似曲目。它不创建 TrackSource，也不维护链式源状态。
+type SimilarQuerier interface {
+	Provider
+	Similar(ctx context.Context, trackID string, limit int) ([]Track, error)
+}
+
 // LyricsProvider 是可选接口：能提供歌词的 Provider 实现它。
 // 不支持的 provider 直接不实现，调用方以类型断言探测。
 type LyricsProvider interface {
@@ -164,6 +171,12 @@ type TrackSource interface {
 	Finite() bool
 }
 
+// TrackSourceTotaler 是可选接口：有限源在已知总曲目数时实现它。
+// known=false 表示当前尚未知（例如首批上游请求前）；调用方不得猜测。
+type TrackSourceTotaler interface {
+	Total() (total int, known bool)
+}
+
 // SourceFactory 是可选接口：能充当曲目源工厂的 Provider 实现它。
 // spec 为 "<provider>:" 之后的部分（如 "daily" "fm" "simi:<id>"）。
 type SourceFactory interface {
@@ -173,10 +186,11 @@ type SourceFactory interface {
 
 // RadioSource 描述一个电台源规格的参数约束（spec 不含 provider 前缀）。
 type RadioSource struct {
-	Spec   string `json:"spec"`           // daily | fm | simi | heart
-	Arg    string `json:"arg,omitempty"`  // 参数语义，如 "track_id"；空 = 无参
-	Name   string `json:"name,omitempty"` // 展示名
-	Finite bool   `json:"finite"`         // 有限源才允许 shuffle/once
+	Spec               string `json:"spec"`                          // daily | fm | simi | heart
+	Arg                string `json:"arg,omitempty"`                 // 参数语义，如 "track_id"；空 = 无参
+	Name               string `json:"name,omitempty"`                // 展示名
+	Finite             bool   `json:"finite"`                        // 有限源才允许 shuffle/once
+	RequiresCredential bool   `json:"requires_credential,omitempty"` // true = 使用服务端配置凭据
 }
 
 // SourceCatalog 是可选接口：SourceFactory provider 实现它向客户端报告可用电台源。

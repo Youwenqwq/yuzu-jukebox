@@ -109,6 +109,86 @@ func (p *providerEntityAlbumListerFake) EntityAlbums(
 	return p.albums, nil
 }
 
+type providerRadioSimilarFake struct {
+	providerEndpointBase
+	sourceCalls  []string
+	lastSource   *providerFiniteSourceFake
+	similar      []provider.Track
+	similarErr   error
+	similarCalls [][2]any
+}
+
+func (p *providerRadioSimilarFake) RadioSources() []provider.RadioSource {
+	return []provider.RadioSource{
+		{Spec: "finite", Name: "有限测试源", Finite: true},
+		{Spec: "partial", Name: "未知总数源", Finite: true},
+		{Spec: "endless", Name: "无限测试源", Finite: false},
+		{Spec: "broken", Name: "凭据测试源", Finite: true, RequiresCredential: true},
+	}
+}
+
+func (p *providerRadioSimilarFake) NewSource(_ context.Context, spec string) (provider.TrackSource, error) {
+	p.sourceCalls = append(p.sourceCalls, spec)
+	if spec == "broken" {
+		return nil, errors.New("credential unavailable")
+	}
+	if spec != "finite" && spec != "partial" && spec != "endless" {
+		return nil, errors.New("unknown fake source")
+	}
+	source := &providerFiniteSourceFake{
+		tracks: []provider.Track{
+			{Ref: "radio:1", Title: "一", Artist: "甲", DurationMs: 1000, CoverURL: "https://cover/1"},
+			{Ref: "radio:2", Title: "二", Artist: "乙", DurationMs: 2000, CoverURL: "https://cover/2"},
+			{Ref: "radio:3", Title: "三", Artist: "丙", DurationMs: 3000, CoverURL: "https://cover/3"},
+			{Ref: "radio:4", Title: "四", Artist: "丁", DurationMs: 4000, CoverURL: "https://cover/4"},
+			{Ref: "radio:5", Title: "五", Artist: "戊", DurationMs: 5000, CoverURL: "https://cover/5"},
+		},
+		finite:     spec != "endless",
+		totalKnown: spec == "finite",
+	}
+	p.lastSource = source
+	return source, nil
+}
+
+func (p *providerRadioSimilarFake) Similar(_ context.Context, trackID string, limit int) ([]provider.Track, error) {
+	p.similarCalls = append(p.similarCalls, [2]any{trackID, limit})
+	if p.similarErr != nil {
+		return nil, p.similarErr
+	}
+	if len(p.similar) > limit {
+		return p.similar[:limit], nil
+	}
+	return p.similar, nil
+}
+
+type providerFiniteSourceFake struct {
+	tracks     []provider.Track
+	cursor     int
+	calls      int
+	finite     bool
+	totalKnown bool
+}
+
+func (s *providerFiniteSourceFake) Description() string { return "测试源" }
+func (s *providerFiniteSourceFake) Finite() bool        { return s.finite }
+func (s *providerFiniteSourceFake) Total() (int, bool)  { return len(s.tracks), s.totalKnown }
+
+func (s *providerFiniteSourceFake) NextBatch(
+	_ context.Context,
+	n int,
+	_ provider.TrackRef,
+) ([]provider.Track, bool, error) {
+	s.calls++
+	if s.cursor >= len(s.tracks) {
+		return nil, true, nil
+	}
+	n = min(n, 2)
+	end := min(s.cursor+n, len(s.tracks))
+	batch := s.tracks[s.cursor:end]
+	s.cursor = end
+	return batch, s.cursor >= len(s.tracks), nil
+}
+
 type providerAccountWriterFake struct {
 	providerEndpointBase
 	st                   *store.Store
@@ -172,6 +252,7 @@ type providerEndpointFixture struct {
 	otherToken string
 	category   *providerCategorySearcherFake
 	albums     *providerEntityAlbumListerFake
+	radio      *providerRadioSimilarFake
 }
 
 func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
@@ -236,10 +317,18 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 			CoverURL: "https://example.com/album.jpg",
 		}},
 	}
+	radio := &providerRadioSimilarFake{
+		providerEndpointBase: providerEndpointBase{id: "radio"},
+		similar: []provider.Track{{
+			Ref: "radio:similar-1", Title: "相似结果", Artist: "歌手",
+			DurationMs: 88000, CoverURL: "https://cover/similar",
+		}},
+	}
 	reg.Register(writer)
 	reg.Register(category)
 	reg.Register(albums)
 	reg.Register(&providerEndpointBase{id: "basic"})
+	reg.Register(radio)
 	reg.Register(ncm.New("http://127.0.0.1", "", st))
 	if err := st.UpsertCredential(context.Background(), writer.ID(), "credential", "ok"); err != nil {
 		t.Fatal(err)
@@ -255,7 +344,7 @@ func setupProviderEndpoints(t *testing.T) providerEndpointFixture {
 	}
 	s.SetCoverSecret([]byte("0123456789abcdef0123456789abcdef"))
 	return providerEndpointFixture{
-		handler: s.Handler(), st: st, writer: writer, category: category, albums: albums,
+		handler: s.Handler(), st: st, writer: writer, category: category, albums: albums, radio: radio,
 		ownerToken: ownerToken, otherToken: otherToken,
 	}
 }
@@ -506,6 +595,9 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		if _, ok := capabilities["entity_albums"]; ok {
 			t.Fatalf("writer provider advertises entity_albums: %#v", capabilities)
 		}
+		if _, ok := capabilities["similar"]; ok {
+			t.Fatalf("writer provider advertises similar: %#v", capabilities)
+		}
 
 		ncmEntry := entries["ncm"]
 		ncmCapabilities, ok := ncmEntry["capabilities"].(map[string]any)
@@ -516,14 +608,33 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 			t.Fatalf("ncm account_write = %#v", got)
 		}
 		wantRadioSources := []any{
-			map[string]any{"spec": "daily", "name": "每日推荐", "finite": true},
-			map[string]any{"spec": "fm", "name": "私人 FM", "finite": false},
-			map[string]any{"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false},
-			map[string]any{"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false},
+			map[string]any{"spec": "daily", "name": "每日推荐", "finite": true, "requires_credential": true},
+			map[string]any{"spec": "fm", "name": "私人 FM", "finite": false, "requires_credential": true},
+			map[string]any{"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false, "requires_credential": true},
+			map[string]any{"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false, "requires_credential": true},
 			map[string]any{"spec": "playlist", "arg": "playlist_id", "name": "歌单电台", "finite": true},
 		}
 		if got := ncmCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantRadioSources) {
 			t.Fatalf("ncm radio_sources = %#v, want %#v", got, wantRadioSources)
+		}
+		if got := ncmCapabilities["similar"]; got != true {
+			t.Fatalf("ncm similar = %#v, want true", got)
+		}
+		radioCapabilities, ok := entries["radio"]["capabilities"].(map[string]any)
+		if !ok {
+			t.Fatalf("radio capabilities = %#v", entries["radio"]["capabilities"])
+		}
+		if got := radioCapabilities["similar"]; got != true {
+			t.Fatalf("radio similar = %#v, want true", got)
+		}
+		wantFakeSources := []any{
+			map[string]any{"spec": "finite", "name": "有限测试源", "finite": true},
+			map[string]any{"spec": "partial", "name": "未知总数源", "finite": true},
+			map[string]any{"spec": "endless", "name": "无限测试源", "finite": false},
+			map[string]any{"spec": "broken", "name": "凭据测试源", "finite": true, "requires_credential": true},
+		}
+		if got := radioCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantFakeSources) {
+			t.Fatalf("radio_sources = %#v, want %#v", got, wantFakeSources)
 		}
 
 		categorized := entries["categorized"]
