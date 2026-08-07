@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -55,12 +54,12 @@ func TestDefaultMaxQueueIsEnforced(t *testing.T) {
 }
 
 type overproducingRadioSource struct {
-	limits []int
+	limits chan int
 	next   int
 }
 
 func (s *overproducingRadioSource) NextBatch(_ context.Context, limit int, _ provider.TrackRef) ([]provider.Track, bool, error) {
-	s.limits = append(s.limits, limit)
+	s.limits <- limit
 	tracks := make([]provider.Track, 10)
 	for i := range tracks {
 		s.next++
@@ -99,7 +98,7 @@ func TestRadioRefillHonorsMaxQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &overproducingRadioSource{}
+	source := &overproducingRadioSource{limits: make(chan int, 2)}
 	registry := provider.NewRegistry()
 	registry.Register(&cappedRadioProvider{source: source})
 	authm := auth.NewManager("", st)
@@ -115,14 +114,30 @@ func TestRadioRefillHonorsMaxQueue(t *testing.T) {
 	if err := r.PlayRadio("radio:test", false, false); err != nil {
 		t.Fatalf("PlayRadio: %v", err)
 	}
-	snapshot, err := r.Snapshot(auth.Identity{ID: "listener"})
-	if err != nil {
-		t.Fatal(err)
+	gotLimits := make([]int, 0, 2)
+	for len(gotLimits) < 2 {
+		select {
+		case limit := <-source.limits:
+			gotLimits = append(gotLimits, limit)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for radio refill %d", len(gotLimits)+1)
+		}
 	}
-	if got := len(snapshot.Queue); got != 2 {
-		t.Fatalf("radio pending queue length = %d, want max_queue 2", got)
+	deadline := time.Now().Add(time.Second)
+	for {
+		snapshot, err := r.Snapshot(auth.Identity{ID: "listener"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Queue) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("radio pending queue length = %d, want max_queue 2", len(snapshot.Queue))
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if want := []int{2, 1}; !slices.Equal(source.limits, want) {
-		t.Fatalf("radio source batch limits = %v, want %v", source.limits, want)
+	if want := []int{2, 1}; gotLimits[0] != want[0] || gotLimits[1] != want[1] {
+		t.Fatalf("radio source batch limits = %v, want %v", gotLimits, want)
 	}
 }

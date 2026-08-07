@@ -201,10 +201,36 @@ var (
 
 // radioState 电台模式状态（运行时，不落库）。
 type radioState struct {
-	src     provider.TrackSource
+	id          uint64
+	src         provider.TrackSource
+	spec        string
+	description string
+	finite      bool
+	shuffle     bool
+	once        bool
+}
+
+type radioSourceRequest struct {
+	id      uint64
 	spec    string
 	shuffle bool
 	once    bool
+	reply   chan error
+}
+
+type radioSourceResult struct {
+	request radioSourceRequest
+	src     provider.TrackSource
+	err     error
+}
+
+type radioRefillResult struct {
+	radioID   uint64
+	spec      string
+	limit     int
+	tracks    []provider.Track
+	exhausted bool
+	err       error
 }
 
 type Room struct {
@@ -414,6 +440,16 @@ func (r *Room) Run(ctx context.Context) {
 	var queueRevision uint64
 	var playback *Playback
 	var radio *radioState
+	sourceResults := make(chan radioSourceResult, 1)
+	refillResults := make(chan radioRefillResult, 1)
+	var sourceSeq uint64
+	var desiredSourceID uint64
+	var desiredSourceSpec string
+	var sourceInFlight bool
+	var queuedSource *radioSourceRequest
+	var refillInFlight bool
+	var refillPendingStart bool
+	var refillPendingReason string
 	clients := map[string]ClientConn{}
 	policy, err := ParsePolicy(r.policyRaw)
 	if err != nil {
@@ -607,7 +643,7 @@ func (r *Room) Run(ctx context.Context) {
 			return nil
 		}
 		return &RadioSnapshot{
-			Source: radio.spec, Description: radio.src.Description(), Finite: radio.src.Finite(),
+			Source: radio.spec, Description: radio.description, Finite: radio.finite,
 			Shuffle: radio.shuffle, Once: radio.once,
 		}
 	}
@@ -642,52 +678,58 @@ func (r *Room) Run(ctx context.Context) {
 		broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
 	}
 
-	// refill 电台补充：从源取一批曲目追加到队列，但绝不超过 max_queue。
-	// 源耗尽（once 语义）或出错时停止电台。
-	refill := func() error {
-		if radio == nil {
-			return nil
+	// Source construction and batch fetching can perform sidecar HTTP requests.
+	// Workers post back to buffered channels so the actor remains responsive.
+	startSourceConstruction := func(request radioSourceRequest) {
+		sourceInFlight = true
+		go func() {
+			sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			src, err := NewSourceFromSpec(sctx, request.spec, r.st, r.reg, request.shuffle, request.once)
+			cancel()
+			result := radioSourceResult{request: request, src: src, err: err}
+			select {
+			case sourceResults <- result:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	// refill schedules at most one fetch. pendingStart records that an advance
+	// found an empty queue; only the result handler may complete that advance.
+	refill := func(pendingStart bool, reason string) {
+		if pendingStart && !refillPendingStart {
+			refillPendingStart = true
+			refillPendingReason = reason
+		}
+		if radio == nil || refillInFlight {
+			return
 		}
 		batchSize := 10
 		if policy.MaxQueue > 0 {
 			batchSize = min(batchSize, policy.MaxQueue-len(queue))
 			if batchSize <= 0 {
-				return nil
+				return
 			}
 		}
 		seed := provider.TrackRef("")
 		if playback != nil && playback.Current != nil {
 			seed = provider.TrackRef(playback.Current.TrackRef)
 		}
-		bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		tracks, exhausted, err := radio.src.NextBatch(bctx, batchSize, seed)
-		cancel()
-		if err != nil {
-			log.Printf("[room %s] radio %s: %v (stopping)", r.ID, radio.spec, err)
-			stopRadio()
-			return nil
-		}
-		if len(tracks) > batchSize {
-			tracks = tracks[:batchSize]
-			exhausted = false
-		}
-		if len(tracks) > 0 {
-			entries := make([]QueueEntry, len(tracks))
-			for i, track := range tracks {
-				entries[i] = EntryFromTrack(track, "radio")
+		active := radio
+		refillInFlight = true
+		go func() {
+			bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			tracks, exhausted, err := active.src.NextBatch(bctx, batchSize, seed)
+			cancel()
+			result := radioRefillResult{
+				radioID: active.id, spec: active.spec, limit: batchSize,
+				tracks: tracks, exhausted: exhausted, err: err,
 			}
-			start := len(queue)
-			next := make([]QueueEntry, start+len(entries))
-			copy(next, queue)
-			copy(next[start:], entries)
-			if err := commitQueue(next, queueAddOps(entries, start)); err != nil {
-				return err
+			select {
+			case refillResults <- result:
+			case <-ctx.Done():
 			}
-		}
-		if exhausted {
-			stopRadio()
-		}
-		return nil
+		}()
 	}
 
 	// scheduleEnd 按剩余时长设置自然结束 timer
@@ -790,12 +832,7 @@ func (r *Room) Run(ctx context.Context) {
 	// 新曲目的 position 起于 -startLeadMs：房间时间线在曲间留出一段提前量，
 	// 客户端用它装载解码，到 position 0 时同时开声。没有这段窗口时，
 	// 客户端装载完成时房间已经走过几百毫秒，只能 seek 过去——头部固定丢失。
-	advance := func(reason string) error {
-		if len(queue) == 0 && radio != nil {
-			if err := refill(); err != nil {
-				return err
-			}
-		}
+	advanceReady := func(reason string) error {
 
 		now := nowMs()
 		if len(queue) == 0 {
@@ -862,9 +899,7 @@ func (r *Room) Run(ctx context.Context) {
 			playback.Current = &next
 		}
 		if radio != nil && len(queue) < 3 {
-			if err := refill(); err != nil {
-				log.Printf("room %s: persist radio refill: %v", r.ID, err)
-			}
+			refill(false, "")
 		}
 		// 当前曲目就位：异步预检可播性（已缓存直接放行；Resolve 失败——
 		// 如 qq 无凭据的 104003——回报 actor 自动跳过，不卡到时长耗尽）。
@@ -876,6 +911,29 @@ func (r *Room) Run(ctx context.Context) {
 		scheduleEnd()
 		broadcast(InterestPlayback, playbackMsg)
 		return nil
+	}
+
+	advance := func(reason string) error {
+		if refillPendingStart {
+			return nil
+		}
+		if len(queue) == 0 && radio != nil {
+			refill(true, reason)
+			return nil
+		}
+		return advanceReady(reason)
+	}
+
+	completePendingStart := func() {
+		if !refillPendingStart {
+			return
+		}
+		reason := refillPendingReason
+		refillPendingStart = false
+		refillPendingReason = ""
+		if err := advanceReady(reason); err != nil {
+			log.Printf("room %s: complete radio advance: %v", r.ID, err)
+		}
 	}
 
 	// 启动即恢复：重启后播放状态丢失，但当前曲目留在队列里（由 current_entry_id
@@ -904,6 +962,98 @@ func (r *Room) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case result := <-sourceResults:
+			if ctx.Err() != nil {
+				return
+			}
+			sourceInFlight = false
+			request := result.request
+			active := desiredSourceID == request.id && desiredSourceSpec == request.spec
+			switch {
+			case !active:
+				request.reply <- context.Canceled
+			case result.err != nil:
+				if radio == nil {
+					desiredSourceID = 0
+					desiredSourceSpec = ""
+				} else {
+					desiredSourceID = radio.id
+					desiredSourceSpec = radio.spec
+				}
+				request.reply <- result.err
+			default:
+				radio = &radioState{
+					id: request.id, src: result.src, spec: request.spec,
+					description: result.src.Description(), finite: result.src.Finite(),
+					shuffle: request.shuffle, once: request.once,
+				}
+				broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
+				if playback == nil || playback.Current == nil {
+					refill(true, "")
+				} else if len(queue) < 3 {
+					refill(false, "")
+				}
+				request.reply <- nil
+			}
+			if queuedSource != nil {
+				request := *queuedSource
+				queuedSource = nil
+				startSourceConstruction(request)
+			}
+
+		case result := <-refillResults:
+			if ctx.Err() != nil {
+				return
+			}
+			refillInFlight = false
+			if radio == nil || radio.id != result.radioID {
+				if radio == nil {
+					refillPendingStart = false
+					refillPendingReason = ""
+				} else if refillPendingStart || len(queue) < 3 {
+					refill(refillPendingStart, refillPendingReason)
+				}
+				break
+			}
+			if result.err != nil {
+				log.Printf("[room %s] radio %s: %v (stopping)", r.ID, result.spec, result.err)
+				stopRadio()
+				completePendingStart()
+				break
+			}
+			tracks := result.tracks
+			exhausted := result.exhausted
+			if len(tracks) > result.limit {
+				tracks = tracks[:result.limit]
+				exhausted = false
+			}
+			if policy.MaxQueue > 0 {
+				capacity := max(0, policy.MaxQueue-len(queue))
+				if len(tracks) > capacity {
+					tracks = tracks[:capacity]
+				}
+			}
+			if len(tracks) > 0 {
+				entries := make([]QueueEntry, len(tracks))
+				for i, track := range tracks {
+					entries[i] = EntryFromTrack(track, "radio")
+				}
+				start := len(queue)
+				next := make([]QueueEntry, start+len(entries))
+				copy(next, queue)
+				copy(next[start:], entries)
+				if err := commitQueue(next, queueAddOps(entries, start)); err != nil {
+					log.Printf("room %s: persist radio refill: %v (stopping)", r.ID, err)
+					stopRadio()
+					completePendingStart()
+					break
+				}
+			}
+			if exhausted {
+				stopRadio()
+			}
+			completePendingStart()
+
 		case a := <-r.inbound:
 			now := nowMs()
 			switch a.kind {
@@ -1119,29 +1269,31 @@ func (r *Room) Run(ctx context.Context) {
 				}
 
 			case actRadioPlay:
-				sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-				src, err := NewSourceFromSpec(sctx, a.source, r.st, r.reg, a.shuffle, a.once)
-				cancel()
-				if err != nil {
-					a.result <- err
-					break
+				sourceSeq++
+				request := radioSourceRequest{
+					id: sourceSeq, spec: a.source, shuffle: a.shuffle, once: a.once,
+					reply: a.result,
 				}
-				radio = &radioState{src: src, spec: a.source, shuffle: a.shuffle, once: a.once}
-				broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
-				if playback == nil || playback.Current == nil {
-					err = advance("") // 空闲时电台立即开播
-				} else if len(queue) < 3 {
-					err = refill()
+				desiredSourceID = request.id
+				desiredSourceSpec = request.spec
+				if sourceInFlight {
+					if queuedSource != nil {
+						queuedSource.reply <- context.Canceled
+					}
+					queuedSource = &request
+				} else {
+					startSourceConstruction(request)
 				}
-				if err != nil {
-					stopRadio()
-					a.result <- err
-					break
-				}
-				a.result <- nil
 
 			case actRadioStop:
+				desiredSourceID = 0
+				desiredSourceSpec = ""
+				if queuedSource != nil {
+					queuedSource.reply <- context.Canceled
+					queuedSource = nil
+				}
 				stopRadio()
+				completePendingStart()
 				a.result <- nil
 
 			case actDirectorySnapshot:

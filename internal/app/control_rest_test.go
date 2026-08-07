@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/client"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
@@ -273,7 +274,7 @@ func TestQueueClearWSAndRESTPreservesPlaybackAndRadio(t *testing.T) {
 	})
 	requireControlStatus(t, status, http.StatusOK, body)
 
-	before := readControlRoomState(t, e, adminToken, "clear-room")
+	before := waitStableQueueState(t, e, adminToken, "clear-room")
 	if before.Playback.Current == nil || before.Playback.Current.TrackRef != trackRef ||
 		before.Radio == nil || before.Radio.Source != "playlist:"+playlistID || len(before.Queue) == 0 {
 		t.Fatalf("clear precondition state = %#v", before)
@@ -328,6 +329,24 @@ func readControlRoomState(t *testing.T, e *env, token, roomID string) room.Snaps
 		t.Fatalf("decode room state: %v; body = %s", err, body)
 	}
 	return snapshot
+}
+
+// waitStableQueueState 等待队列长度两次采样一致后返回该状态。M5 起 radio.play
+// 在异步 refill 完成前即返回，测试必须先等 refill 落地再取基准状态。
+func waitStableQueueState(t *testing.T, e *env, token, roomID string) room.Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	prevLen := -1
+	for time.Now().Before(deadline) {
+		s := readControlRoomState(t, e, token, roomID)
+		if len(s.Queue) == prevLen {
+			return s
+		}
+		prevLen = len(s.Queue)
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("queue state did not stabilize for %s", roomID)
+	return room.Snapshot{}
 }
 
 func assertClearPreservedState(t *testing.T, before, after room.Snapshot) {
