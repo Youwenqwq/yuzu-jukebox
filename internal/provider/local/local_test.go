@@ -3,9 +3,11 @@ package local
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -67,5 +69,41 @@ func TestDeleteKeepsRowDeletedWhenFileRemovalFails(t *testing.T) {
 	}
 	if _, err := os.Stat(blockedPath); err != nil {
 		t.Fatalf("failed-removal fixture unexpectedly disappeared: %v", err)
+	}
+}
+
+func TestAudioContainerAllowlist(t *testing.T) {
+	for _, format := range []string{"mp3", "wav", "mov,mp4,m4a,3gp,3g2,mj2", "aac", "flac", "ogg", "opus", "ape", "asf", "aiff"} {
+		if !isAllowedAudioContainer(format) {
+			t.Errorf("audio container %q was rejected", format)
+		}
+	}
+	for _, format := range []string{"", "avi", "image2", "data"} {
+		if isAllowedAudioContainer(format) {
+			t.Errorf("non-audio container %q was accepted", format)
+		}
+	}
+}
+
+func TestWAVFmtChunkSizeGuards(t *testing.T) {
+	writeFixture := func(name string, declaredSize uint32) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		data := make([]byte, 20)
+		copy(data[0:4], "RIFF")
+		copy(data[8:12], "WAVE")
+		copy(data[12:16], "fmt ")
+		binary.LittleEndian.PutUint32(data[16:20], declaredSize)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	if _, err := wavDurationMs(writeFixture("oversized.wav", 64<<20+1)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized fmt chunk error = %v", err)
+	}
+	if _, err := wavDurationMs(writeFixture("past-eof.wav", 16)); err == nil || !strings.Contains(err.Error(), "exceeds file size") {
+		t.Fatalf("file-bound fmt chunk error = %v", err)
 	}
 }

@@ -111,7 +111,8 @@ func (s *Service) RoomCapabilities(ctx context.Context, roomID string, principal
 }
 
 // RoomSnapshot returns a complete, identity-specific state projection without
-// joining the caller to the room listener set.
+// joining the caller to the room listener set. Protected rooms expose a stream
+// URL only to identities that bypass the room credential during room.join.
 func (s *Service) RoomSnapshot(ctx context.Context, roomID string, principal auth.Identity) (room.Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return room.Snapshot{}, err
@@ -120,7 +121,26 @@ func (s *Service) RoomSnapshot(ctx context.Context, roomID string, principal aut
 	if err != nil {
 		return room.Snapshot{}, err
 	}
-	return r.Snapshot(principal)
+	access := r.AccessConfig()
+	protected := access.Mode != room.AccessModeOpen || access.PasswordHash != ""
+	if !protected {
+		return r.Snapshot(principal)
+	}
+	bypass, err := s.authorizer.BypassesRoomCredential(ctx, roomID, principal, access.TrustedRoles)
+	if err != nil {
+		return room.Snapshot{}, err
+	}
+	if bypass {
+		return r.Snapshot(principal)
+	}
+	snapshot, err := r.SnapshotWithoutStreamURL(principal)
+	if err != nil {
+		return room.Snapshot{}, err
+	}
+	if snapshot.Playback.Current != nil {
+		snapshot.Playback.Current.StreamURL = ""
+	}
+	return snapshot, nil
 }
 
 // QueueAdd atomically materializes and appends all requested tracks.

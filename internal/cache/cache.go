@@ -19,13 +19,17 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
-var ErrNotFound = errors.New("track not cached")
+var (
+	ErrNotFound       = errors.New("track not cached")
+	ErrObjectTooLarge = errors.New("cache object exceeds max_object_bytes")
+)
 
 type Cache struct {
-	dir      string
-	maxBytes int64
-	st       *store.Store
-	reg      *provider.Registry
+	dir            string
+	maxBytes       int64
+	maxObjectBytes int64
+	st             *store.Store
+	reg            *provider.Registry
 
 	client *http.Client
 
@@ -59,7 +63,7 @@ type DownloadStatus struct {
 
 const historyCap = 20
 
-func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *Cache {
+func New(dir string, maxBytes, maxObjectBytes int64, st *store.Store, reg *provider.Registry) *Cache {
 	// 清理上次进程退出时遗留的临时下载文件
 	if matches, _ := filepath.Glob(filepath.Join(dir, "dl-*")); len(matches) > 0 {
 		for _, m := range matches {
@@ -68,12 +72,13 @@ func New(dir string, maxBytes int64, st *store.Store, reg *provider.Registry) *C
 		log.Printf("[cache] removed %d stale temp files", len(matches))
 	}
 	return &Cache{
-		dir:      dir,
-		maxBytes: maxBytes,
-		st:       st,
-		reg:      reg,
-		client:   &http.Client{Timeout: 0}, // 流式拉取，不设总超时；由 ctx 控制
-		inflight: map[provider.TrackRef]*download{},
+		dir:            dir,
+		maxBytes:       maxBytes,
+		maxObjectBytes: maxObjectBytes,
+		st:             st,
+		reg:            reg,
+		client:         &http.Client{Timeout: 0}, // 流式拉取，不设总超时；由 ctx 控制
+		inflight:       map[provider.TrackRef]*download{},
 	}
 }
 
@@ -260,8 +265,8 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 		select {
 		case <-dl.done:
 			if dl.err != nil {
-				// leader 失败可轮替重试
-				return nil, true, dl.err
+				// leader 的瞬时失败可轮替重试；对象超限是稳定拒绝。
+				return nil, !errors.Is(dl.err, ErrObjectTooLarge), dl.err
 			}
 			path := c.Lookup(ctx, ref)
 			if path == "" {
@@ -305,6 +310,13 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 		return nil, false, err // 上游明确拒绝，重试无意义
 	}
 	dl.total = resp.ContentLength // 可能为 -1（未知）
+	if c.maxObjectBytes > 0 && resp.ContentLength > c.maxObjectBytes {
+		resp.Body.Close()
+		upCancel()
+		err := fmt.Errorf("%w: declared size %d exceeds limit %d", ErrObjectTooLarge, resp.ContentLength, c.maxObjectBytes)
+		c.finishInflight(ref, dl, err)
+		return nil, false, err
+	}
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		resp.Body.Close()
 		upCancel()
@@ -365,12 +377,41 @@ type teeReader struct {
 }
 
 func (t *teeReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	remaining := int64(len(p))
+	if t.c.maxObjectBytes > 0 {
+		remaining = t.c.maxObjectBytes - t.dl.fetched.Load()
+		if remaining < 0 {
+			err := fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes)
+			t.fail(err)
+			return 0, err
+		}
+		if int64(len(p)) > remaining {
+			p = p[:remaining+1]
+		}
+	}
 	n, err := t.body.Read(p)
+	if t.c.maxObjectBytes > 0 && int64(n) > remaining {
+		allowed := int(remaining)
+		if allowed > 0 {
+			wn, writeErr := t.tmp.Write(p[:allowed])
+			t.dl.fetched.Add(int64(wn))
+			if writeErr != nil {
+				t.fail(writeErr)
+				return wn, writeErr
+			}
+		}
+		limitErr := fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes)
+		t.fail(limitErr)
+		return allowed, limitErr
+	}
 	if n > 0 {
-		wn, werr := t.tmp.Write(p[:n])
+		wn, writeErr := t.tmp.Write(p[:n])
 		t.dl.fetched.Add(int64(wn))
-		if werr != nil && err == nil {
-			err = werr
+		if writeErr != nil && err == nil {
+			err = writeErr
 		}
 	}
 	if err == io.EOF {
@@ -400,21 +441,56 @@ func (t *teeReader) Close() error {
 
 // drain 后台完成剩余下载。
 func (t *teeReader) drain() {
-	n, err := io.Copy(t.tmp, t.body)
+	var source io.Reader = t.body
+	if t.c.maxObjectBytes > 0 {
+		remaining := t.c.maxObjectBytes - t.dl.fetched.Load()
+		if remaining < 0 {
+			t.fail(fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes))
+			return
+		}
+		if remaining < 1<<63-1 {
+			source = io.LimitReader(t.body, remaining+1)
+		}
+	}
+	n, err := io.Copy(t.tmp, source)
 	t.body.Close()
 	t.dl.fetched.Add(n)
 	if err != nil {
-		t.tmp.Close()
-		os.Remove(t.tmp.Name())
-		t.cancel()
+		t.fail(fmt.Errorf("background drain: %w", err))
 		log.Printf("[cache] %s: background download failed: %v", t.ref, err)
-		t.c.finishInflight(t.ref, t.dl, fmt.Errorf("background drain: %w", err))
+		return
+	}
+	if t.c.maxObjectBytes > 0 && t.dl.fetched.Load() > t.c.maxObjectBytes {
+		err := fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes)
+		t.fail(err)
+		log.Printf("[cache] %s: background download failed: %v", t.ref, err)
 		return
 	}
 	t.finalize()
 }
 
+func (t *teeReader) fail(err error) {
+	t.mu.Lock()
+	if t.done {
+		t.mu.Unlock()
+		return
+	}
+	t.done = true
+	t.mu.Unlock()
+	t.body.Close()
+	tmpPath := t.tmp.Name()
+	t.tmp.Close()
+	os.Remove(tmpPath)
+	t.cancel()
+	t.c.finishInflight(t.ref, t.dl, err)
+}
+
 func (t *teeReader) finalize() {
+	size := t.dl.fetched.Load()
+	if t.c.maxObjectBytes > 0 && size > t.c.maxObjectBytes {
+		t.fail(fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes))
+		return
+	}
 	t.mu.Lock()
 	if t.done {
 		t.mu.Unlock()
@@ -423,7 +499,6 @@ func (t *teeReader) finalize() {
 	t.done = true
 	t.mu.Unlock()
 	defer t.cancel()
-	size := t.dl.fetched.Load()
 
 	tmpPath := t.tmp.Name()
 	if err := t.tmp.Close(); err != nil {

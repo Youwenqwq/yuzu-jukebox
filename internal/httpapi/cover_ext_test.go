@@ -19,8 +19,9 @@ import (
 
 // coverFakeProvider 带回源头（CoverAware）与分类检索的假 provider。
 type coverFakeProvider struct {
-	upstream  string // 假图床基地址
-	lastRefer string // 上游最近一次收到的 Referer
+	upstream  string     // 假图床基地址
+	lastRefer string     // 上游最近一次收到的 Referer
+	lastQuery url.Values // 上游最近一次收到的查询参数
 }
 
 func (p *coverFakeProvider) ID() string { return "fake" }
@@ -52,6 +53,50 @@ func (p *coverFakeProvider) EntityTracks(ctx context.Context, cat provider.Searc
 	return nil, provider.ErrNotSupported
 }
 
+type coverThumbnailProvider struct {
+	*coverFakeProvider
+}
+
+func (*coverThumbnailProvider) ThumbnailCoverURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("param", "300y300")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+type coverRedirectProvider struct{}
+
+func (*coverRedirectProvider) ID() string { return "redirect" }
+func (*coverRedirectProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
+	return nil, provider.ErrNotSupported
+}
+func (*coverRedirectProvider) GetTrack(context.Context, provider.TrackRef) (provider.Track, error) {
+	return provider.Track{}, provider.ErrNotSupported
+}
+func (*coverRedirectProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{}, provider.ErrNotSupported
+}
+func (*coverRedirectProvider) ThumbnailCoverURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("param", "300y300")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func setupCoverServer(t *testing.T) (*Server, *coverFakeProvider) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "cover.db"), nil)
@@ -65,6 +110,7 @@ func setupCoverServer(t *testing.T) (*Server, *coverFakeProvider) {
 	fp.upstream = func() string { return "" }() // 占位，下方 httptest 启动后填充
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fp.lastRefer = r.Header.Get("Referer")
+		fp.lastQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\n"))
 	}))
@@ -85,7 +131,7 @@ func setupCoverServer(t *testing.T) (*Server, *coverFakeProvider) {
 
 func TestCoverExtProxiesEntityImageWithHeaders(t *testing.T) {
 	s, fp := setupCoverServer(t)
-	token := s.coverSigner.Mint("fake", fp.upstream+"/artist.jpg")
+	token := s.coverSigner.Mint("fake", fp.upstream+"/artist.jpg?token=abc")
 	if token == "" {
 		t.Fatal("Signer.Mint returned empty")
 	}
@@ -100,6 +146,90 @@ func TestCoverExtProxiesEntityImageWithHeaders(t *testing.T) {
 	}
 	if fp.lastRefer != "https://fake.example/" {
 		t.Fatalf("upstream Referer = %q, want CoverAware header", fp.lastRefer)
+	}
+	if got := fp.lastQuery.Get("token"); got != "abc" || fp.lastQuery.Get("param") != "" {
+		t.Fatalf("non-thumbnail provider query = %q, want token only", fp.lastQuery.Encode())
+	}
+}
+
+func TestCoverExtAppliesThumbnailByDefault(t *testing.T) {
+	s, fp := setupCoverServer(t)
+	s.reg.Register(&coverThumbnailProvider{coverFakeProvider: fp})
+	token := s.coverSigner.Mint("fake", fp.upstream+"/artist.jpg?token=abc")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/ext/"+token, nil)
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("coverExt status = %d, body %s", rec.Code, rec.Body)
+	}
+	if got := fp.lastQuery.Get("param"); got != "300y300" {
+		t.Fatalf("thumbnail param = %q, want 300y300", got)
+	}
+	if got := fp.lastQuery.Get("token"); got != "abc" {
+		t.Fatalf("source query token = %q, want preserved", got)
+	}
+}
+
+func TestCoverExtOriginalSkipsThumbnail(t *testing.T) {
+	s, fp := setupCoverServer(t)
+	s.reg.Register(&coverThumbnailProvider{coverFakeProvider: fp})
+	token := s.coverSigner.Mint("fake", fp.upstream+"/artist.jpg?token=abc")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/ext/"+token+"?size=original", nil)
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("coverExt status = %d, body %s", rec.Code, rec.Body)
+	}
+	if got := fp.lastQuery.Get("param"); got != "" {
+		t.Fatalf("thumbnail param = %q, want omitted", got)
+	}
+	if got := fp.lastQuery.Get("token"); got != "abc" {
+		t.Fatalf("source query token = %q, want preserved", got)
+	}
+}
+
+func TestProxyCoverDirectRedirectThumbnailSelection(t *testing.T) {
+	s := &Server{ncmCoverDirect: true}
+	p := &coverRedirectProvider{}
+	tests := []struct {
+		name    string
+		target  string
+		wantURL string
+	}{
+		{
+			name:    "default thumbnail",
+			target:  "/api/v1/cover/redirect%3At1",
+			wantURL: "https://cover/image.jpg?param=300y300&token=abc",
+		},
+		{
+			name:    "original",
+			target:  "/api/v1/cover/redirect%3At1?size=original",
+			wantURL: "https://cover/image.jpg?token=abc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			s.proxyCover(rec, req, p, "https://cover/image.jpg?token=abc")
+			if rec.Code != http.StatusFound {
+				t.Fatalf("status = %d, want 302", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); got != tt.wantURL {
+				t.Fatalf("Location = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestProxyCoverRejectsEmptyThumbnailURL(t *testing.T) {
+	s := &Server{}
+	p := &coverThumbnailProvider{coverFakeProvider: &coverFakeProvider{}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/fake%3At1", nil)
+	s.proxyCover(rec, req, p, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 

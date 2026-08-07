@@ -44,7 +44,7 @@ func TestDistributionInternalAPI(t *testing.T) {
 	reg := provider.NewRegistry()
 	reg.Register(local.New(mediaDir, st))
 	authm := auth.NewManager("", st)
-	roomCache := cache.New(cacheDir, 1<<30, st, reg)
+	roomCache := cache.New(cacheDir, 1<<30, 0, st, reg)
 	dist := distribution.New(st)
 	_, err = st.CreateAcceleration(context.Background(), store.Acceleration{
 		ID: "edgeone-main", Name: "EdgeOne", Kind: "edgeone",

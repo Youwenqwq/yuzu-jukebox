@@ -30,7 +30,7 @@ func newTestRoom(t *testing.T, policyRaw string) (*Room, *store.Store) {
 	// 否则队列里的虚构 ref 会被自动跳过。
 	reg.Register(&playableTestProvider{})
 	authm := auth.NewManager("pw", st)
-	c := cache.New(filepath.Join(dir, "cache"), 1<<30, st, reg)
+	c := cache.New(filepath.Join(dir, "cache"), 1<<30, 0, st, reg)
 	r := New("r1", "room", "", policyRaw, st, authm, c, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
@@ -360,7 +360,8 @@ func TestSnapshotIsReadOnlyAndDoesNotJoin(t *testing.T) {
 // playback.changed. Full queue snapshots are UI state and can exceed the
 // default WebSocket frame limit when the queue is long.
 func TestPlayerPlaneReceivesOnlyPlayback(t *testing.T) {
-	r, _ := newTestRoom(t, "")
+	// 默认 max_queue 已收紧为 50；本用例需要超大队列，显式放开。
+	r, _ := newTestRoom(t, `{"max_queue":200}`)
 	dj := auth.Identity{
 		ID: "u_dj", Name: "DJ", Kind: "guest",
 		Roles: []string{auth.RoleListener, auth.RoleRequester},

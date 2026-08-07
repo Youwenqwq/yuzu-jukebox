@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +15,25 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
+
+type objectLimitProvider struct {
+	baseURL string
+}
+
+func (p *objectLimitProvider) ID() string { return "limit" }
+
+func (p *objectLimitProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
+	return nil, nil
+}
+
+func (p *objectLimitProvider) GetTrack(context.Context, provider.TrackRef) (provider.Track, error) {
+	return provider.Track{}, nil
+}
+
+func (p *objectLimitProvider) Resolve(_ context.Context, ref provider.TrackRef) (provider.StreamLocator, error) {
+	_, id, _ := ref.Split()
+	return provider.StreamLocator{URL: p.baseURL + "/" + id, Format: "mp3"}, nil
+}
 
 func setupPruneCache(t *testing.T) (*Cache, *store.Store, string) {
 	t.Helper()
@@ -25,7 +47,7 @@ func setupPruneCache(t *testing.T) (*Cache, *store.Store, string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return New(dir, 1024, st, provider.NewRegistry()), st, dir
+	return New(dir, 1024, 0, st, provider.NewRegistry()), st, dir
 }
 
 func putPruneRow(t *testing.T, st *store.Store, dir, ref string, size int64, lastAccessed time.Time) string {
@@ -99,5 +121,55 @@ func TestPruneUnusedZeroEvictsAllExceptInflight(t *testing.T) {
 	}
 	if _, err := st.GetCacheRow(context.Background(), "active"); err != nil {
 		t.Fatalf("inflight cache row removed: %v", err)
+	}
+}
+
+func TestObjectDownloadLimitRejectsDeclaredAndStreamingSizes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/declared":
+			w.Header().Set("Content-Length", "6")
+			_, _ = io.WriteString(w, "123456")
+		case "/chunked":
+			w.(http.Flusher).Flush()
+			_, _ = io.WriteString(w, "123456")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	root := t.TempDir()
+	st, err := store.Open(filepath.Join(root, "test.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	reg := provider.NewRegistry()
+	reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+	dir := filepath.Join(root, "cache")
+	c := New(dir, 1024, 5, st, reg)
+
+	if _, err := c.OpenStream(context.Background(), provider.TrackRef("limit:declared")); !errors.Is(err, ErrObjectTooLarge) {
+		t.Fatalf("declared-size OpenStream error = %v", err)
+	}
+
+	rc, err := c.OpenStream(context.Background(), provider.TrackRef("limit:chunked"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(rc)
+	_ = rc.Close()
+	if !errors.Is(readErr, ErrObjectTooLarge) {
+		t.Fatalf("streaming read error = %v", readErr)
+	}
+	if string(data) != "12345" {
+		t.Fatalf("streaming data = %q, want capped prefix", data)
+	}
+	if path := c.Lookup(context.Background(), provider.TrackRef("limit:chunked")); path != "" {
+		t.Fatalf("oversized object was cached at %s", path)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "dl-*")); err != nil || len(matches) != 0 {
+		t.Fatalf("temporary downloads after rejection = %v, err %v", matches, err)
 	}
 }

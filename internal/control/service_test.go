@@ -12,6 +12,8 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type grantKey struct {
@@ -109,7 +111,7 @@ func newServiceFixture(t *testing.T) (*Service, *fakeGrantStore) {
 	reg := provider.NewRegistry()
 	reg.Register(&staticProvider{})
 	authm := auth.NewManager("", st)
-	trackCache := cache.New(filepath.Join(root, "cache"), 1<<20, st, reg)
+	trackCache := cache.New(filepath.Join(root, "cache"), 1<<20, 0, st, reg)
 	r := room.New("room-a", "Room A", "", "", st, authm, trackCache, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
@@ -182,6 +184,75 @@ func TestServiceRequesterOwnershipAndControllers(t *testing.T) {
 	}
 	if err := service.Pause(ctx, "room-b", controller); !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("cross-room controller error = %v, want forbidden", err)
+	}
+}
+
+func TestServiceRoomSnapshotRedactsProtectedRoomStreamURL(t *testing.T) {
+	service, grants := newServiceFixture(t)
+	ctx := context.Background()
+	guest := auth.Identity{
+		ID: "guest", Name: "Guest", Kind: "guest",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+	if _, err := service.QueueAdd(ctx, "room-a", guest, []string{"test:current"}); err != nil {
+		t.Fatalf("seed playback: %v", err)
+	}
+	r, err := service.GetRoom("room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("room-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ApplyAccessConfig(room.AccessConfig{
+		Mode: room.AccessModeStaticPassword, PasswordHash: string(passwordHash),
+		TrustedRoles: []string{"staff"},
+	}); err != nil {
+		t.Fatalf("protect room: %v", err)
+	}
+
+	snapshot, err := service.RoomSnapshot(ctx, "room-a", guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Playback.Current == nil {
+		t.Fatal("protected-room snapshot has no current track")
+	}
+	if got := snapshot.Playback.Current.StreamURL; got != "" {
+		t.Fatalf("ordinary guest stream_url = %q, want redacted", got)
+	}
+
+	controller := auth.Identity{ID: "controller", Kind: "oidc"}
+	grants.grants[grantKey{
+		roomID: "room-a", principalID: controller.ID, capability: CapabilityController,
+	}] = true
+	snapshot, err = service.RoomSnapshot(ctx, "room-a", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Playback.Current.StreamURL; got == "" {
+		t.Fatal("room controller stream_url was redacted")
+	}
+
+	trustedOIDC := auth.Identity{ID: "staff-user", Kind: "oidc", Roles: []string{"staff"}}
+	snapshot, err = service.RoomSnapshot(ctx, "room-a", trustedOIDC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Playback.Current.StreamURL; got == "" {
+		t.Fatal("trusted OIDC role stream_url was redacted")
+	}
+
+	if err := r.ApplyAccessConfig(room.AccessConfig{Mode: room.AccessModeOpen}); err != nil {
+		t.Fatalf("open room: %v", err)
+	}
+	snapshot, err = service.RoomSnapshot(ctx, "room-a", guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Playback.Current.StreamURL; got == "" {
+		t.Fatal("open-room guest stream_url was redacted")
 	}
 }
 

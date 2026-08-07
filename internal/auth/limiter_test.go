@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestPasswordProbeLimiterThresholdAndPasswordlessBypass(t *testing.T) {
+func TestPasswordProbeLimiterThresholds(t *testing.T) {
 	limiter := newPasswordProbeLimiter()
 	for i := range guestPasswordProbeLimit {
 		remote := fmt.Sprintf("203.0.113.10:%d", 2000+i)
@@ -18,13 +18,35 @@ func TestPasswordProbeLimiterThresholdAndPasswordlessBypass(t *testing.T) {
 		t.Fatal("password probe after the limit was allowed")
 	}
 
-	for i := range 100 {
-		if !limiter.allow("203.0.113.10:4000", false, false) {
-			t.Fatalf("passwordless guest authentication %d was limited", i+1)
+	for i := range passwordlessGuestLimit {
+		if !limiter.allow("203.0.113.20:4000", false, false) {
+			t.Fatalf("passwordless guest authentication %d was limited early", i+1)
 		}
 	}
-	if limiter.allow("203.0.113.10:5000", true, false) {
-		t.Fatal("passwordless authentication unexpectedly reset the probe bucket")
+	if limiter.allow("203.0.113.20:5000", false, false) {
+		t.Fatal("passwordless guest authentication after the limit was allowed")
+	}
+}
+
+func TestPasswordProbeLimiterGlobalThresholdFailClosed(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	limiter := newPasswordProbeLimiter()
+	limiter.now = func() time.Time { return now }
+	limiter.lastCleanup = now
+
+	for i := range globalPasswordProbeLimit {
+		remote := fmt.Sprintf("203.0.113.%d:%d", i/guestPasswordProbeLimit, 2000+i)
+		if !limiter.allow(remote, true, false) {
+			t.Fatalf("global probe %d was rejected before the limit", i+1)
+		}
+	}
+	if limiter.allow("198.51.100.1:1234", true, true) {
+		t.Fatal("correct password was allowed while the global bucket was full")
+	}
+
+	now = now.Add(guestPasswordProbeWindow)
+	if !limiter.allow("198.51.100.1:1234", true, true) {
+		t.Fatal("expired global probe window did not decay")
 	}
 }
 

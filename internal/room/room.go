@@ -181,13 +181,14 @@ type action struct {
 	timerID   uint64
 	ref       string // actUnplayable：预检失败的 track_ref
 	// radio
-	source        string
-	shuffle       bool
-	once          bool
-	policyRaw     string
-	result        chan error
-	snapshot      chan DirectorySnapshot
-	stateSnapshot chan Snapshot
+	source           string
+	shuffle          bool
+	once             bool
+	policyRaw        string
+	result           chan error
+	snapshot         chan DirectorySnapshot
+	stateSnapshot    chan Snapshot
+	includeStreamURL bool
 }
 
 var (
@@ -380,9 +381,21 @@ func (r *Room) DirectorySnapshot() (DirectorySnapshot, error) {
 
 // Snapshot 同步读取与进房广播同源的完整状态，但不把查询者加入听众。
 func (r *Room) Snapshot(id auth.Identity) (Snapshot, error) {
+	return r.snapshot(id, true)
+}
+
+// SnapshotWithoutStreamURL returns the same projection without issuing a stream
+// ticket. The control boundary uses it for callers not admitted to protected rooms.
+func (r *Room) SnapshotWithoutStreamURL(id auth.Identity) (Snapshot, error) {
+	return r.snapshot(id, false)
+}
+
+func (r *Room) snapshot(id auth.Identity, includeStreamURL bool) (Snapshot, error) {
 	ch := make(chan Snapshot, 1)
 	select {
-	case r.inbound <- action{kind: actSnapshot, actor: id, stateSnapshot: ch}:
+	case r.inbound <- action{
+		kind: actSnapshot, actor: id, stateSnapshot: ch, includeStreamURL: includeStreamURL,
+	}:
 	case <-r.done:
 		return Snapshot{}, ErrRoomClosed
 	}
@@ -456,14 +469,18 @@ func (r *Room) Run(ctx context.Context) {
 		return cloned
 	}
 
-	playbackSnapshot := func(id auth.Identity) Playback {
+	playbackSnapshot := func(id auth.Identity, includeStreamURL bool) Playback {
 		pb := Playback{Rate: 1.0}
 		if playback != nil {
 			pb = *playback
 		}
 		if pb.Current != nil {
 			cur := cloneEntry(*pb.Current)
-			cur.StreamURL = r.streamURL(id, cur.TrackRef)
+			if includeStreamURL {
+				cur.StreamURL = r.streamURL(id, cur.TrackRef)
+			} else {
+				cur.StreamURL = ""
+			}
 			if cur.CoverURL != "" {
 				cur.CoverURL = "/api/v1/cover/" + url.PathEscape(cur.TrackRef)
 			}
@@ -595,9 +612,9 @@ func (r *Room) Run(ctx context.Context) {
 		}
 	}
 
-	snapshotFor := func(id auth.Identity) Snapshot {
+	snapshotFor := func(id auth.Identity, includeStreamURL bool) Snapshot {
 		return Snapshot{
-			Playback:  playbackSnapshot(id),
+			Playback:  playbackSnapshot(id, includeStreamURL),
 			Queue:     queueSnapshot(),
 			Radio:     radioSnapshot(),
 			Listeners: listenersSnapshot(),
@@ -605,7 +622,7 @@ func (r *Room) Run(ctx context.Context) {
 	}
 
 	playbackMsg := func(c ClientConn) any {
-		return map[string]any{"type": "playback.changed", "data": playbackSnapshot(c.Identity())}
+		return map[string]any{"type": "playback.changed", "data": playbackSnapshot(c.Identity(), true)}
 	}
 
 	listenersMsg := func() any {
@@ -625,23 +642,34 @@ func (r *Room) Run(ctx context.Context) {
 		broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
 	}
 
-	// refill 电台补充：从源取一批曲目追加到队列。
+	// refill 电台补充：从源取一批曲目追加到队列，但绝不超过 max_queue。
 	// 源耗尽（once 语义）或出错时停止电台。
 	refill := func() error {
 		if radio == nil {
 			return nil
+		}
+		batchSize := 10
+		if policy.MaxQueue > 0 {
+			batchSize = min(batchSize, policy.MaxQueue-len(queue))
+			if batchSize <= 0 {
+				return nil
+			}
 		}
 		seed := provider.TrackRef("")
 		if playback != nil && playback.Current != nil {
 			seed = provider.TrackRef(playback.Current.TrackRef)
 		}
 		bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		tracks, exhausted, err := radio.src.NextBatch(bctx, 10, seed)
+		tracks, exhausted, err := radio.src.NextBatch(bctx, batchSize, seed)
 		cancel()
 		if err != nil {
 			log.Printf("[room %s] radio %s: %v (stopping)", r.ID, radio.spec, err)
 			stopRadio()
 			return nil
+		}
+		if len(tracks) > batchSize {
+			tracks = tracks[:batchSize]
+			exhausted = false
 		}
 		if len(tracks) > 0 {
 			entries := make([]QueueEntry, len(tracks))
@@ -1139,7 +1167,7 @@ func (r *Room) Run(ctx context.Context) {
 				a.snapshot <- snapshot
 
 			case actSnapshot:
-				a.stateSnapshot <- snapshotFor(a.actor)
+				a.stateSnapshot <- snapshotFor(a.actor, a.includeStreamURL)
 
 			case actSetPolicy:
 				p, err := ParsePolicy(a.policyRaw)

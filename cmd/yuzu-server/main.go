@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/app"
 	"github.com/youwenqwq/yuzu-jukebox/internal/config"
@@ -35,10 +36,22 @@ func main() {
 	}
 	defer a.Store.Close()
 
-	srv := &http.Server{Addr: cfg.Addr, Handler: a.Handler}
+	srv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           a.Handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	go func() {
 		<-ctx.Done()
-		srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
 	}()
 
 	log.Printf("yuzu-jukebox listening on %s", cfg.Addr)

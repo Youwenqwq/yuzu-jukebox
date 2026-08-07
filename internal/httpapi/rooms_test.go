@@ -75,7 +75,7 @@ func TestListRoomsIncludesLiveDirectorySummary(t *testing.T) {
 	reg := provider.NewRegistry()
 	// 预检会对当前曲目调 Resolve；注册可播 fake 防虚构 ref 被自动跳过。
 	reg.Register(&playableRoomTestProvider{})
-	roomCache := cache.New(filepath.Join(dir, "cache"), 1<<30, st, reg)
+	roomCache := cache.New(filepath.Join(dir, "cache"), 1<<30, 0, st, reg)
 	rooms := room.NewManager(ctx, st, authm, roomCache, reg, nil)
 	for i, row := range []store.Room{
 		{ID: "active", Name: "Active", CreatedAt: 1},

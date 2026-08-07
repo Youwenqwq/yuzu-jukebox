@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -64,6 +65,7 @@ var (
 	ErrSessionNotFound          = errors.New("session not found")
 	ErrTicketInvalid            = errors.New("ticket invalid")
 	ErrPasswordProbeRateLimited = errors.New("too many incorrect admin password attempts; try again later")
+	ErrGuestAuthRateLimited     = errors.New("too many guest login attempts; try again later")
 )
 
 type session struct {
@@ -170,8 +172,14 @@ func identityFromPrincipal(p store.Principal) Identity {
 
 // GuestAuth 访客认证。adminPassword 命中全局管理员口令时授予管理角色。
 func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, string, error) {
-	adminMatched := m.adminPassword != "" && adminPassword == m.adminPassword
+	adminMatched := false
+	if m.adminPassword != "" {
+		adminMatched = subtle.ConstantTimeCompare([]byte(adminPassword), []byte(m.adminPassword)) == 1
+	}
 	if !m.passwordProbes.allow(remoteAddr, adminPassword != "", adminMatched) {
+		if adminPassword == "" {
+			return Identity{}, "", ErrGuestAuthRateLimited
+		}
 		return Identity{}, "", ErrPasswordProbeRateLimited
 	}
 	if name == "" {

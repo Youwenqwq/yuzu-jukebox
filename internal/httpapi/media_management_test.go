@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +35,11 @@ type mediaEndpointFixture struct {
 
 func setupMediaEndpoints(t *testing.T) mediaEndpointFixture {
 	t.Helper()
+	return setupMediaEndpointsWithUploadLimit(t, 1<<30)
+}
+
+func setupMediaEndpointsWithUploadLimit(t *testing.T, maxUploadBytes int64) mediaEndpointFixture {
+	t.Helper()
 	root := t.TempDir()
 	st, err := store.Open(filepath.Join(root, "test.db"), nil)
 	if err != nil {
@@ -49,14 +56,15 @@ func setupMediaEndpoints(t *testing.T) mediaEndpointFixture {
 	lp := local.New(mediaDir, st)
 	reg := provider.NewRegistry()
 	reg.Register(lp)
-	c := cache.New(cacheDir, 1<<20, st, reg)
+	c := cache.New(cacheDir, 1<<20, 0, st, reg)
 	authm := auth.NewManager("", st)
 	adminTok := authm.IssueSession(auth.Identity{ID: "u_admin", Name: "admin", Roles: []string{auth.RoleMediaAdmin}})
 	readerTok := authm.IssueSession(auth.Identity{ID: "u_reader", Name: "reader", Roles: []string{auth.RoleRequester}})
 	controls := control.NewService(nil, reg, control.NewAuthorizer(st))
 	s := &Server{
 		st: st, authm: authm, reg: reg, local: lp, cache: c, controls: controls,
-		ws: wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
+		ws:             wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
+		maxUploadBytes: maxUploadBytes,
 	}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -195,5 +203,40 @@ func TestDeleteMediaEndpointRole(t *testing.T) {
 				t.Fatalf("status %d body %v, want %d", status, body, tc.want)
 			}
 		})
+	}
+}
+
+func TestUploadHonorsConfiguredBodyLimit(t *testing.T) {
+	f := setupMediaEndpointsWithUploadLimit(t, 256)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "oversized.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(make([]byte, 1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, f.srv.URL+"/api/v1/media/upload", &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+f.adminTok)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var response map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge || errCode(t, response) != "payload_too_large" {
+		t.Fatalf("upload limit: status %d body %v", resp.StatusCode, response)
 	}
 }

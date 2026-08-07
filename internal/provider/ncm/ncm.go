@@ -37,6 +37,7 @@ var (
 	_ provider.CategorySearcher  = (*Provider)(nil)
 	_ provider.EntityAlbumLister = (*Provider)(nil)
 	_ provider.SimilarQuerier    = (*Provider)(nil)
+	_ provider.CoverThumbnailer  = (*Provider)(nil)
 )
 
 func New(baseURL, level string, st *store.Store) *Provider {
@@ -527,6 +528,25 @@ func joinArtists(names []string) string { return strings.Join(names, "/") }
 type ncmAl struct {
 	Name   string `json:"name"`
 	PicURL string `json:"picUrl"`
+}
+
+const defaultCoverParam = "300y300"
+
+// ThumbnailCoverURL asks NetEase's image CDN for the default thumbnail while
+// preserving any other source query parameters. Dropping param restores the
+// original image URL.
+func (*Provider) ThumbnailCoverURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("param", defaultCoverParam)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func sourceURL(id int64) string {

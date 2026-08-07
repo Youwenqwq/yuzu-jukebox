@@ -24,3 +24,13 @@ func TestLoadRejectsRemovedIntegrationSecrets(t *testing.T) {
 		t.Fatalf("Load error leaked removed token: %v", err)
 	}
 }
+
+func TestDefaultUploadAndCacheObjectLimits(t *testing.T) {
+	cfg := Default()
+	if cfg.Media.MaxUploadBytes != 1<<30 {
+		t.Fatalf("media.max_upload_bytes = %d, want %d", cfg.Media.MaxUploadBytes, int64(1<<30))
+	}
+	if cfg.Cache.MaxObjectBytes != 512<<20 {
+		t.Fatalf("cache.max_object_bytes = %d, want %d", cfg.Cache.MaxObjectBytes, int64(512<<20))
+	}
+}

@@ -73,7 +73,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		reg.Register(qq.New(cfg.QQ.BaseURL, cfg.QQ.FileType, st))
 	}
 
-	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, st, reg)
+	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, cfg.Cache.MaxObjectBytes, st, reg)
 
 	distributionService := distribution.New(st)
 	accelerationRegistry := distribution.NewRegistry(st)
@@ -109,7 +109,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 
 	ws := wsapi.NewServer(authm, playerAuth, controls, st)
-	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping, cfg.NCM.CoverDirect)
+	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping, cfg.NCM.CoverDirect, cfg.Media.MaxUploadBytes)
 	api.SetCoverSecret(key)
 	api.SetPlaylistCoverDir(filepath.Join(cfg.MediaDir, "playlist_covers"))
 	api.ConfigureDistribution(distributionService, accelerationRegistry)

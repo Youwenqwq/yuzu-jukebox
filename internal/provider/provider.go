@@ -215,6 +215,13 @@ type CoverAware interface {
 	CoverHeaders() http.Header
 }
 
+// CoverThumbnailer 由封面 CDN 支持尺寸变体的 provider 实现。
+// 代理默认应用缩略图变换；客户端传 ?size=original 时跳过。
+type CoverThumbnailer interface {
+	Provider
+	ThumbnailCoverURL(raw string) string
+}
+
 // QRLoginAware 是可选接口：支持二维码登录的 Provider 实现它。
 // status 取值：expired | waiting | scanned | ok。
 type QRLoginAware interface {

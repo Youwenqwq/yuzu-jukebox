@@ -23,7 +23,7 @@ var (
 // 否则取命中最大值；无命中 = 不限。guest 身份 ID 由名字确定性派生，
 // 同名重连仍受同一限额约束。
 type Policy struct {
-	MaxQueue           int            `json:"max_queue,omitempty"`            // 待播队列总上限，0 = 不限
+	MaxQueue           int            `json:"max_queue,omitempty"`            // 待播队列总上限；0/缺省按 DefaultMaxQueue 执行
 	QueueLimits        map[string]int `json:"queue_limits,omitempty"`         // kind/role → 待播上限
 	MemberPlayerVolume bool           `json:"member_player_volume,omitempty"` // scoped Integration actor 可调绑定播放器音量
 	// RadioControl 控制电台启停权限："" 或 "controller" 保持仅 controller 可用；
@@ -37,20 +37,26 @@ type Policy struct {
 	StartLeadMs *int `json:"start_lead_ms,omitempty"`
 }
 
-// MaxStartLeadMs 起播提前量上限。超过 5s 的曲间静默不像点唱机像故障。
-const MaxStartLeadMs = 5000
+const (
+	// DefaultMaxQueue is the effective pending-queue cap when max_queue is omitted or zero.
+	DefaultMaxQueue = 50
+	// MaxStartLeadMs 起播提前量上限。超过 5s 的曲间静默不像点唱机像故障。
+	MaxStartLeadMs = 5000
+)
 
 // ParsePolicy 解析并校验策略 JSON。空串等价于 {}。
 func ParsePolicy(raw string) (Policy, error) {
 	var p Policy
-	if raw == "" {
-		return p, nil
-	}
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return p, fmt.Errorf("%w: %v", ErrInvalidPolicy, err)
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			return p, fmt.Errorf("%w: %v", ErrInvalidPolicy, err)
+		}
 	}
 	if p.MaxQueue < 0 {
 		return p, fmt.Errorf("%w: max_queue must be >= 0", ErrInvalidPolicy)
+	}
+	if p.MaxQueue == 0 {
+		p.MaxQueue = DefaultMaxQueue
 	}
 	for k, v := range p.QueueLimits {
 		if v < 0 {

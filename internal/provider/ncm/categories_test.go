@@ -26,6 +26,27 @@ func TestSearchCategories(t *testing.T) {
 	}
 }
 
+func TestThumbnailCoverURL(t *testing.T) {
+	p := &Provider{}
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{name: "original", raw: "https://cover/image.jpg", want: "https://cover/image.jpg?param=300y300"},
+		{name: "preserves query", raw: "https://cover/image.jpg?token=abc", want: "https://cover/image.jpg?param=300y300&token=abc"},
+		{name: "replaces size", raw: "https://cover/image.jpg?param=50y50", want: "https://cover/image.jpg?param=300y300"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.ThumbnailCoverURL(tt.raw); got != tt.want {
+				t.Fatalf("ThumbnailCoverURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSearchCategoryUsesNCMSearchType(t *testing.T) {
 	tests := []struct {
 		category provider.SearchCategory

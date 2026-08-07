@@ -17,6 +17,15 @@ type CORSConfig struct {
 	// 是否允许携带凭据（cookies、Authorization 头）。为 true 时 AllowedOrigins 不可为 "*"。
 	AllowCredentials bool `json:"allow_credentials"`
 }
+type MediaConfig struct {
+	// 单次媒体上传请求体上限（字节）。
+	MaxUploadBytes int64 `json:"max_upload_bytes"`
+}
+
+type CacheConfig struct {
+	// 单个远端缓存对象的下载上限（字节）；0 表示不限制。
+	MaxObjectBytes int64 `json:"max_object_bytes"`
+}
 
 type Config struct {
 	// 监听地址，如 ":8080"
@@ -31,6 +40,10 @@ type Config struct {
 	CacheMaxBytes int64 `json:"cache_max_bytes"`
 	// 自动清理超过指定天数未访问的缓存；0 表示关闭
 	CacheAutoPruneDays int `json:"cache_auto_prune_days"`
+	// 媒体上传配置
+	Media MediaConfig `json:"media"`
+	// 远端媒体缓存配置
+	Cache CacheConfig `json:"cache"`
 	// provider 绑定歌单的周期同步间隔（分钟）；0 关闭周期同步，手动同步不受影响
 	PlaylistSyncIntervalMinutes int `json:"playlist_sync_interval_minutes"`
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
@@ -93,6 +106,12 @@ func Default() Config {
 		CacheMaxBytes:               20 << 30, // 20 GiB
 		CacheAutoPruneDays:          0,
 		PlaylistSyncIntervalMinutes: 0,
+		Media: MediaConfig{
+			MaxUploadBytes: 1 << 30,
+		},
+		Cache: CacheConfig{
+			MaxObjectBytes: 512 << 20,
+		},
 		NCM: NCMConfig{
 			Enabled: false,
 			BaseURL: "http://127.0.0.1:3000",

@@ -41,6 +41,7 @@ type Server struct {
 	oidcRoleMap map[string][]string
 
 	ncmCoverDirect bool
+	maxUploadBytes int64
 
 	// coverSigner 签发并校验实体封面代理 token。
 	coverSigner *coverurl.Signer
@@ -80,12 +81,13 @@ func NewServer(
 	oidc *auth.OIDCValidator,
 	oidcRoleMap map[string][]string,
 	ncmCoverDirect bool,
+	maxUploadBytes int64,
 ) *Server {
 	return &Server{
 		st: st, authm: authm, integrations: integrations, bindings: bindings,
 		rooms: rooms, reg: reg, local: lp, cache: c, controls: controls, ws: ws,
 		oidc: oidc, oidcRoleMap: oidcRoleMap,
-		ncmCoverDirect: ncmCoverDirect,
+		ncmCoverDirect: ncmCoverDirect, maxUploadBytes: maxUploadBytes,
 	}
 }
 
@@ -215,14 +217,22 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /internal/v1/accelerations/metrics", s.distributionMetrics)
 	}
 	mux.Handle("/ws/v1", s.ws)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originalBody := r.Body
+		r = r.WithContext(context.WithValue(r.Context(), ctxOriginalBody, originalBody))
+		r.Body = http.MaxBytesReader(w, originalBody, 1<<20)
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // ---------- 认证辅助 ----------
 
 type ctxKey int
 
-const ctxIdentity ctxKey = 0
+const (
+	ctxIdentity     ctxKey = 0
+	ctxOriginalBody ctxKey = 1
+)
 
 func (s *Server) authenticate(r *http.Request) (auth.Identity, error) {
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -256,9 +266,13 @@ func (s *Server) guestAuth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
 		return
 	}
+	if len(body.Name) > 64 {
+		writeErr(w, http.StatusBadRequest, "bad_request", "name must not exceed 64 bytes")
+		return
+	}
 	id, token, err := s.authm.GuestAuth(body.Name, body.Password, r.RemoteAddr)
 	if err != nil {
-		if errors.Is(err, auth.ErrPasswordProbeRateLimited) {
+		if errors.Is(err, auth.ErrPasswordProbeRateLimited) || errors.Is(err, auth.ErrGuestAuthRateLimited) {
 			writeErr(w, http.StatusTooManyRequests, "rate_limited", err.Error())
 			return
 		}
@@ -1180,11 +1194,21 @@ func (s *Server) searchEntity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
+	body := r.Body
+	if originalBody, ok := r.Context().Value(ctxOriginalBody).(io.ReadCloser); ok {
+		body = originalBody
+	}
+	r.Body = http.MaxBytesReader(w, body, s.maxUploadBytes)
 	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
 	if !ok {
 		return
 	}
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", "upload exceeds configured size limit")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid multipart form")
 		return
 	}

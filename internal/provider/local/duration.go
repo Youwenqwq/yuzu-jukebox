@@ -29,6 +29,10 @@ func wavDurationMs(path string) (int64, error) {
 		return 0, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
 
 	var riff [12]byte
 	if _, err := io.ReadFull(f, riff[:]); err != nil {
@@ -49,6 +53,16 @@ func wavDurationMs(path string) (int64, error) {
 		size := binary.LittleEndian.Uint32(hdr[4:8])
 		switch id {
 		case "fmt ":
+			if size > 64<<20 {
+				return 0, errors.New("fmt chunk too large")
+			}
+			offset, err := f.Seek(0, io.SeekCurrent)
+			if err != nil {
+				return 0, err
+			}
+			if remaining := info.Size() - offset; remaining < 0 || int64(size) > remaining {
+				return 0, errors.New("fmt chunk exceeds file size")
+			}
 			buf := make([]byte, size)
 			if _, err := io.ReadFull(f, buf); err != nil {
 				return 0, err

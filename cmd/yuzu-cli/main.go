@@ -974,8 +974,9 @@ Agent 重连后会按分配自动进入 Room；一个 Room 可包含多个 Playe
 			desc:  "设置房间治理策略",
 			detail: `热更新房间策略，JSON 结构：
   {"max_queue":100,"queue_limits":{"guest":5},"member_player_volume":true}
-max_queue 为队列总上限（0=不限）；queue_limits 的 key 匹配身份 kind
-（guest/password/oidc）或 role，多命中取最宽松，0/缺省=不限。
+max_queue 为队列总上限（0/缺省时有效上限为 50，显式正数覆盖）；
+queue_limits 的 key 匹配身份 kind（guest/password/oidc）或 role，
+多命中取最宽松，0/缺省=不限。
 member_player_volume 允许同 Room 的 Integration actor 调节 headless output 全局音量，
 缺省为 false；普通 WebUI 不受影响。
 

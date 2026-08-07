@@ -69,9 +69,14 @@ func (s *Server) coverExt(w http.ResponseWriter, r *http.Request) {
 	s.proxyCover(w, r, p, rawURL)
 }
 
-// proxyCover 带回源头转发一张封面图并写出响应。ncmCoverDirect 模式下，
-// 无 CoverAware 的 provider（即无需 Referer 的源站）直接 302 到源站。
+// proxyCover 带回源头转发一张封面图并写出响应。支持尺寸变体的 provider
+// 默认回源缩略图，?size=original 跳过变换。ncmCoverDirect 模式下，无
+// CoverAware 的 provider（即无需 Referer 的源站）直接 302 到变换后的 URL。
 func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.Provider, rawURL string) {
+	if thumbnailer, ok := p.(provider.CoverThumbnailer); ok &&
+		r.URL.Query().Get("size") != "original" {
+		rawURL = thumbnailer.ThumbnailCoverURL(rawURL)
+	}
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid cover url")
 		return

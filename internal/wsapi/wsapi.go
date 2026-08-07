@@ -26,6 +26,32 @@ type PlayerBindingStore interface {
 	GetRoomOutputState(ctx context.Context, roomID string) (store.RoomOutputState, error)
 }
 
+const (
+	commandRatePerSecond = 30
+	commandBurst         = 60
+)
+
+type commandTokenBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func newCommandTokenBucket(now time.Time) commandTokenBucket {
+	return commandTokenBucket{tokens: commandBurst, last: now}
+}
+
+func (b *commandTokenBucket) allow(now time.Time) bool {
+	if elapsed := now.Sub(b.last); elapsed > 0 {
+		b.tokens = min(commandBurst, b.tokens+elapsed.Seconds()*commandRatePerSecond)
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 type Server struct {
 	authm          *auth.Manager
 	playerAuth     *auth.PlayerRegistry
@@ -65,6 +91,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		remote:    r.RemoteAddr,
 		send:      make(chan any, 64),
 		closeOnce: make(chan struct{}),
+		commands:  newCommandTokenBucket(time.Now()),
 	}
 	go c.writeLoop()
 	c.readLoop()
@@ -82,6 +109,7 @@ type client struct {
 	room      *room.Room
 	player    *playerState // 非 nil = 已注册播放端
 	send      chan any
+	commands  commandTokenBucket
 
 	closeOnce chan struct{}
 }
@@ -137,6 +165,11 @@ func (c *client) disconnect(reason string) {
 	}
 }
 
+type finalMessage struct {
+	value   any
+	written chan struct{}
+}
+
 func (c *client) writeLoop() {
 	ctx := context.Background()
 	for {
@@ -146,13 +179,20 @@ func (c *client) writeLoop() {
 			return
 		case msg = <-c.send:
 		}
-		data, err := json.Marshal(msg)
-		if err != nil {
-			continue
+		var written chan struct{}
+		if final, ok := msg.(finalMessage); ok {
+			msg = final.value
+			written = final.written
 		}
-		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err = c.conn.Write(wctx, websocket.MessageText, data)
-		cancel()
+		data, err := json.Marshal(msg)
+		if err == nil {
+			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err = c.conn.Write(wctx, websocket.MessageText, data)
+			cancel()
+		}
+		if written != nil {
+			close(written)
+		}
 		if err != nil {
 			return
 		}
@@ -180,7 +220,12 @@ func (c *client) readLoop() {
 			Ref  string          `json:"ref"`
 			Data json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal(data, &msg); err != nil {
+		decodeErr := json.Unmarshal(data, &msg)
+		if !c.commands.allow(time.Now()) {
+			c.replyErrAndDisconnect(msg.Ref, "rate_limited", "WebSocket command rate limit exceeded")
+			return
+		}
+		if decodeErr != nil {
 			c.replyErr("", "bad_request", "invalid message envelope")
 			continue
 		}
@@ -537,9 +582,31 @@ func (c *client) replyResult(ref string, err error) {
 	c.replyErr(ref, code, err.Error())
 }
 
-func (c *client) replyErr(ref, code, message string) {
-	c.Send(map[string]any{
+func errorReply(ref, code, message string) map[string]any {
+	return map[string]any{
 		"type": "error", "ref": ref,
 		"data": map[string]any{"code": code, "message": message},
-	})
+	}
+}
+
+func (c *client) replyErr(ref, code, message string) {
+	c.Send(errorReply(ref, code, message))
+}
+
+func (c *client) replyErrAndDisconnect(ref, code, message string) {
+	written := make(chan struct{})
+	select {
+	case <-c.closeOnce:
+		return
+	case c.send <- finalMessage{value: errorReply(ref, code, message), written: written}:
+	default:
+		c.disconnect("slow consumer")
+		return
+	}
+	select {
+	case <-written:
+	case <-c.closeOnce:
+	case <-time.After(10 * time.Second):
+	}
+	c.disconnect("command rate limit exceeded")
 }

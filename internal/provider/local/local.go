@@ -66,7 +66,11 @@ func (p *Provider) Add(ctx context.Context, filename string, r io.Reader, title,
 		title = strings.TrimSuffix(filename, ext)
 	}
 
-	album, bitrateKbps, coverPath := p.probeMeta(dst, id)
+	album, bitrateKbps, coverPath, err := p.probeMeta(dst, id)
+	if err != nil {
+		os.Remove(dst)
+		return provider.Track{}, err
+	}
 
 	m := store.MediaFile{
 		ID: id, Filename: id + ext, Title: title, Artist: artist,

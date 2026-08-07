@@ -436,6 +436,8 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 | `radio.play` | `{room_id, source, shuffle, once}` | 该 Room 的 controller | 进入电台模式（见 4.5） |
 | `radio.stop` | `{room_id}` | 该 Room 的 controller | 退出电台模式 |
 
+
+每条入站 WS 命令（包括认证前的 `auth`、`ping` 与 `room.join`）都计入连接级令牌桶：持续速率 30 条/秒、突发 60 条。桶耗尽时服务端回带该命令 `ref` 的 `rate_limited` 错误并关闭连接。
 受保护 Room 的入房判定按以下顺序执行：
 
 1. `guest_access.mode == "open"`：任何已认证身份免凭据；
@@ -515,13 +517,13 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 }
 ```
 
-- `max_queue`：待播队列总上限，0/缺省 = 不限。超限拒绝 `queue.add`，错误码 `queue_full`。
+- `max_queue`：待播队列总上限，0/缺省的有效值为 50；显式正数覆盖默认值。超限拒绝 `queue.add`，错误码 `queue_full`。
 - `queue_limits`：按身份的待播数上限。key 匹配身份的 **kind**（`guest`/`password`/`oidc`）或其任一 **role**；任一命中值为 0 → 显式不限（覆盖其他命中），否则取命中最大值，无命中 = 不限。超限拒绝，错误码 `quota_exceeded`。
 - `member_player_volume`：缺省 `false`。为 `true` 时，只允许由可信 Integration 签发、且来源 scope 当前默认 Room 正是该 Room 的 actor session 读取和设置 Room headless output desired volume；不授权普通 listener，不授权其他 Room，不授权单设备 mute、换房或绑定管理。
 - `start_lead_ms`：切歌起播提前量（毫秒），取值 `[0, 5000]`，缺省 600，0 = 关闭（切歌即 position 0）。房间内客户端装载普遍慢（公网带宽小、蓝牙输出）时调大；纯本地局域网可调小。语义与客户端处理见 §2.2。
 - `radio_control`：电台启停授权，取值 `"controller"`（缺省，现状）或 `"requester"`。为 `"requester"` 时，任何具全局 `requester` 角色的 Principal 可调用 `radio.play`/`radio.stop`（REST 与 WS 同一条授权路径）；其他取值一律拒绝写入（`invalid_policy`）。controller 授权不受影响。客户端应以 `GET /api/v1/rooms/{id}/capabilities` 的 `radio` 字段决定电台按钮可用性，而非自行推导。
 - 普通 guest 身份 ID 由名字确定性派生（`g_` + `sha256("guest:"+name)` 前 12 hex），同名重连仍是同一人；Integration synthetic guest 使用 3.6 的完整 external subject key——两者的限额与“移除自己点的歌”均可跨会话成立。
-- 电台补充不经过限额检查（补充只在队列 <3 时触发，天然有界）。
+- 电台补充不经过按身份的 `queue_limits`，但始终受 `max_queue` 的有效上限约束。
 - 播放历史与统计见 6 节 REST；`play_history` 只记**播放**（结束原因 `finished`/`skipped`），不记点歌意图。
 
 ### 4.8 播放端管理平面（player plane）
@@ -942,7 +944,7 @@ Content-Type: application/json
 
 ### 6.3 无状态 Room 合同（合同 A）
 
-这些路径都不建立 WS 连接或 Room listener，不要求 `room.join`，也不接收或检查 guest credential；WS admission 的 same-room Integration、`trusted_roles` 等免密判定在这里同样不参与授权。REST 保持无状态，只认证标准 Bearer session，再按操作检查 requester/controller。`controller` 的定义是全局 `room_admin` **OR** 此 Principal 在此 Room 的 `controller` grant（3.4）。
+这些路径都不建立 WS 连接或 Room listener，不要求 `room.join`，也不接收或检查 guest credential。REST 保持无状态，只认证标准 Bearer session，再按操作检查 requester/controller；唯一的准入投影是受保护 Room 的 state `stream_url`（见下文），它复用 WS admission 的免密判定。`controller` 的定义是全局 `room_admin` **OR** 此 Principal 在此 Room 的 `controller` grant（3.4）。
 
 **状态响应：**
 
@@ -970,7 +972,7 @@ Content-Type: application/json
 ```
 
 - 四个字段的领域形状与 4.1 相同；REST 顶层 `queue` 是一次性完整数组，不携带 WS 的 revision/part envelope，`radio` 也直接是值。
-- `playback.current` 非空时包含按本次调用 identity 签发的 `stream_url`；队列条目仍不含 `stream_url`。
+- `playback.current` 非空时，开放 Room 会包含按本次调用 identity 签发的 `stream_url`。受保护 Room 仅向满足与 `room.join` 相同免密准入判定的身份签发（全局/Room controller、映射到同 Room 的 Integration actor、命中 `trusted_roles` 的角色）；普通调用者的 `stream_url` 为空且不签发票据。队列条目仍不含 `stream_url`。
 - `listeners` 只反映已加入的普通 WS listener（不含 Headless Player）。查询本身无副作用，重复查询不会把调用者加入列表。
 
 **命令请求与成功响应：**
@@ -1201,7 +1203,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |
 | `internal` | 500 | 服务端内部错误 |
-| `rate_limited` | 429 | 同一来源 IP 的管理员口令或 Room guest credential 错误探测超过窗口阈值；不携带管理员口令的普通 guest 登录、Room 身份免密路径不计入相应探测 |
+| `rate_limited` | 429 | WS 连接命令桶（30 条/秒、突发 60）耗尽并断开，或同一来源 IP 的管理员口令/Room guest credential 错误探测超过窗口阈值 |
 
 ## 8. 明确不做的
 
