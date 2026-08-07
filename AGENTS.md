@@ -166,6 +166,7 @@ go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone   # optional: EdgeOne media offl
 
 ## External Dependencies (Sidecars)
 
+- **ffprobe/ffmpeg**: yuzu-server 的 local provider 上传媒体时用它做容器校验/标签提取/封面抽取（`ffprobe` 必需；缺失时上传返回 400 并提示安装）。发行版安装 `ffmpeg` 包即可提供两者。
 - **NCM provider**: requires [NeteaseCloudMusicApi](http://127.0.0.1:3000) running (config `ncm.enabled` + `ncm.base_url`)
 - **Bili provider**: requires [bilibili-api](http://127.0.0.1:3002) sidecar (config `bili.enabled` + `bili.base_url`)
 - **QQ provider**: requires [QQMusicApi](http://127.0.0.1:8080) web sidecar (config `qq.enabled` + `qq.base_url`; run `uv sync --group web --no-dev && uv run --no-sync web/run.py` in the QQMusicApi repo). Sidecar defaults: `security.enabled=true` with IP-based rate limit 60/min/IP — whitelist the yuzu host via `rate_limit_exempt_ips` in its `config.toml` (or rely on yuzu's audio cache dedup, which resolves each track once).

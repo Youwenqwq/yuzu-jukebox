@@ -2,6 +2,7 @@ package local
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -51,6 +52,9 @@ func (p *Provider) probeMeta(path, id string) (album string, bitrateKbps int, co
 		"-print_format", "json", "-show_format", "-show_streams", path).Output()
 	if err != nil {
 		log.Printf("local: ffprobe meta %s: %v", path, err)
+		if errors.Is(err, exec.ErrNotFound) {
+			return "", 0, "", fmt.Errorf("ffprobe metadata: executable 'ffprobe' not found — install ffmpeg on the server (local uploads require it)")
+		}
 		return "", 0, "", fmt.Errorf("ffprobe metadata: %w", err)
 	}
 	var meta ffprobeMeta
