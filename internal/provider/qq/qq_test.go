@@ -166,7 +166,11 @@ func TestResolveWithDispatchAndFallback(t *testing.T) {
 		switch r.URL.Path {
 		case "/song/get_cdn_dispatch":
 			dispatchCalls++
-			_, _ = w.Write([]byte(envelope(map[string]any{"retcode": 0, "sip": []string{"u.y.qq.com", "streamoc.music.tc.qq.com"}})))
+			// 真实形态：sip 带路径前缀与尾斜杠（purl 无前导斜杠）。
+			_, _ = w.Write([]byte(envelope(map[string]any{"retcode": 0, "sip": []string{
+				"http://106.119.86.89/amobile.music.tc.qq.com/",
+				"https://aqqmusic.tc.qq.com/",
+			}})))
 		case "/song/get_song_urls":
 			urlCalls++
 			var body struct {
@@ -192,7 +196,8 @@ func TestResolveWithDispatchAndFallback(t *testing.T) {
 				t.Errorf("file_type = %d, want fallback 13", body.FileType)
 			}
 			_, _ = w.Write([]byte(envelope(map[string]any{"expiration": 600, "data": []any{
-				map[string]any{"mid": testMid, "filename": "M500x.m3", "purl": "/M500" + testMid + ".mp3?guid=1&vkey=vk", "vkey": "vk", "ekey": "", "result": 0},
+				// 真实形态：purl 无前导斜杠
+				map[string]any{"mid": testMid, "filename": "M500x.m3", "purl": "M500" + testMid + ".mp3?guid=1&vkey=vk", "vkey": "vk", "ekey": "", "result": 0},
 			}})))
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -205,7 +210,8 @@ func TestResolveWithDispatchAndFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	wantURL := "https://u.y.qq.com/M500" + testMid + ".mp3?guid=1&vkey=vk"
+	// 直拼契约：sip 尾斜杠 + purl（无前导斜杠）——去掉尾斜杠会拼出 418 畸形 URL。
+	wantURL := "http://106.119.86.89/amobile.music.tc.qq.com/M500" + testMid + ".mp3?guid=1&vkey=vk"
 	if loc.URL != wantURL {
 		t.Fatalf("URL = %q, want %q", loc.URL, wantURL)
 	}

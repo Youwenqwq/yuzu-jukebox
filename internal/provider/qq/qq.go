@@ -45,7 +45,8 @@ const (
 )
 
 // fallbackCDNHost 是 SDK 内置的兜底 CDN 根地址（get_cdn_dispatch 不可用时）。
-const fallbackCDNHost = "https://isure.stream.qqmusic.qq.com"
+// 与 SDK 的 _SONG_URL_FALLBACK_DOMAIN 一致，保留尾斜杠（purl 无前导斜杠）。
+const fallbackCDNHost = "https://isure.stream.qqmusic.qq.com/"
 
 // cdnHostTTL 缓存 CDN 调度结果的时长；调度结果本身带 cache_time/refresh_time，
 // 这里取一个保守的固定值。
@@ -674,8 +675,13 @@ func (p *Provider) resolveType(ctx context.Context, mid string, fileType int, cr
 	return loc, true, nil
 }
 
-// cdnHost 取可用的 CDN 根地址（含 scheme、去尾斜杠）。30 分钟缓存；
-// 调度失败时回退旧缓存或 SDK 内置兜底域名。
+// cdnHost 取可用的 CDN 根地址。30 分钟缓存；调度失败时回退旧缓存或 SDK
+// 内置兜底域名。
+//
+// 拼接契约（与 SDK 的 cdn + purl 直拼一致）：sip 条目**保留尾斜杠**
+// （如 "http://106.119.86.89/amobile.music.tc.qq.com/"），purl 无前导斜杠
+// （"M800xxx.mp3?guid=..."）。去掉尾斜杠会把路径前缀的分隔符吃掉，
+// 拼出 "…/amobile.music.tc.qq.comM800…" 畸形 URL——腾讯 CDN 返回 418。
 func (p *Provider) cdnHost(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -700,7 +706,6 @@ func (p *Provider) cdnHost(ctx context.Context) (string, error) {
 		if !strings.HasPrefix(h, "http://") && !strings.HasPrefix(h, "https://") {
 			h = "https://" + h
 		}
-		h = strings.TrimRight(h, "/")
 		p.cdnRoot, p.cdnFetched = h, time.Now()
 		return h, nil
 	}
