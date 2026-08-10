@@ -126,6 +126,10 @@ func New(baseURL string, fileType int, st *store.Store) *Provider {
 
 func (p *Provider) ID() string { return "qq" }
 
+// CoverMode 实现 provider.CoverModeAware：QQ 图床无防盗链，客户端可直连，
+// 统一封面端点 302 到源站 URL，省服务器带宽。
+func (*Provider) CoverMode() provider.CoverMode { return provider.CoverModeRedirect }
+
 // ThumbnailCoverURL implements provider.CoverThumbnailer as a no-op: QQ cover
 // URLs are already size-bounded by construction (T00xR300x300M000), so the
 // cover proxy's ?size=original escape hatch has no visible effect for QQ.

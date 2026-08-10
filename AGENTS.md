@@ -198,6 +198,7 @@ Still planned:
 ## Agent Caveats
 
 - **Cover endpoint is unauthenticated** by design (`/api/v1/cover/{ref}`) — for `<img>` tags that can't send auth headers. Entity covers (artist/album/playlist, no TrackRef) use `/api/v1/cover/ext/{token}` with a server-minted HMAC token (secret_key-derived) — never a url-passthrough proxy (SSRF). All search/drill responses rewrite `cover_url` to proxy paths at the serialization layer; keep the invariant "clients never see raw source URLs" when adding new track/entity surfaces
+- **Cover fetch mode is provider-declared** (`provider.CoverModeAware`, `CoverModeProxy`/`CoverModeRedirect`): ncm/qq declare Redirect (302 to source, no Referer needed — saves server bandwidth), bili declares Proxy (CoverAware: hdslb needs Referer). Decision priority in `httpapi.Server.coverMode`: CoverAware always proxies (302 would drop required headers) → declared mode wins → undeclared providers follow the global `ncm.cover_direct` default. `proxyCover` is the single fetch/redirect implementation for both track and entity covers; local covers bypass it (served from `cover_path` on disk)
 - **Stream endpoint uses ticket auth** (`?ticket=...`) — for `<audio>` tags. Tickets are 5-minute TTL bound to ref + identity
 - **CORS**: methods/headers/max-age are hardcoded in `httpapi.corsMiddleware`, only origins configurable
 - **WS state machine**: playback position is computed from `position_ms + updated_at + playing` — never stored as a continuous counter

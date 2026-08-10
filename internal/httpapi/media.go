@@ -71,8 +71,8 @@ func (s *Server) coverExt(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyCover 带回源头转发一张封面图并写出响应。支持尺寸变体的 provider
-// 默认回源缩略图，?size=original 跳过变换。ncmCoverDirect 模式下，无
-// CoverAware 的 provider（即无需 Referer 的源站）直接 302 到变换后的 URL。
+// 默认回源缩略图，?size=original 跳过变换。取图模式由 coverMode 决定：
+// Redirect 直接 302 到变换后的 URL（省服务器带宽），Proxy 带回源头取图。
 func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.Provider, rawURL string) {
 	if thumbnailer, ok := p.(provider.CoverThumbnailer); ok &&
 		r.URL.Query().Get("size") != "original" {
@@ -82,11 +82,9 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid cover url")
 		return
 	}
-	if s.ncmCoverDirect {
-		if _, ok := p.(provider.CoverAware); !ok {
-			http.Redirect(w, r, rawURL, http.StatusFound)
-			return
-		}
+	if s.coverMode(p) == provider.CoverModeRedirect {
+		http.Redirect(w, r, rawURL, http.StatusFound)
+		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), "GET", rawURL, nil)
 	if err != nil {
@@ -116,6 +114,24 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	w.Header().Set("Cache-Control", "public, max-age=2592000")
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, io.LimitReader(resp.Body, 20<<20))
+}
+
+// coverMode 决定封面取图模式，优先级：
+//  1. CoverAware（需要 Referer 等请求头）→ 恒代理：302 会丢掉必要请求头，
+//     即使 provider 声明 Redirect 也以代理为准；
+//  2. 显式声明 CoverModeAware → 以声明为准（ncm/qq=Redirect，bili=Proxy）；
+//  3. 未声明 → 全局默认 coverDirectDefault（配置 ncm.cover_direct）。
+func (s *Server) coverMode(p provider.Provider) provider.CoverMode {
+	if _, ok := p.(provider.CoverAware); ok {
+		return provider.CoverModeProxy
+	}
+	if ma, ok := p.(provider.CoverModeAware); ok {
+		return ma.CoverMode()
+	}
+	if s.coverDirectDefault {
+		return provider.CoverModeRedirect
+	}
+	return provider.CoverModeProxy
 }
 
 // proxiedEntityCover 把实体封面改写为 /api/v1/cover/ext/{token} 代理路径；

@@ -81,7 +81,10 @@ type NCMConfig struct {
 	Enabled     bool   `json:"enabled"`
 	BaseURL     string `json:"base_url"` // 如 http://127.0.0.1:3000
 	Level       string `json:"level"`    // 音质等级，默认 exhigh
-	CoverDirect bool   `json:"cover_direct"`
+	// CoverDirect 封面取图默认模式：true=302 客户端直连（省服务器带宽），
+	// false=服务器代理。仅作用于未显式声明 CoverMode 的 provider；
+	// ncm/qq 已声明 Redirect，bili 已声明 Proxy（需 Referer，恒代理）。
+	CoverDirect bool `json:"cover_direct"`
 }
 
 type BiliConfig struct {

@@ -532,6 +532,10 @@ type ncmAl struct {
 
 const defaultCoverParam = "300y300"
 
+// CoverMode 实现 provider.CoverModeAware：网易图床无防盗链，客户端可直连，
+// 统一封面端点 302 到源站 URL，省服务器带宽。
+func (*Provider) CoverMode() provider.CoverMode { return provider.CoverModeRedirect }
+
 // ThumbnailCoverURL asks NetEase's image CDN for the default thumbnail while
 // preserving any other source query parameters. Dropping param restores the
 // original image URL.

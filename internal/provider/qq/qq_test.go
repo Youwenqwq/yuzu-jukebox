@@ -70,6 +70,14 @@ func TestThumbnailCoverURL(t *testing.T) {
 	}
 }
 
+// TestCoverMode 封面取图模式契约：QQ 图床无防盗链，客户端可直连（302）。
+func TestCoverMode(t *testing.T) {
+	p := &Provider{}
+	if got := p.CoverMode(); got != provider.CoverModeRedirect {
+		t.Fatalf("CoverMode() = %q, want %q", got, provider.CoverModeRedirect)
+	}
+}
+
 func TestSearchParamsAndMapping(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search/search_by_type" {

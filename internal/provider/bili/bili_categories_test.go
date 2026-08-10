@@ -64,6 +64,14 @@ func TestThumbnailCoverURL(t *testing.T) {
 	}
 }
 
+// TestCoverMode 封面取图模式契约：B 站图床需 Referer，必须服务器代理。
+func TestCoverMode(t *testing.T) {
+	p := &Provider{}
+	if got := p.CoverMode(); got != provider.CoverModeProxy {
+		t.Fatalf("CoverMode() = %q, want %q", got, provider.CoverModeProxy)
+	}
+}
+
 func TestSearchCategoryArtistMapping(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

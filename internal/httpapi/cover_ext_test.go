@@ -97,6 +97,22 @@ func (*coverRedirectProvider) ThumbnailCoverURL(raw string) string {
 	return u.String()
 }
 
+// coverModeRedirectProvider 显式声明 Redirect（未实现 CoverAware）。
+type coverModeRedirectProvider struct{ coverRedirectProvider }
+
+func (*coverModeRedirectProvider) CoverMode() provider.CoverMode { return provider.CoverModeRedirect }
+
+// coverModeProxyProvider 显式声明 Proxy（未实现 CoverAware）。
+type coverModeProxyProvider struct{ coverRedirectProvider }
+
+func (*coverModeProxyProvider) CoverMode() provider.CoverMode { return provider.CoverModeProxy }
+
+// coverAwareRedirectProvider 同时实现 CoverAware 与 Redirect 声明——
+// 安全网要求恒代理（302 会丢掉 Referer）。
+type coverAwareRedirectProvider struct{ coverFakeProvider }
+
+func (*coverAwareRedirectProvider) CoverMode() provider.CoverMode { return provider.CoverModeRedirect }
+
 func setupCoverServer(t *testing.T) (*Server, *coverFakeProvider) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "cover.db"), nil)
@@ -189,7 +205,8 @@ func TestCoverExtOriginalSkipsThumbnail(t *testing.T) {
 }
 
 func TestProxyCoverDirectRedirectThumbnailSelection(t *testing.T) {
-	s := &Server{ncmCoverDirect: true}
+	// coverRedirectProvider 未声明 CoverMode，走全局默认（默认直连）。
+	s := &Server{coverDirectDefault: true}
 	p := &coverRedirectProvider{}
 	tests := []struct {
 		name    string
@@ -219,6 +236,55 @@ func TestProxyCoverDirectRedirectThumbnailSelection(t *testing.T) {
 				t.Fatalf("Location = %q, want %q", got, tt.wantURL)
 			}
 		})
+	}
+}
+
+// TestProxyCoverModePriority 封面取图模式决策优先级：
+// 声明 > 全局默认；CoverAware 恒代理（安全网）。
+func TestProxyCoverModePriority(t *testing.T) {
+	var lastRefer string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastRefer = r.Header.Get("Referer")
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("fake-image"))
+	}))
+	defer upstream.Close()
+
+	// 声明 Redirect + 全局默认代理 → 以声明为准：302
+	rec := httptest.NewRecorder()
+	s := &Server{}
+	s.proxyCover(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cover/x", nil),
+		&coverModeRedirectProvider{}, upstream.URL+"/r.jpg")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("declared redirect + default proxy: status = %d, want 302", rec.Code)
+	}
+
+	// 声明 Proxy + 全局默认直连 → 以声明为准：代理取图
+	rec = httptest.NewRecorder()
+	s2 := &Server{coverDirectDefault: true}
+	s2.proxyCover(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cover/x", nil),
+		&coverModeProxyProvider{}, upstream.URL+"/p.jpg")
+	if rec.Code != http.StatusOK || rec.Body.String() != "fake-image" {
+		t.Fatalf("declared proxy + default redirect: status = %d body = %q", rec.Code, rec.Body.String())
+	}
+
+	// CoverAware + 声明 Redirect + 默认直连 → 恒代理，且注入 Referer
+	rec = httptest.NewRecorder()
+	s2.proxyCover(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cover/x", nil),
+		&coverAwareRedirectProvider{}, upstream.URL+"/a.jpg")
+	if rec.Code != http.StatusOK || rec.Body.String() != "fake-image" {
+		t.Fatalf("cover-aware declared redirect: status = %d body = %q", rec.Code, rec.Body.String())
+	}
+	if lastRefer != "https://fake.example/" {
+		t.Fatalf("CoverAware Referer = %q, want injected", lastRefer)
+	}
+
+	// 未声明 + 全局默认代理 → 代理取图
+	rec = httptest.NewRecorder()
+	s.proxyCover(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cover/x", nil),
+		&coverRedirectProvider{}, upstream.URL+"/u.jpg")
+	if rec.Code != http.StatusOK || rec.Body.String() != "fake-image" {
+		t.Fatalf("undeclared + default proxy: status = %d body = %q", rec.Code, rec.Body.String())
 	}
 }
 

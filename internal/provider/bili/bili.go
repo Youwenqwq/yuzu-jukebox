@@ -603,6 +603,10 @@ func (p *Provider) Resolve(ctx context.Context, ref provider.TrackRef) (provider
 // 与拉流复用同一组头。
 func (p *Provider) CoverHeaders() http.Header { return streamHeaders }
 
+// CoverMode 实现 provider.CoverModeAware：B 站图床需 Referer（CoverAware），
+// 客户端无法直连，声明为显式代理模式。
+func (*Provider) CoverMode() provider.CoverMode { return provider.CoverModeProxy }
+
 const defaultCoverThumbnailSuffix = "@672w_378h_1c.webp"
 
 var coverVariantSuffix = regexp.MustCompile(`@\d+w_\d+h(?:_[^/]*)?(?:\.[^/]*)?$`)

@@ -215,6 +215,29 @@ type CoverAware interface {
 	CoverHeaders() http.Header
 }
 
+// CoverMode 决定统一封面端点（/api/v1/cover/{ref}、/api/v1/cover/ext/{token}）
+// 在源站可直连时的取图方式。
+type CoverMode string
+
+const (
+	// CoverModeProxy 由服务器带回源头取图并回写响应。
+	// 适用于客户端不可直连的源站（防盗链、需要 Referer 等请求头）。
+	CoverModeProxy CoverMode = "proxy"
+	// CoverModeRedirect 服务器 302 到源站 URL，由客户端直连。
+	// 适用于无防盗链的图床，省服务器带宽。
+	CoverModeRedirect CoverMode = "redirect"
+)
+
+// CoverModeAware 是可选接口：Provider 显式声明封面取图模式。
+// 决策优先级（见 httpapi.Server.coverMode）：
+//  1. CoverAware（需要 Referer 等请求头）→ 恒代理，302 会丢头；
+//  2. 显式声明 CoverMode → 以声明为准；
+//  3. 未声明 → 全局默认（配置 ncm.cover_direct）。
+type CoverModeAware interface {
+	Provider
+	CoverMode() CoverMode
+}
+
 // CoverThumbnailer 由封面 CDN 支持尺寸变体的 provider 实现。
 // 代理默认应用缩略图变换；客户端传 ?size=original 时跳过。
 type CoverThumbnailer interface {

@@ -41,8 +41,10 @@ type Server struct {
 	oidc        *auth.OIDCValidator // nil = OIDC 未启用
 	oidcRoleMap map[string][]string
 
-	ncmCoverDirect bool
-	maxUploadBytes int64
+	// coverDirectDefault 是未声明 CoverMode 的 provider 的封面取图默认：
+	// true=302 客户端直连（省服务器带宽），false=服务器代理。已声明的 provider 以声明为准。
+	coverDirectDefault bool
+	maxUploadBytes     int64
 
 	// coverSigner 签发并校验实体封面代理 token。
 	coverSigner *coverurl.Signer
@@ -81,14 +83,14 @@ func NewServer(
 	ws *wsapi.Server,
 	oidc *auth.OIDCValidator,
 	oidcRoleMap map[string][]string,
-	ncmCoverDirect bool,
+	coverDirectDefault bool,
 	maxUploadBytes int64,
 ) *Server {
 	return &Server{
 		st: st, authm: authm, integrations: integrations, bindings: bindings,
 		rooms: rooms, reg: reg, local: lp, cache: c, controls: controls, ws: ws,
 		oidc: oidc, oidcRoleMap: oidcRoleMap,
-		ncmCoverDirect: ncmCoverDirect, maxUploadBytes: maxUploadBytes,
+		coverDirectDefault: coverDirectDefault, maxUploadBytes: maxUploadBytes,
 	}
 }
 
