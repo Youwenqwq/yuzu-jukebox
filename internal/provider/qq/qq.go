@@ -575,18 +575,36 @@ func (p *Provider) Search(ctx context.Context, query string, limit, offset int) 
 	return out, nil
 }
 
-// songDetail 取单曲详情（数字 id 与 type 也在这里回读，供账号写操作使用）。
-func (p *Provider) songDetail(ctx context.Context, mid string) (qqSong, error) {
+// songDetail 取单曲详情（数字 id 与 type 也在这里回读，供账号写操作使用），
+// 并顺带取曲目简介（detail 响应的 info.intro，零额外请求）。
+func (p *Provider) songDetail(ctx context.Context, mid string) (qqSong, string, error) {
 	var data struct {
 		Track qqSong `json:"track"`
+		Info  struct {
+			Intro []struct {
+				Value   string `json:"value"`
+				Content string `json:"content"`
+			} `json:"intro"`
+		} `json:"info"`
 	}
 	if err := p.get(ctx, p.client, "/song/"+url.PathEscape(mid)+"/detail", nil, nil, &data); err != nil {
-		return qqSong{}, err
+		return qqSong{}, "", err
 	}
 	if data.Track.Mid == "" {
-		return qqSong{}, fmt.Errorf("track not found: %s", mid)
+		return qqSong{}, "", fmt.Errorf("track not found: %s", mid)
 	}
-	return data.Track, nil
+	desc := ""
+	for _, it := range data.Info.Intro {
+		text := strings.TrimSpace(it.Value)
+		if text == "" {
+			text = strings.TrimSpace(it.Content)
+		}
+		if text != "" {
+			desc = text
+			break
+		}
+	}
+	return data.Track, desc, nil
 }
 
 func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provider.Track, error) {
@@ -594,12 +612,13 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 	if err != nil {
 		return provider.Track{}, err
 	}
-	song, err := p.songDetail(ctx, id)
+	song, desc, err := p.songDetail(ctx, id)
 	if err != nil {
 		return provider.Track{}, err
 	}
 	track := p.songTrack(song)
 	track.Ref = ref
+	track.Description = desc
 	return track, nil
 }
 

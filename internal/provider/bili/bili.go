@@ -542,6 +542,7 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 		Author string `json:"author"`
 		Cover  string `json:"cover"` // sidecar 现有字段；完整 https URL
 		Pic    string `json:"pic"`   // 预留：上游 bilibili API 原生封面字段
+		Desc   string `json:"desc"`  // 视频简介（sidecar 透传自 view API data.desc）
 		TName  string `json:"tname"` // 预留：视频分区，作为 Album
 		Owner  struct {
 			Name string `json:"name"` // 预留：UP 主名
@@ -597,6 +598,7 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 		Title:        title,
 		Artist:       resp.Author,
 		Album:        album,
+		Description:  resp.Desc,
 		CoverURL:     normalizeCoverURL(cover),
 		SourceURL:    sourceURL,
 		DurationMs:   duration,

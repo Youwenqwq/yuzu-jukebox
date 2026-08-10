@@ -42,18 +42,21 @@ type Contributor struct {
 	Name string `json:"name"`
 }
 
-// Track 是媒体元数据（曲目层）。Album/CoverURL/SourceURL/Contributors
-// 为可选富字段，provider 按数据源实际能力填充，客户端对空值降级。
+// Track 是媒体元数据（曲目层）。Album/CoverURL/SourceURL/Contributors/
+// Description 为可选富字段，provider 按数据源实际能力填充，客户端对空值降级。
+// Description 是曲目级简介（NCM 歌曲百科 / QQ intro / B 站视频简介），
+// 只在零成本可得时填充（随元数据端点同响应返回），不进热路径。
 // CoverURL 可能是服务端代理地址（源站需 Referer 时）。
 type Track struct {
-	Ref          TrackRef      `json:"track_ref"`
-	Title        string        `json:"title"`
-	Artist       string        `json:"artist"`
-	DurationMs   int64         `json:"duration_ms"`
-	Album        string        `json:"album,omitempty"`
-	CoverURL     string        `json:"cover_url,omitempty"`
-	SourceURL    string        `json:"source_url,omitempty"`
-	Contributors []Contributor `json:"contributors,omitempty"`
+	Ref          TrackRef       `json:"track_ref"`
+	Title        string         `json:"title"`
+	Artist       string         `json:"artist"`
+	DurationMs   int64          `json:"duration_ms"`
+	Album        string         `json:"album,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	CoverURL     string         `json:"cover_url,omitempty"`
+	SourceURL    string         `json:"source_url,omitempty"`
+	Contributors []Contributor  `json:"contributors,omitempty"`
 }
 
 // Lyrics 歌词。Type 目前只有 "lrc"；TLRC 为翻译（可无）。

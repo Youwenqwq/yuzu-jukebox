@@ -193,3 +193,37 @@ func TestNewSourceRanking(t *testing.T) {
 		t.Fatal("NewSource(ranking:) unexpectedly succeeded")
 	}
 }
+
+// TestGetTrackDescription /detail 透传的视频简介进入 Track.Description。
+func TestGetTrackDescription(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/detail" || r.URL.Query().Get("bvid") != "BV1xx411c7mD" {
+			t.Errorf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"bvid":        "BV1xx411c7mD",
+			"title":       "测试视频",
+			"author":      "UP主",
+			"cover":       "https://i0.hdslb.com/bfs/cover.jpg",
+			"tname":       "音乐",
+			"desc":        "这是视频简介",
+			"duration_ms": 1000,
+			"pages": []any{
+				map[string]any{"page": 1, "part": "P1", "duration_ms": 1000},
+			},
+		})
+	}))
+	defer server.Close()
+	p := testProvider(server, "")
+
+	got, err := p.GetTrack(context.Background(), provider.NewRef("bili", "BV1xx411c7mD"))
+	if err != nil {
+		t.Fatalf("GetTrack() error = %v", err)
+	}
+	if got.Title != "测试视频" || got.Artist != "UP主" || got.DurationMs != 1000 {
+		t.Fatalf("GetTrack() = %#v", got)
+	}
+	if got.Description != "这是视频简介" {
+		t.Fatalf("Description = %q, want 这是视频简介", got.Description)
+	}
+}

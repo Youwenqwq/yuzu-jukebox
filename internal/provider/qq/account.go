@@ -20,7 +20,8 @@ const likeDirID = 201
 
 // songMeta 回读曲目数字 id 与类型（账号写操作需要，TrackRef 只有 mid）。
 func (p *Provider) songMeta(ctx context.Context, mid string) (qqSong, error) {
-	return p.songDetail(ctx, mid)
+	song, _, err := p.songDetail(ctx, mid)
+	return song, err
 }
 
 // write 用短超时客户端执行账号写操作（POST + 查询参数，Cookie 凭据）。

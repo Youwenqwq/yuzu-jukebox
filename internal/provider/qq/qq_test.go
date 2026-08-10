@@ -166,7 +166,12 @@ func TestGetTrack(t *testing.T) {
 		if r.URL.Path != "/song/"+testMid+"/detail" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(envelope(map[string]any{"track": songFixture(testMid, testName, 101, 267, "周杰伦")})))
+		_, _ = w.Write([]byte(envelope(map[string]any{
+			"track": songFixture(testMid, testName, 101, 267, "周杰伦"),
+			"info": map[string]any{
+				"intro": []any{map[string]any{"id": 1, "value": "歌曲简介文本", "show_type": 1}},
+			},
+		})))
 	}))
 	defer server.Close()
 	p := testProvider(t, server)
@@ -178,6 +183,9 @@ func TestGetTrack(t *testing.T) {
 	}
 	if got.Ref != ref || got.Title != testName || got.Artist != "周杰伦" {
 		t.Fatalf("GetTrack() = %#v", got)
+	}
+	if got.Description != "歌曲简介文本" {
+		t.Fatalf("Description() = %q, want 歌曲简介文本", got.Description)
 	}
 }
 
