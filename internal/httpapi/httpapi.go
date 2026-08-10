@@ -163,6 +163,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/radio/tracks", s.radioTracks)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("GET /api/v1/providers/{id}/similar", s.similarProviderTracks)
+	mux.HandleFunc("GET /api/v1/providers/{id}/radio-catalog", s.radioSourceCatalog)
 	mux.HandleFunc("POST /api/v1/providers/{id}/credential", s.setCredential)
 	mux.HandleFunc("POST /api/v1/providers/{id}/like", s.likeProviderTrack)
 	mux.HandleFunc("POST /api/v1/providers/{id}/playlist-add", s.addProviderTrackToPlaylist)

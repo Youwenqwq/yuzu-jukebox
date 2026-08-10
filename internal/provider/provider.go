@@ -194,6 +194,23 @@ type RadioSource struct {
 	RequiresCredential bool   `json:"requires_credential,omitempty"` // true = 使用服务端配置凭据
 }
 
+// RadioSourceEntry 可枚举电台源目录条目（动态目录，如 QQ 榜单全集）。
+// CoverURL 为源站原始 URL，httpapi 序列化层改写为代理路径。
+type RadioSourceEntry struct {
+	Spec     string `json:"spec"`               // 完整规格（不含 provider 前缀），如 "top:26"
+	Name     string `json:"name"`               // 展示名
+	CoverURL string `json:"cover_url,omitempty"` // 封面（源站原始 URL）
+	Detail   string `json:"detail,omitempty"`   // 副行文本（更新周期/简介等）
+}
+
+// RadioSourceCatalogLister 是可选接口：报告可枚举的电台源目录。
+// 静态 RadioSources() 之外的动态目录（如 QQ 榜单 top:<id> 全集）经
+// /api/v1/providers/{id}/radio-catalog 下发；不实现则端点 501。
+type RadioSourceCatalogLister interface {
+	Provider
+	RadioSourceCatalog(ctx context.Context) ([]RadioSourceEntry, error)
+}
+
 // SourceCatalog 是可选接口：SourceFactory provider 实现它向客户端报告可用电台源。
 // 不支持的 provider 直接不实现，调用方以类型断言探测。
 type SourceCatalog interface {

@@ -173,3 +173,35 @@ func TestNewsongSourceMaterialization(t *testing.T) {
 		t.Fatalf("batch3 = %d exhausted=%v, want 0/true", len(batch3), exhausted3)
 	}
 }
+
+// TestRadioSourceCatalog 榜单目录枚举：/top/get_category → top:<id> 条目。
+func TestRadioSourceCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/top/get_category" {
+			t.Errorf("path = %q, want /top/get_category", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(envelope(map[string]any{"group": []any{
+			map[string]any{"name": "内地", "toplist": []any{
+				map[string]any{"id": 26, "name": "热歌榜", "intro": "最热歌曲", "period": "日榜", "front_pic_url": "https://img/top26.jpg"},
+				map[string]any{"id": 62, "name": "飙升榜", "front_pic_url": ""},
+			}},
+			map[string]any{"name": "欧美", "toplist": []any{
+				map[string]any{"id": 4, "name": "巅峰榜·欧美", "period": "", "intro": "欧美热门", "front_pic_url": "https://img/top4.jpg"},
+			}},
+		}})))
+	}))
+	p := testProvider(t, server)
+
+	got, err := p.RadioSourceCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("RadioSourceCatalog error = %v", err)
+	}
+	want := []provider.RadioSourceEntry{
+		{Spec: "top:26", Name: "热歌榜", CoverURL: "https://img/top26.jpg", Detail: "日榜"},
+		{Spec: "top:62", Name: "飙升榜"},
+		{Spec: "top:4", Name: "巅峰榜·欧美", CoverURL: "https://img/top4.jpg", Detail: "欧美热门"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RadioSourceCatalog() = %#v, want %#v", got, want)
+	}
+}

@@ -116,6 +116,7 @@ type providerRadioSimilarFake struct {
 	similar      []provider.Track
 	similarErr   error
 	similarCalls [][2]any
+	catalog      []provider.RadioSourceEntry
 }
 
 func (p *providerRadioSimilarFake) RadioSources() []provider.RadioSource {
@@ -159,6 +160,10 @@ func (p *providerRadioSimilarFake) Similar(_ context.Context, trackID string, li
 		return p.similar[:limit], nil
 	}
 	return p.similar, nil
+}
+
+func (p *providerRadioSimilarFake) RadioSourceCatalog(_ context.Context) ([]provider.RadioSourceEntry, error) {
+	return p.catalog, nil
 }
 
 type providerFiniteSourceFake struct {

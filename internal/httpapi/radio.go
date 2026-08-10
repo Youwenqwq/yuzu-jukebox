@@ -200,6 +200,37 @@ func (s *Server) similarProviderTracks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks})
 }
 
+// radioSourceCatalog 枚举 Provider 的动态电台源目录（如 QQ 榜单 top:<id> 全集）。
+// 静态 RadioSources() 之外的可选项；能力缺席 501 not_supported。
+func (s *Server) radioSourceCatalog(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+		return
+	}
+	providerID := r.PathValue("id")
+	p, exists := s.reg.Get(providerID)
+	if !exists {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown provider: "+providerID)
+		return
+	}
+	lister, supported := p.(provider.RadioSourceCatalogLister)
+	if !supported {
+		writeErr(w, http.StatusNotImplemented, "not_supported", "provider has no radio source catalog")
+		return
+	}
+	entries, err := lister.RadioSourceCatalog(r.Context())
+	if err != nil {
+		s.providerError(w, r, "list radio source catalog", err)
+		return
+	}
+	if entries == nil {
+		entries = []provider.RadioSourceEntry{}
+	}
+	for i := range entries {
+		entries[i].CoverURL = s.proxiedEntityCover(providerID, entries[i].CoverURL)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": entries})
+}
+
 func parseTrackLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
 	limit := 30
 	if raw := r.URL.Query().Get("limit"); raw != "" {

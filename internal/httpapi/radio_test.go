@@ -195,3 +195,53 @@ func TestProviderSimilarEndpoint(t *testing.T) {
 		}
 	})
 }
+
+// TestProviderRadioSourceCatalogEndpoint 动态电台源目录：实体封面改代理路径、
+// 能力缺席 501、未知 provider 404。
+func TestProviderRadioSourceCatalogEndpoint(t *testing.T) {
+	f := setupProviderEndpoints(t)
+
+	t.Run("returns catalog with proxied covers", func(t *testing.T) {
+		f.radio.catalog = []provider.RadioSourceEntry{
+			{Spec: "top:26", Name: "热歌榜", CoverURL: "https://img/top.jpg", Detail: "日榜"},
+			{Spec: "top:4", Name: "巅峰榜·流行", CoverURL: ""},
+		}
+		rec := providerEndpointRequest(t, f, http.MethodGet,
+			"/api/v1/providers/radio/radio-catalog", f.ownerToken, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Sources []provider.RadioSourceEntry `json:"sources"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Sources) != 2 || body.Sources[0].Spec != "top:26" ||
+			body.Sources[0].Name != "热歌榜" || body.Sources[0].Detail != "日榜" {
+			t.Fatalf("sources = %#v", body.Sources)
+		}
+		if got := body.Sources[0].CoverURL; !strings.HasPrefix(got, "/api/v1/cover/ext/") {
+			t.Fatalf("cover = %q, want ext proxy path", got)
+		}
+		if body.Sources[1].CoverURL != "" {
+			t.Fatalf("empty cover not left empty: %q", body.Sources[1].CoverURL)
+		}
+	})
+
+	t.Run("validates provider and capability", func(t *testing.T) {
+		tests := []struct {
+			path string
+			want int
+		}{
+			{"/api/v1/providers/missing/radio-catalog", http.StatusNotFound},
+			{"/api/v1/providers/basic/radio-catalog", http.StatusNotImplemented},
+		}
+		for _, tt := range tests {
+			rec := providerEndpointRequest(t, f, http.MethodGet, tt.path, f.ownerToken, nil)
+			if rec.Code != tt.want {
+				t.Errorf("%s status = %d, want %d, body = %s", tt.path, rec.Code, tt.want, rec.Body.String())
+			}
+		}
+	})
+}

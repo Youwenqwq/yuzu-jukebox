@@ -93,6 +93,42 @@ func (p *Provider) RadioSources() []provider.RadioSource {
 	}
 }
 
+// RadioSourceCatalog 实现 provider.RadioSourceCatalogLister：/top/get_category
+// （匿名）枚举全部榜单 → top:<id> 完整规格条目，供客户端渲染榜单选择器。
+func (p *Provider) RadioSourceCatalog(ctx context.Context) ([]provider.RadioSourceEntry, error) {
+	var data struct {
+		Group []struct {
+			Name    string `json:"name"`
+			Toplist []struct {
+				ID          int64  `json:"id"`
+				Name        string `json:"name"`
+				Intro       string `json:"intro"`
+				Period      string `json:"period"`
+				FrontPicURL string `json:"front_pic_url"`
+			} `json:"toplist"`
+		} `json:"group"`
+	}
+	if err := p.get(ctx, p.client, "/top/get_category", nil, nil, &data); err != nil {
+		return nil, err
+	}
+	var out []provider.RadioSourceEntry
+	for _, g := range data.Group {
+		for _, tl := range g.Toplist {
+			detail := tl.Period
+			if detail == "" {
+				detail = tl.Intro
+			}
+			out = append(out, provider.RadioSourceEntry{
+				Spec:     "top:" + strconv.FormatInt(tl.ID, 10),
+				Name:     tl.Name,
+				CoverURL: tl.FrontPicURL,
+				Detail:   detail,
+			})
+		}
+	}
+	return out, nil
+}
+
 // ---------- 排行榜（有限源） ----------
 
 // topSource 分页游走榜单曲目。首请求记录 total_num，供耗尽判定。
