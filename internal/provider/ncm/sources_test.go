@@ -26,6 +26,11 @@ func TestRadioSources(t *testing.T) {
 			source: &dailySource{p: p},
 		},
 		{
+			name:   "newsong",
+			want:   provider.RadioSource{Spec: "newsong", Name: "推荐新歌", Finite: true},
+			source: &listSource{},
+		},
+		{
 			name:   "fm",
 			want:   provider.RadioSource{Spec: "fm", Name: "私人 FM", Finite: false, RequiresCredential: true},
 			source: &fmSource{p: p},
@@ -43,7 +48,7 @@ func TestRadioSources(t *testing.T) {
 		{
 			name:   "playlist",
 			want:   provider.RadioSource{Spec: "playlist", Arg: "playlist_id", Name: "歌单电台", Finite: true},
-			source: &playlistSource{},
+			source: &listSource{},
 		},
 	}
 	if len(got) != len(tests) {
@@ -200,6 +205,70 @@ func TestPlaylistSourceMaterializesAndDrains(t *testing.T) {
 	}
 	if detailRequests != 1 || trackRequests != 1 {
 		t.Fatalf("source refetched: detail:%d tracks:%d", detailRequests, trackRequests)
+	}
+}
+
+// TestNewsongSourceMaterializesAndDrains 推荐新歌源匿名物化 /personalized/newsong
+//（song 内联完整曲目），游标式耗尽。
+func TestNewsongSourceMaterializesAndDrains(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/personalized/newsong" {
+			t.Errorf("path = %q, want /personalized/newsong", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("limit"); got != "30" {
+			t.Errorf("limit = %q, want 30", got)
+		}
+		if got := r.URL.Query().Get("cookie"); got != "" {
+			t.Errorf("anonymous newsong sent cookie %q", got)
+		}
+		_, _ = w.Write([]byte(`{"code":200,"result":[
+			{"song":{"id":1,"name":"一","duration":1000,"album":{"name":"专辑一","picUrl":"https://cover/1"},"artists":[{"name":"甲"}]}},
+			{"song":{"id":2,"name":"二","dt":2000,"al":{"name":"专辑二","picUrl":"https://cover/2"},"ar":[{"name":"乙"}]}}
+		]}`))
+	}))
+	defer server.Close()
+
+	p := &Provider{base: server.URL, client: server.Client()}
+	p.cookie.Store("")
+	src, err := p.NewSource(context.Background(), "newsong")
+	if err != nil {
+		t.Fatalf("NewSource() error = %v", err)
+	}
+	if !src.Finite() {
+		t.Fatal("Finite() = false, want true")
+	}
+	if got := src.Description(); got != "网易云推荐新歌" {
+		t.Fatalf("Description() = %q", got)
+	}
+
+	first, exhausted, err := src.NextBatch(context.Background(), 1, "")
+	if err != nil {
+		t.Fatalf("first NextBatch() error = %v", err)
+	}
+	if exhausted || len(first) != 1 || first[0].Ref != "ncm:1" ||
+		first[0].Title != "一" || first[0].Artist != "甲" || first[0].Album != "专辑一" {
+		t.Fatalf("first batch = %#v, want ncm:1 with rich fields", first)
+	}
+
+	second, exhausted, err := src.NextBatch(context.Background(), 10, "")
+	if err != nil {
+		t.Fatalf("second NextBatch() error = %v", err)
+	}
+	if !exhausted || len(second) != 1 || second[0].Ref != "ncm:2" {
+		t.Fatalf("second batch = %#v, want ncm:2 and exhausted", second)
+	}
+
+	last, exhausted, err := src.NextBatch(context.Background(), 1, "")
+	if err != nil {
+		t.Fatalf("last NextBatch() error = %v", err)
+	}
+	if len(last) != 0 || !exhausted {
+		t.Fatalf("last NextBatch() = (%v, %v), want empty/true", last, exhausted)
+	}
+	if requests != 1 {
+		t.Fatalf("materialization requests = %d, want 1", requests)
 	}
 }
 

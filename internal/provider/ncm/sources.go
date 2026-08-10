@@ -111,16 +111,36 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 		if err != nil {
 			return nil, fmt.Errorf("playlist source: %w", err)
 		}
-		return &playlistSource{name: name, tracks: tracks}, nil
+		return &listSource{desc: "网易云歌单《" + name + "》", tracks: tracks}, nil
+	case "newsong":
+		return p.newsongSource(ctx)
 	default:
-		return nil, fmt.Errorf("unknown ncm source %q (want daily|fm|simi:<id>|heart:<id>|playlist:<id>)", spec)
+		return nil, fmt.Errorf("unknown ncm source %q (want daily|fm|simi:<id>|heart:<id>|playlist:<id>|newsong)", spec)
 	}
+}
+
+// newsongSource 物化 /personalized/newsong（匿名推荐新歌，内联完整曲目）。
+func (p *Provider) newsongSource(ctx context.Context) (provider.TrackSource, error) {
+	var resp struct {
+		Result []struct {
+			Song ncmEntitySong `json:"song"`
+		} `json:"result"`
+	}
+	if err := p.get(ctx, "/personalized/newsong", url.Values{"limit": {"30"}}, "", &resp); err != nil {
+		return nil, fmt.Errorf("newsong source: %w", err)
+	}
+	tracks := make([]provider.Track, 0, len(resp.Result))
+	for _, r := range resp.Result {
+		tracks = append(tracks, p.entitySongTrack(r.Song))
+	}
+	return &listSource{desc: "网易云推荐新歌", tracks: tracks}, nil
 }
 
 // RadioSources 返回客户端可配置的网易云电台源。
 func (p *Provider) RadioSources() []provider.RadioSource {
 	return []provider.RadioSource{
 		{Spec: "daily", Name: "每日推荐", Finite: true, RequiresCredential: true},
+		{Spec: "newsong", Name: "推荐新歌", Finite: true},
 		{Spec: "fm", Name: "私人 FM", Finite: false, RequiresCredential: true},
 		{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false, RequiresCredential: true},
 		{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false, RequiresCredential: true},
@@ -128,25 +148,25 @@ func (p *Provider) RadioSources() []provider.RadioSource {
 	}
 }
 
-// ---------- 外部歌单（一次物化有限源） ----------
+// ---------- 外部歌单 / 推荐新歌（一次物化有限源） ----------
 
-type playlistSource struct {
-	name   string
+type listSource struct {
+	desc   string
 	tracks []provider.Track
 
 	mu     sync.Mutex
 	cursor int
 }
 
-func (s *playlistSource) Description() string { return "网易云歌单《" + s.name + "》" }
-func (s *playlistSource) Finite() bool        { return true }
-func (s *playlistSource) Total() (int, bool) {
+func (s *listSource) Description() string { return s.desc }
+func (s *listSource) Finite() bool        { return true }
+func (s *listSource) Total() (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.tracks), true
 }
 
-func (s *playlistSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef) ([]provider.Track, bool, error) {
+func (s *listSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef) ([]provider.Track, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cursor >= len(s.tracks) {

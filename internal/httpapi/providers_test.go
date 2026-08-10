@@ -627,6 +627,7 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 		}
 		wantRadioSources := []any{
 			map[string]any{"spec": "daily", "name": "每日推荐", "finite": true, "requires_credential": true},
+			map[string]any{"spec": "newsong", "name": "推荐新歌", "finite": true},
 			map[string]any{"spec": "fm", "name": "私人 FM", "finite": false, "requires_credential": true},
 			map[string]any{"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false, "requires_credential": true},
 			map[string]any{"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false, "requires_credential": true},
