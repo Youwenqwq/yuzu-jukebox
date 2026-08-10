@@ -209,7 +209,7 @@ func TestPlaylistSourceMaterializesAndDrains(t *testing.T) {
 }
 
 // TestNewsongSourceMaterializesAndDrains 推荐新歌源匿名物化 /personalized/newsong
-//（song 内联完整曲目），游标式耗尽。
+// （song 内联完整曲目），游标式耗尽。
 func TestNewsongSourceMaterializesAndDrains(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

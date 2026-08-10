@@ -48,15 +48,15 @@ type Contributor struct {
 // 只在零成本可得时填充（随元数据端点同响应返回），不进热路径。
 // CoverURL 可能是服务端代理地址（源站需 Referer 时）。
 type Track struct {
-	Ref          TrackRef       `json:"track_ref"`
-	Title        string         `json:"title"`
-	Artist       string         `json:"artist"`
-	DurationMs   int64          `json:"duration_ms"`
-	Album        string         `json:"album,omitempty"`
-	Description  string         `json:"description,omitempty"`
-	CoverURL     string         `json:"cover_url,omitempty"`
-	SourceURL    string         `json:"source_url,omitempty"`
-	Contributors []Contributor  `json:"contributors,omitempty"`
+	Ref          TrackRef      `json:"track_ref"`
+	Title        string        `json:"title"`
+	Artist       string        `json:"artist"`
+	DurationMs   int64         `json:"duration_ms"`
+	Album        string        `json:"album,omitempty"`
+	Description  string        `json:"description,omitempty"`
+	CoverURL     string        `json:"cover_url,omitempty"`
+	SourceURL    string        `json:"source_url,omitempty"`
+	Contributors []Contributor `json:"contributors,omitempty"`
 }
 
 // Lyrics 歌词。Type 目前只有 "lrc"；TLRC 为翻译（可无）。
@@ -200,10 +200,10 @@ type RadioSource struct {
 // RadioSourceEntry 可枚举电台源目录条目（动态目录，如 QQ 榜单全集）。
 // CoverURL 为源站原始 URL，httpapi 序列化层改写为代理路径。
 type RadioSourceEntry struct {
-	Spec     string `json:"spec"`               // 完整规格（不含 provider 前缀），如 "top:26"
-	Name     string `json:"name"`               // 展示名
+	Spec     string `json:"spec"`                // 完整规格（不含 provider 前缀），如 "top:26"
+	Name     string `json:"name"`                // 展示名
 	CoverURL string `json:"cover_url,omitempty"` // 封面（源站原始 URL）
-	Detail   string `json:"detail,omitempty"`   // 副行文本（更新周期/简介等）
+	Detail   string `json:"detail,omitempty"`    // 副行文本（更新周期/简介等）
 }
 
 // RadioSourceCatalogLister 是可选接口：报告可枚举的电台源目录。
