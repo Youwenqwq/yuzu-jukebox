@@ -367,6 +367,29 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": plID})
 }
 
+// playlistItemFromTrack 把 provider 曲目快照成歌单条目（与 plsync 落库格式一致）。
+// 只存基础字段会让歌单电台/详情丢失封面等富字段——线上复现：导入的 ncm
+// 歌单条目 cover_url 为空，作电台源时前端无封面。
+func playlistItemFromTrack(track provider.Track, now int64) store.PlaylistItem {
+	contrib := ""
+	if len(track.Contributors) > 0 {
+		if b, err := json.Marshal(track.Contributors); err == nil {
+			contrib = string(b)
+		}
+	}
+	return store.PlaylistItem{
+		TrackRef:         track.Ref.String(),
+		Title:            track.Title,
+		Artist:           track.Artist,
+		DurationMs:       track.DurationMs,
+		Album:            track.Album,
+		CoverURL:         track.CoverURL,
+		SourceURL:        track.SourceURL,
+		ContributorsJSON: contrib,
+		AddedAt:          now,
+	}
+}
+
 // addPlaylistItems 追加曲目（media_admin）。body: {"track_refs": [...]}。
 // 每个 ref 经对应 provider GetTrack 取元数据快照。
 func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
@@ -409,10 +432,7 @@ func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
 			s.providerError(w, r, "fetch playlist track "+ref, err)
 			return
 		}
-		items = append(items, store.PlaylistItem{
-			TrackRef: track.Ref.String(), Title: track.Title,
-			Artist: track.Artist, DurationMs: track.DurationMs, AddedAt: now,
-		})
+		items = append(items, playlistItemFromTrack(track, now))
 	}
 	if err := s.st.AppendPlaylistItems(r.Context(), plID, items); err != nil {
 		s.internalError(w, r, "append playlist items", err)
@@ -578,10 +598,7 @@ func (s *Server) importPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]store.PlaylistItem, 0, len(tracks))
 	for _, t := range tracks {
-		items = append(items, store.PlaylistItem{
-			TrackRef: t.Ref.String(), Title: t.Title,
-			Artist: t.Artist, DurationMs: t.DurationMs, AddedAt: now,
-		})
+		items = append(items, playlistItemFromTrack(t, now))
 	}
 	if err := s.st.AppendPlaylistItems(ctx, pl.ID, items); err != nil {
 		s.internalError(w, r, "append imported playlist items", err)

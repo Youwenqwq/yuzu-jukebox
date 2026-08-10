@@ -741,3 +741,96 @@ func TestPlaylistCoverDelete(t *testing.T) {
 		t.Fatalf("bound delete status = %d, body = %v", bound.Code, boundBody)
 	}
 }
+
+// richMetadataProvider 的 GetTrack 返回带富字段的曲目，用于验证
+// 歌单条目落库时快照了封面/专辑/来源/贡献者（而不是只存基础字段）。
+type richMetadataProvider struct{ playlistProviderBase }
+
+func (p *richMetadataProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
+	return provider.Track{
+		Ref: ref, Title: "富字段曲目", Artist: "歌手", DurationMs: 1000,
+		Album: "专辑名", CoverURL: "https://cover/rich", SourceURL: "https://source/rich",
+		Contributors: []provider.Contributor{{Role: "artist", Name: "歌手"}},
+	}, nil
+}
+
+// TestAddPlaylistItemsSnapshotsRichMetadata 手动加曲必须快照富字段。
+// 回归：此端点曾只存基础字段，歌单作电台源时曲目无封面。
+func TestAddPlaylistItemsSnapshotsRichMetadata(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	authm := auth.NewManager("", nil)
+	adminToken := authm.IssueSession(auth.Identity{
+		ID: "playlist-admin", Name: "Admin", Kind: "password",
+		Roles: []string{auth.RoleMediaAdmin},
+	})
+	reg := provider.NewRegistry()
+	reg.Register(&richMetadataProvider{playlistProviderBase: playlistProviderBase{id: "rich"}})
+	s := &Server{st: st, authm: authm, reg: reg}
+	f := playlistBindingFixture{handler: s.Handler(), st: st, adminToken: adminToken}
+
+	if err := st.CreatePlaylist(context.Background(), store.Playlist{
+		ID: "pl_rich", Name: "富字段歌单", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := playlistEndpointRequest(t, f, http.MethodPost,
+		"/api/v1/playlists/pl_rich/items", adminToken,
+		map[string]any{"track_refs": []string{"rich:1"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	items, err := st.PlaylistItems(context.Background(), "pl_rich", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v", items)
+	}
+	it := items[0]
+	if it.Album != "专辑名" || it.CoverURL != "https://cover/rich" ||
+		it.SourceURL != "https://source/rich" || !strings.Contains(it.ContributorsJSON, "歌手") {
+		t.Fatalf("item rich fields = %+v", it)
+	}
+}
+
+// TestImportPlaylistSnapshotsRichMetadata 导入歌单必须快照富字段。
+// 回归：线上导入的 ncm 歌单条目 cover_url 全空，电台无封面。
+func TestImportPlaylistSnapshotsRichMetadata(t *testing.T) {
+	f := setupPlaylistBindingEndpoints(t)
+	f.importer.tracks = []provider.Track{{
+		Ref: provider.NewRef("playlist-fake", "rich-1"), Title: "富字段曲目",
+		Artist: "歌手", DurationMs: 1000,
+		Album: "专辑名", CoverURL: "https://cover/rich", SourceURL: "https://source/rich",
+		Contributors: []provider.Contributor{{Role: "artist", Name: "歌手"}},
+	}}
+	rec := playlistEndpointRequest(t, f, http.MethodPost, "/api/v1/playlists/import",
+		f.adminToken, map[string]string{"provider": "playlist-fake", "playlist_id": "remote-rich"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := playlistResponse(t, rec)
+	plMap, ok := body["playlist"].(map[string]any)
+	if !ok {
+		t.Fatalf("playlist response = %v", body["playlist"])
+	}
+	plID, _ := plMap["id"].(string)
+	if plID == "" {
+		t.Fatal("imported playlist has no id")
+	}
+	items, err := f.st.PlaylistItems(context.Background(), plID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v", items)
+	}
+	it := items[0]
+	if it.Album != "专辑名" || it.CoverURL != "https://cover/rich" ||
+		it.SourceURL != "https://source/rich" || !strings.Contains(it.ContributorsJSON, "歌手") {
+		t.Fatalf("item rich fields = %+v", it)
+	}
+}
