@@ -218,6 +218,10 @@ func (s *Server) radioSourceCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entries, err := lister.RadioSourceCatalog(r.Context())
+	if errors.Is(err, provider.ErrNotSupported) {
+		writeErr(w, http.StatusNotImplemented, "not_supported", "provider has no radio source catalog")
+		return
+	}
 	if err != nil {
 		s.providerError(w, r, "list radio source catalog", err)
 		return

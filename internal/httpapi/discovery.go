@@ -90,7 +90,8 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
 		return
 	}
-	var shelves []provider.RecommendationShelf
+	// 无任何数据源时输出 [] 而非 null（客户端 shelves.map 不炸）。
+	shelves := []provider.RecommendationShelf{}
 	for _, p := range s.reg.All() {
 		rec, ok := p.(provider.RecommendationProvider)
 		if !ok {

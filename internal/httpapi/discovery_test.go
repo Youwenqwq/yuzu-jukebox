@@ -276,6 +276,10 @@ func TestRecommendationsEmptyWithoutSource(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("recommendations status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	// wire 契约：空 shelves 必须是 [] 而非 null（客户端 shelves.map 直接可用）。
+	if !strings.Contains(rec.Body.String(), `"shelves":[]`) {
+		t.Fatalf("empty shelves body = %s, want \"shelves\":[]", rec.Body.String())
+	}
 	var body struct {
 		Shelves []provider.RecommendationShelf `json:"shelves"`
 	}
