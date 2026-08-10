@@ -15,9 +15,13 @@ const (
 )
 
 // Recommendations 实现 provider.RecommendationProvider：以 NCM 榜单
-// （/toplist → /toplist/detail）作为首批数据源。单个榜单详情失败时跳过
-// 该 shelf 保留其余（榜单列表本身失败才整体报错）；封面/专辑等富字段
-// 取自榜单曲目的 al 对象，序列化层统一改写为代理路径。
+// （/toplist → /playlist/track/all）作为首批数据源。单个榜单曲目拉取失败时
+// 跳过该 shelf 保留其余（榜单列表本身失败才整体报错）；封面/专辑等富字段
+// 取自曲目的 al 对象，序列化层统一改写为代理路径。
+//
+// 注意：不用 /toplist/detail 物化曲目——实测 enhanced v4.39.0 该端点
+// tracks[] 只返回 {first,second} 摘要（无 id/ar/al/dt），直接解码会产出
+// ncm:0 空壳曲目；/playlist/track/all 与 ImportPlaylist 同构且带完整歌曲。
 func (p *Provider) Recommendations(ctx context.Context) ([]provider.RecommendationShelf, error) {
 	var topResp struct {
 		List []struct {
@@ -36,20 +40,20 @@ func (p *Provider) Recommendations(ctx context.Context) ([]provider.Recommendati
 	shelves := make([]provider.RecommendationShelf, 0, len(top))
 	var firstErr error
 	for _, tl := range top {
-		var detailResp struct {
-			List struct {
-				Tracks []ncmEntitySong `json:"tracks"`
-			} `json:"list"`
+		var resp struct {
+			Songs []ncmEntitySong `json:"songs"`
 		}
-		if err := p.get(ctx, "/toplist/detail", url.Values{
-			"id": {strconv.FormatInt(tl.ID, 10)},
-		}, "", &detailResp); err != nil {
+		q := url.Values{
+			"id":    {strconv.FormatInt(tl.ID, 10)},
+			"limit": {strconv.Itoa(recommendationShelfTracks)},
+		}
+		if err := p.get(ctx, "/playlist/track/all", q, "", &resp); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		tracks := detailResp.List.Tracks
+		tracks := resp.Songs
 		if len(tracks) > recommendationShelfTracks {
 			tracks = tracks[:recommendationShelfTracks]
 		}
