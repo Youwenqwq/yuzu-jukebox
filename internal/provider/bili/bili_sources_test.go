@@ -121,8 +121,75 @@ func TestRadioSources(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
 	got := testProvider(server, "").RadioSources()
-	want := []provider.RadioSource{{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true, RequiresCredential: true}}
+	want := []provider.RadioSource{
+		{Spec: "ranking", Arg: "music", Name: "音乐区排行榜", Finite: true},
+		{Spec: "ranking", Arg: "kichiku", Name: "鬼畜区排行榜", Finite: true},
+		{Spec: "ranking", Arg: "all", Name: "全站排行榜", Finite: true},
+		{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true, RequiresCredential: true},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RadioSources() = %+v, want %+v", got, want)
+	}
+}
+
+// TestNewSourceRanking 分区排行榜物化：key 走 partition 参数、数字走 rid 参数。
+func TestNewSourceRanking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/region-ranking" {
+			t.Errorf("path = %q, want /region-ranking", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if got := q.Get("type"); got != "all" {
+			t.Errorf("type = %q, want all", got)
+		}
+		if got := r.Header.Get(cookieHeader); got != "" {
+			t.Errorf("anonymous ranking sent cookie %q", got)
+		}
+		var partition string
+		if got := q.Get("partition"); got != "" {
+			partition = "partition=" + got
+		}
+		if got := q.Get("rid"); got != "" {
+			partition = "rid=" + got
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": makeVideos(partition+"-", 3, -1),
+			"total":   3,
+		})
+	}))
+	defer server.Close()
+	p := testProvider(server, "")
+
+	byKey, err := p.NewSource(context.Background(), "ranking:music")
+	if err != nil {
+		t.Fatalf("NewSource(ranking:music): %v", err)
+	}
+	if !byKey.Finite() {
+		t.Fatal("Finite() = false, want true")
+	}
+	if got := byKey.Description(); !strings.Contains(got, "music") {
+		t.Errorf("Description() = %q, want partition key", got)
+	}
+	batch, exhausted, err := byKey.NextBatch(context.Background(), 10, "")
+	if err != nil {
+		t.Fatalf("NextBatch: %v", err)
+	}
+	if !exhausted || len(batch) != 3 {
+		t.Fatalf("batch len = %d, exhausted = %v; want 3, true (3 条全返回即耗尽)", len(batch), exhausted)
+	}
+	assertVideoTrack(t, batch[0], "partition=music-0")
+
+	byRid, err := p.NewSource(context.Background(), "ranking:1003")
+	if err != nil {
+		t.Fatalf("NewSource(ranking:1003): %v", err)
+	}
+	batch, _, err = byRid.NextBatch(context.Background(), 10, "")
+	if err != nil {
+		t.Fatalf("NextBatch rid: %v", err)
+	}
+	assertVideoTrack(t, batch[0], "rid=1003-0")
+
+	if _, err := p.NewSource(context.Background(), "ranking:"); err == nil {
+		t.Fatal("NewSource(ranking:) unexpectedly succeeded")
 	}
 }

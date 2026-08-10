@@ -399,49 +399,91 @@ func (p *Provider) favoriteTracks(ctx context.Context, mediaID, cookie string) (
 	return tracks, nil
 }
 
-// NewSource 把收藏夹物化为有限电台源。
+// NewSource 创建有限电台源。spec 取值：fav:<media_id>（收藏夹，需登录）|
+// ranking:<key|rid>（分区排行榜，匿名；key 取 music/kichiku/all 等分区 key
+// 或裸 rid）。
 func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSource, error) {
-	kind, mediaID, found := strings.Cut(spec, ":")
-	if !found || kind != "fav" {
-		return nil, fmt.Errorf("unknown bili source %q (want fav:<media_id>)", spec)
+	kind, arg, found := strings.Cut(spec, ":")
+	if !found {
+		return nil, fmt.Errorf("unknown bili source %q (want fav:<media_id>|ranking:<partition>)", spec)
 	}
-	if !isDecimalID(mediaID) {
-		return nil, fmt.Errorf("invalid bili favorite media_id %q: want digits", mediaID)
+	switch kind {
+	case "fav":
+		if !isDecimalID(arg) {
+			return nil, fmt.Errorf("invalid bili favorite media_id %q: want digits", arg)
+		}
+		cookie := p.cookie.Load().(string)
+		if strings.TrimSpace(cookie) == "" {
+			return nil, fmt.Errorf("bili 收藏夹电台需要登录 cookie")
+		}
+		tracks, err := p.favoriteTracks(ctx, arg, cookie)
+		if err != nil {
+			return nil, err
+		}
+		return &listSource{desc: "B 站收藏夹 " + arg, tracks: tracks}, nil
+	case "ranking":
+		return p.rankingSource(ctx, arg)
+	default:
+		return nil, fmt.Errorf("unknown bili source %q (want fav:<media_id>|ranking:<partition>)", spec)
 	}
-	cookie := p.cookie.Load().(string)
-	if strings.TrimSpace(cookie) == "" {
-		return nil, fmt.Errorf("bili 收藏夹电台需要登录 cookie")
-	}
-	tracks, err := p.favoriteTracks(ctx, mediaID, cookie)
-	if err != nil {
-		return nil, err
-	}
-	return &favoriteSource{mediaID: mediaID, tracks: tracks}, nil
 }
 
-// RadioSources 报告 B 站支持的电台源。
+// rankingSource 把分区排行榜物化为有限电台源：一次 GET /region-ranking
+// （ranking/v2，免 WBI、匿名可用，top ~100 条）。arg 为数字时按裸 rid 传，
+// 否则按分区 key/名称/别名传（sidecar resolve_ranking_partition 解析）。
+func (p *Provider) rankingSource(ctx context.Context, arg string) (provider.TrackSource, error) {
+	if strings.TrimSpace(arg) == "" {
+		return nil, fmt.Errorf("ranking source requires a partition: bili:ranking:<music|kichiku|all|rid>")
+	}
+	q := url.Values{"type": {"all"}}
+	if isDecimalID(arg) {
+		q.Set("rid", arg)
+	} else {
+		q.Set("partition", arg)
+	}
+	var resp struct {
+		Results []videoResult `json:"results"`
+	}
+	if err := p.get(ctx, "/region-ranking", q, p.cookie.Load().(string), &resp); err != nil {
+		return nil, err
+	}
+	tracks := make([]provider.Track, 0, len(resp.Results))
+	for _, v := range resp.Results {
+		if track, ok := p.trackFromVideo(v); ok {
+			tracks = append(tracks, track)
+		}
+	}
+	return &listSource{desc: "B 站排行榜 " + arg, tracks: tracks}, nil
+}
+
+// RadioSources 报告 B 站支持的电台源。排行榜匿名可用（免 WBI），
+// 收藏夹需登录 cookie。
 func (p *Provider) RadioSources() []provider.RadioSource {
 	return []provider.RadioSource{
+		{Spec: "ranking", Arg: "music", Name: "音乐区排行榜", Finite: true},
+		{Spec: "ranking", Arg: "kichiku", Name: "鬼畜区排行榜", Finite: true},
+		{Spec: "ranking", Arg: "all", Name: "全站排行榜", Finite: true},
 		{Spec: "fav", Arg: "media_id", Name: "收藏夹电台", Finite: true, RequiresCredential: true},
 	}
 }
 
-type favoriteSource struct {
-	mu      sync.Mutex
-	mediaID string
-	tracks  []provider.Track
-	cursor  int
+// listSource 是一次物化的有限曲目列表源（收藏夹/排行榜共用）。
+type listSource struct {
+	mu     sync.Mutex
+	desc   string
+	tracks []provider.Track
+	cursor int
 }
 
-func (s *favoriteSource) Description() string { return "B 站收藏夹 " + s.mediaID }
-func (s *favoriteSource) Finite() bool        { return true }
-func (s *favoriteSource) Total() (int, bool) {
+func (s *listSource) Description() string { return s.desc }
+func (s *listSource) Finite() bool        { return true }
+func (s *listSource) Total() (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.tracks), true
 }
 
-func (s *favoriteSource) NextBatch(_ context.Context, n int, _ provider.TrackRef) ([]provider.Track, bool, error) {
+func (s *listSource) NextBatch(_ context.Context, n int, _ provider.TrackRef) ([]provider.Track, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if n <= 0 || s.cursor >= len(s.tracks) {
