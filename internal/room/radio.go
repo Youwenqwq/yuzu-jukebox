@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -163,12 +164,19 @@ func (s *playlistSource) batchShuffle(ctx context.Context, n, count int) ([]prov
 func itemsToTracks(items []store.PlaylistItem) []provider.Track {
 	out := make([]provider.Track, 0, len(items))
 	for _, it := range items {
-		out = append(out, provider.Track{
+		t := provider.Track{
 			Ref:        provider.TrackRef(it.TrackRef),
 			Title:      it.Title,
 			Artist:     it.Artist,
 			DurationMs: it.DurationMs,
-		})
+			Album:      it.Album,
+			CoverURL:   it.CoverURL,
+			SourceURL:  it.SourceURL,
+		}
+		if it.ContributorsJSON != "" {
+			json.Unmarshal([]byte(it.ContributorsJSON), &t.Contributors)
+		}
+		out = append(out, t)
 	}
 	return out
 }

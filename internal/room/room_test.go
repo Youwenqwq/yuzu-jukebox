@@ -84,6 +84,85 @@ func queueRefs(t *testing.T, st *store.Store) []string {
 	return refs
 }
 
+// TestItemsToTracksPreservesRichMetadata 歌单电台的曲目必须带上封面等富字段。
+// playlist_items 落库了这些字段（绑定歌单由 plsync 写入），若在此丢弃，
+// 电台播放的当前曲目与队列就会缺失 cover_url（线上复现：ncm 歌单电台无封面）。
+func TestItemsToTracksPreservesRichMetadata(t *testing.T) {
+	got := itemsToTracks([]store.PlaylistItem{{
+		TrackRef: "ncm:1", Title: "曲", Artist: "人", DurationMs: 1000,
+		Album: "专辑", CoverURL: "https://cover/1", SourceURL: "https://source/1",
+		ContributorsJSON: `[{"role":"artist","name":"人"}]`,
+	}, {
+		TrackRef: "local:2", Title: "纯曲", Artist: "", DurationMs: 2000,
+	}})
+	if len(got) != 2 {
+		t.Fatalf("itemsToTracks returned %d tracks, want 2", len(got))
+	}
+	rich := got[0]
+	if rich.CoverURL != "https://cover/1" || rich.Album != "专辑" || rich.SourceURL != "https://source/1" {
+		t.Fatalf("rich track metadata = %#v", rich)
+	}
+	if len(rich.Contributors) != 1 || rich.Contributors[0] != (provider.Contributor{Role: "artist", Name: "人"}) {
+		t.Fatalf("contributors = %#v", rich.Contributors)
+	}
+	plain := got[1]
+	if plain.CoverURL != "" || plain.Album != "" || plain.SourceURL != "" || plain.Contributors != nil {
+		t.Fatalf("plain track metadata = %#v, want empty", plain)
+	}
+}
+
+// TestPlaylistRadioPreservesCovers 从带封面元数据的 DB 歌单启动电台后，
+// 播放条目与队列条目必须带 cover_url（广播时改写为服务端代理路径）。
+// 回归：itemsToTracks 曾丢弃封面，ncm 绑定歌单作电台源时前端无封面可显示。
+func TestPlaylistRadioPreservesCovers(t *testing.T) {
+	r, st := newTestRoom(t, "")
+	now := time.Now().UnixMilli()
+	if err := st.CreatePlaylist(context.Background(), store.Playlist{
+		ID: "pl_cover_radio", Name: "封面歌单", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendPlaylistItems(context.Background(), "pl_cover_radio", []store.PlaylistItem{
+		{TrackRef: "local:t1", Title: "一", Artist: "甲", DurationMs: 1000,
+			Album: "专辑一", CoverURL: "https://cover/1", AddedAt: now},
+		{TrackRef: "local:t2", Title: "二", Artist: "乙", DurationMs: 2000,
+			Album: "专辑二", CoverURL: "https://cover/2", AddedAt: now},
+		{TrackRef: "local:t3", Title: "三", Artist: "丙", DurationMs: 3000,
+			Album: "专辑三", CoverURL: "https://cover/3", AddedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.PlayRadio("playlist:pl_cover_radio", false, false); err != nil {
+		t.Fatalf("PlayRadio: %v", err)
+	}
+	// 电台 refill 异步落地；轮询快照直到当前曲目与待播队列齐备。
+	var snap Snapshot
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var err error
+		snap, err = r.Snapshot(guest)
+		if err != nil {
+			t.Fatalf("Snapshot: %v", err)
+		}
+		if snap.Playback.Current != nil && len(snap.Queue) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("radio refill stalled: playback=%+v queue=%d", snap.Playback, len(snap.Queue))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cur := snap.Playback.Current
+	if !strings.HasPrefix(cur.CoverURL, "/api/v1/cover/") {
+		t.Fatalf("current cover_url = %q, want proxy path", cur.CoverURL)
+	}
+	for _, e := range snap.Queue {
+		if !strings.HasPrefix(e.CoverURL, "/api/v1/cover/") {
+			t.Fatalf("queue cover_url = %q, want proxy path", e.CoverURL)
+		}
+	}
+}
+
 // TestAddBatchAppendsInOrder 批量入队保持提交顺序；单条入队（AddFor）行为不变。
 func TestAddBatchAppendsInOrder(t *testing.T) {
 	r, st := newTestRoom(t, "")
