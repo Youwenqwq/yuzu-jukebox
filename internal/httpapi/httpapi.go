@@ -131,6 +131,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	mux.HandleFunc("GET /api/v1/history", s.requesterHistory)
 	mux.HandleFunc("GET /api/v1/stats/hot", s.hotTracks)
+	mux.HandleFunc("GET /api/v1/artists/{name...}", s.artistProfile)
+	mux.HandleFunc("GET /api/v1/recommendations", s.recommendations)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)
@@ -182,6 +184,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/playlists/{id}/sync", s.syncPlaylist)
 	mux.HandleFunc("POST /api/v1/playlists/{id}/detach", s.detachPlaylist)
 	mux.HandleFunc("GET /api/v1/playlists/{id}", s.getPlaylist)
+	mux.HandleFunc("PATCH /api/v1/playlists/{id}", s.updatePlaylistMeta)
 	mux.HandleFunc("DELETE /api/v1/playlists/{id}", s.deletePlaylist)
 	mux.HandleFunc("POST /api/v1/playlists/{id}/items", s.addPlaylistItems)
 	mux.HandleFunc("DELETE /api/v1/playlists/{id}/items/{ord}", s.deletePlaylistItem)
@@ -257,6 +260,43 @@ func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, role string
 		return id, false
 	}
 	return id, true
+}
+
+// requireNonGuest 认证并要求非 Guest 身份（password/oidc/player）。
+// Guest 是任意昵称自声明身份，不授予歌单创建权；Integration synthetic guest
+// 的 Kind 也是 "guest"，天然排除。
+func (s *Server) requireNonGuest(w http.ResponseWriter, r *http.Request) (auth.Identity, bool) {
+	id, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "login first")
+		return id, false
+	}
+	if id.Kind == "guest" {
+		writeErr(w, http.StatusForbidden, "forbidden", "non-guest identity required")
+		return id, false
+	}
+	return id, true
+}
+
+// requirePlaylistManager 认证 + 取歌单 + 授权歌单写操作：创建者本人或
+// media_admin。错误顺序与 requireRole 一致（401 → 404 → 403）。
+// 绑定歌单的只读规则（改名/items 409 等）由各操作另行校验。
+func (s *Server) requirePlaylistManager(w http.ResponseWriter, r *http.Request, plID string) (auth.Identity, store.Playlist, bool) {
+	identity, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "login first")
+		return identity, store.Playlist{}, false
+	}
+	pl, err := s.st.GetPlaylist(r.Context(), plID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
+		return identity, store.Playlist{}, false
+	}
+	if !identity.HasRole(auth.RoleMediaAdmin) && (pl.CreatedBy == "" || identity.ID != pl.CreatedBy) {
+		writeErr(w, http.StatusForbidden, "forbidden", "playlist creator or media_admin required")
+		return identity, store.Playlist{}, false
+	}
+	return identity, pl, true
 }
 
 // ---------- 处理器 ----------

@@ -672,10 +672,10 @@ played_ms >= min(total_ms / 2, 240000)
 | `DELETE /api/v1/rooms/{id}` | `room_admin` | 删除房间（队列与历史级联清理） |
 | `GET /api/v1/rooms/{id}/grants` | `room_admin` | 该 Room 的全部显式 `controller` grants，稳定排序 |
 | `PUT/DELETE /api/v1/rooms/{id}/grants/{principal_id}` | `room_admin` | 授予/撤销该 Principal 的 Room `controller` capability |
-| `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` + 房间准入 | 播放历史，最新在前（默认 50，上限 200）。受保护房间（口令/动态码/trusted_roles/凭据）仅对免密准入者（controller、同房 Integration actor、trusted role）开放，其余 403 `forbidden`；开放房间任意已认证 listener 可读 |
-| `GET /api/v1/rooms/{id}/stats?limit=` | `listener` + 房间准入 | 曲目热度榜（默认 20，上限 100），准入规则同上 |
-| `GET /api/v1/history?requester=me&offset=&limit=` | `requester` | 跨房间个人播放历史（`requested_by` = 当前 Principal），最新在前（默认 50，上限 200）；`requester` 只接受 `me` |
-| `GET /api/v1/stats/hot?days=&limit=&offset=` | `requester` | 全局热门曲目（跨房间 `play_history` 聚合：`track_ref`/`title`/`play_count`/`last_played_at`，与 `queue.add` 的 ref 体系兼容）；`days` 缺省 7、0 = 全部时间；`limit` 缺省 20，上限 100；`offset` 缺省 0（首页热门翻页用） |
+| `GET /api/v1/rooms/{id}/history?offset=&limit=` | `listener` + 房间准入 | 播放历史，最新在前（默认 50，上限 200）。条目含 `artist`（入队快照）。受保护房间（口令/动态码/trusted_roles/凭据）仅对免密准入者（controller、同房 Integration actor、trusted role）开放，其余 403 `forbidden`；开放房间任意已认证 listener 可读 |
+| `GET /api/v1/rooms/{id}/stats?limit=` | `listener` + 房间准入 | 曲目热度榜（默认 20，上限 100），准入规则同上；条目含 `artist`（最近一次播放的值） |
+| `GET /api/v1/history?requester=me&offset=&limit=` | `requester` | 跨房间个人播放历史（`requested_by` = 当前 Principal），最新在前（默认 50，上限 200）；`requester` 只接受 `me`；条目含 `artist` |
+| `GET /api/v1/stats/hot?days=&limit=&offset=` | `requester` | 全局热门曲目（跨房间 `play_history` 聚合：`track_ref`/`title`/`artist`/`play_count`/`last_played_at`，与 `queue.add` 的 ref 体系兼容）；`days` 缺省 7、0 = 全部时间；`limit` 缺省 20，上限 100；`offset` 缺省 0（首页热门翻页用） |
 | `GET /api/v1/rooms/{id}/capabilities` | 标准 session | 当前身份的有效 Room capability（`controller`、`radio`，后者按 4.7 `radio_control` 推导）；Room 不存在为 404 |
 | `GET /api/v1/rooms/{id}/state` | 标准 session | 无副作用完整状态快照 |
 | `POST /api/v1/rooms/{id}/queue` | `requester` | 单条或 1–100 条原子入队 |
@@ -797,6 +797,8 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/search/entity?provider=&category=&id=&into=&limit=&offset=` | `requester` | 实体钻取：`into=tracks`（缺省）时 `category` 限 `artist`/`album`，把实体展开为可入队 `{"tracks":[...]}`；`into=albums` 时 `category` 限 `artist`，返回 `{"results":[...]}` 专辑实体（与分类检索同构，可再以 `category=album&id=<entity_id>` 钻到曲目——钻取终点归一；Provider 须实现 `EntityAlbumLister`，能力经 `capabilities.entity_albums` 报告）；`playlist` 实体走 `/api/v1/playlists/import` 导入，不经此端点 |
 | `GET /api/v1/radio/tracks?source=&limit=&offset=` | `requester` | 一次性物化 `finite=true` 曲目源，返回 `{"tracks":[...],"total":number|null}`；曲目与 song 搜索元素同构。分页缺省/上限同搜索（`limit` 30/100、`offset` 0）；无限源或未知规格为 400 |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
+| `GET /api/v1/artists/{name}` | `requester` | 艺人档案：本地 `play_history` 按艺人名聚合（`name`/`play_count`/`last_played_at`/`top_tracks`，最多 10 首，曲目封面为 `/api/v1/cover/{track_ref}` 代理路径）；再由首个实现 `provider.ArtistDetailer` 的 Provider 最佳努力富化 `avatar_url`（实体封面 ext token）与 `bio`，富化失败仅省略字段（见 6.2.4）。名字是唯一键（历史与前端卡片都只有名字），多艺人曲目按 join 串精确匹配 |
+| `GET /api/v1/recommendations` | `requester` | 推荐 feed：聚合所有实现 `provider.RecommendationProvider` 的 Provider 的 shelf（`{"shelves":[{id,title,tracks:[...]}]}`），曲目与 song 搜索元素同构且封面改写为代理路径；单个 Provider 失败记日志跳过，无任何数据源时返回空 `shelves`（200）（见 6.2.4） |
 | `GET /api/v1/providers/{id}/similar?track=&limit=` | `requester` | Provider 作用域内按裸 `track_id` 查询相似曲目，返回 `{"tracks":[...]}`；`limit` 缺省 30、上限 100。Provider 不存在为 404；能力缺席为 501 `not_supported` |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | body `{"payload":"..."}`；先校验再热生效，凭据存储于服务端且永不下发 |
 | `POST /api/v1/providers/{id}/qrlogin` | `media_admin` | 返回 `{key, qr_content}`，Client 自行渲染二维码 |
@@ -805,22 +807,25 @@ Room create/PATCH/list/get 的错误合同：
 | `POST /api/v1/providers/{id}/playlist-add` | 凭据 owner（标准 session） | body `{"playlist_id":"...","track":"<id>"}`；加入该凭据账号的歌单，非 owner 为 403 |
 | `GET /api/v1/providers/{id}/account-playlists` | 凭据 owner（标准 session） | 列出凭据账号的歌单（`{"playlists":[{id,name,cover_url,track_count}]}`），作为 playlist-add 的目标枚举，非 owner 为 403 |
 | `GET /api/v1/providers/{id}/like-check?track=<id>` | 凭据 owner（标准 session） | 回读喜欢状态 `{"liked":bool}`；Client 在 now-playing 变化时自行查询，服务端不广播该私有状态 |
-| `GET /api/v1/playlists` | `requester` | 歌单列表（含曲目数，不含条目） |
-| `POST /api/v1/playlists` | `media_admin` | 创建歌单 `{name, description}` |
+| `GET /api/v1/playlists` | `requester` | 歌单列表（含曲目数与 `pinned`，不含条目）；排序：置顶优先，其余按创建时间 |
+| `POST /api/v1/playlists` | 非 Guest 身份 | 创建歌单 `{name, description}`。Guest 为任意昵称自声明身份（含 Integration synthetic guest），不授予歌单创建权；`password`/`oidc`/`player` 身份均可创建 |
 | `GET /api/v1/playlists/{id}?offset=&limit=` | `requester` | 歌单详情 + 条目分页（默认 50，上限 200） |
-| `DELETE /api/v1/playlists/{id}` | `media_admin` | 删除歌单 |
-| `POST /api/v1/playlists/{id}/items` | `media_admin` | 追加 `{track_refs:[...]}`（单次≤100） |
-| `DELETE /api/v1/playlists/{id}/items/{ord}` | `media_admin` | 按序号删除，后续重排 |
-| `PATCH /api/v1/playlists/{id}/items/{ord}` | `media_admin` | body `{to_ord}`；目标 clamp 到 `[1,len]` |
+| `PATCH /api/v1/playlists/{id}` | 创建者或 `media_admin` | 更新歌单元数据 `{name?, description?, pinned?}` 任意子集，缺省字段保持不变；`description` 可显式置空、`name` 不可为空。绑定歌单的名字归外部歌单所有（同步时被远程名覆盖），改名返回 409 `playlist_bound`（须先 `detach`）；`description`/`pinned` 为本地状态，绑定歌单允许单独修改。成功返回更新后的 `{"playlist":...}` |
+| `DELETE /api/v1/playlists/{id}` | 创建者或 `media_admin` | 删除歌单 |
+| `POST /api/v1/playlists/{id}/items` | 创建者或 `media_admin` | 追加 `{track_refs:[...]}`（单次≤100） |
+| `DELETE /api/v1/playlists/{id}/items/{ord}` | 创建者或 `media_admin` | 按序号删除，后续重排 |
+| `PATCH /api/v1/playlists/{id}/items/{ord}` | 创建者或 `media_admin` | body `{to_ord}`；目标 clamp 到 `[1,len]` |
 | `POST /api/v1/playlists/import` | `media_admin` | `{provider,playlist_id}`（外部歌单；ncm 支持 ID/URL）或 `{source}`（曲目源物化）二选一，可选 `{name}` |
 | `POST /api/v1/playlists/bind` | `media_admin` | `{provider,playlist_id,name?}` 创建 Provider 绑定歌单并首次同步；首次同步失败不留残留；重复绑定 409 `already_bound` |
 | `POST /api/v1/playlists/{id}/sync` | `media_admin` | 手动同步绑定歌单（非绑定 400）；失败保留旧快照并把原因记入 `last_sync_error` |
-| `POST /api/v1/playlists/{id}/detach` | `media_admin` | 解除绑定、保留当前条目，转为普通歌单（非绑定 400） |
-| `PUT /api/v1/playlists/{id}/cover` | `media_admin` | multipart `file`（image/*，≤8MB）设置自建歌单封面；绑定歌单 409 `playlist_bound`（封面来自外部，见下） |
-| `DELETE /api/v1/playlists/{id}/cover` | `media_admin` | 清除自建歌单封面（绑定歌单 409） |
+| `POST /api/v1/playlists/{id}/detach` | 创建者或 `media_admin` | 解除绑定、保留当前条目，转为普通歌单（非绑定 400） |
+| `PUT /api/v1/playlists/{id}/cover` | 创建者或 `media_admin` | multipart `file`（image/*，≤8MB）设置自建歌单封面；绑定歌单 409 `playlist_bound`（封面来自外部，见下） |
+| `DELETE /api/v1/playlists/{id}/cover` | 创建者或 `media_admin` | 清除自建歌单封面（绑定歌单 409） |
 | `GET /api/v1/cover/playlist/{id}` | 免认证 | 提供已上传的歌单封面图（`<img>` 直引） |
 
 **Provider 绑定歌单**：绑定歌单（`bound_provider`/`bound_remote_id` 非空，`GET` 响应含绑定状态与 `last_sync_at`/`last_sync_error`）跟随外部歌单内容，在 yuzu 侧只读——items 追加/删除/移动返回 409 `playlist_bound`，删除整个歌单与 `detach` 不受限。同步语义：成功后整表替换条目（`ReplacePlaylistItems` 单事务，ord 从 0 重排）；**失败绝不破坏现有条目**，保留最后一次成功快照。周期同步由 `playlist_sync_interval_minutes`（默认 0 = 关闭，手动 sync 不受影响）驱动，顺序扫描到期的绑定歌单；同步沿用凭据账号身份，凭据失效即同步失败（快照仍在）。同一 `(provider, playlist_id)` 全库唯一绑定（部分唯一索引）。绑定歌单可直接作为房间电台源 `playlist:<id>` 使用，随同步自动换血。
+
+**歌单所有权与写授权**：歌单写操作（items 增删移、封面设置/清除、元数据 PATCH、删除、detach）授权为「歌单创建者（`created_by` == 当前 Principal ID）或 `media_admin`」。Guest 身份（任意昵称自声明，含 Integration synthetic guest）不授予歌单**创建**权，但其 `requester` 点歌/听歌能力不变；歌单可见性仍是全局共享（明确不做私有歌单）。`bind`/`sync`/`import` 走外部凭据/导入面，保持 `media_admin`。错误顺序：未认证 401 → 歌单不存在 404 → 非创建者非 admin 403 `forbidden`。绑定歌单只读规则（409 `playlist_bound`）在授权通过后另行校验。
 
 **歌单封面**：`cover_url` 一律为服务端代理路径。自建歌单上传后为 `/api/v1/cover/playlist/{id}`（文件存 `<media_dir>/playlist_covers/`）；绑定歌单在每次成功同步时由服务端把外部封面 URL 签入防伪造 token（`/api/v1/cover/ext/{token}`，与 6.2.1 实体封面同一机制，`detach` 后依然可读），外部不再提供封面时保留上一份；上传路径对绑定歌单关闭（409）。
 | `GET /api/v1/media` | `media_admin` | 按 `created_at` 倒序返回 `track_ref/title/artist/duration_ms/size_bytes/uploaded_by/created_at`；空列表为 `{"media":[]}` |
@@ -942,6 +947,17 @@ Content-Type: application/json
 `GET /api/v1/providers/{id}/similar` 是独立的一次性检索，不建立 `TrackSource`、不维护 chained source 的 seed/seen 状态。`track` 是该 Provider 作用域内的裸曲目 ID；NCM 用服务端配置凭据调用 `/simi/song`。成功返回 `{"tracks":[...]}`，曲目形状与封面代理规则同上。缺少 `track`、非法 `limit` 为 400 `bad_request`；Provider 不存在为 404 `not_found`；未实现 `provider.SimilarQuerier` 或明确返回 `provider.ErrNotSupported` 时沿用歌词能力缺席映射，返回 501 `not_supported`；其它上游错误返回 502 `provider_error`。
 
 配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；正整数时每 6 小时清理超过该天数未访问的缓存，正在下载的条目跳过。
+
+#### 6.2.4 艺人档案与推荐 feed 合同
+
+**艺人档案**：`GET /api/v1/artists/{name}` 以艺人名为唯一键（历史与前端卡片只有名字，多艺人曲目按 join 串如 `"A/B"` 精确匹配）。数据源分两层：
+
+- 本地统计（恒有）：`play_history` 按 `artist` 精确聚合——`play_count` 为该艺人名下的播放总次数（"月听众"替身）、`last_played_at` 为最近一次、`top_tracks` 为热门曲目（最多 10 首，`track_ref`/`title`/`artist`/`play_count`/`last_played_at`/`cover_url`），封面为 `/api/v1/cover/{track_ref}` 代理路径（历史不存封面，端点按 ref 现场解析）。
+- Provider 富化（最佳努力，可缺席）：实现 `provider.ArtistDetailer` 的 Provider 按名字解析 `avatar_url`（经实体封面 ext token 代理）与 `bio`。任何失败（Provider 不可用、名字不存在、能力缺席）只省略这两个字段，不降级本地统计、不造假。多个实现者按 Provider ID 稳定顺序取首个成功者。
+
+名字不含任何历史时返回零值档案（`play_count` 0、`top_tracks` 空数组）。空名字为 400 `bad_request`。
+
+**推荐 feed**：`GET /api/v1/recommendations` 聚合所有实现 `provider.RecommendationProvider` 的 Provider 的 shelf。shelf 元素 `{"id","title","tracks"}`：`id` 为 Provider 作用域内的稳定标识（如 `toplist:<id>`），供 Client 作 React key；`tracks` 与 song 搜索元素同构，封面统一改写为 `/api/v1/cover/{track_ref}`。NCM 首批实现：`/toplist` 前 3 榜 → `/toplist/detail`，每榜 10 首；单个榜单详情失败跳过该 shelf、榜单列表失败则该 Provider 整体跳过并记日志。无任何数据源时返回 `{"shelves":[]}`（200），Client 据此隐藏区块而非报错。
 
 ### 6.3 无状态 Room 合同（合同 A）
 

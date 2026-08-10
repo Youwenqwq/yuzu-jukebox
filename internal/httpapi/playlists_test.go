@@ -543,7 +543,6 @@ func TestPlaylistBindingEndpointsRequireMediaAdmin(t *testing.T) {
 			body: map[string]string{"provider": f.importer.ID(), "playlist_id": "auth-check"},
 		},
 		{path: "/api/v1/playlists/pl_missing/sync"},
-		{path: "/api/v1/playlists/pl_missing/detach"},
 	}
 	for _, tc := range cases {
 		for _, authCase := range []struct {
@@ -562,6 +561,36 @@ func TestPlaylistBindingEndpointsRequireMediaAdmin(t *testing.T) {
 				}
 			})
 		}
+	}
+
+	// detach 是创建者或 media_admin：requester 对存在的他人歌单 403，
+	// 对不存在的歌单 404（先取歌单才能判定创建者）。
+	if err := f.st.CreatePlaylist(context.Background(), store.Playlist{
+		ID: "pl_admin_owned", Name: "Admin Owned", CreatedBy: "playlist-admin",
+		CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, authCase := range []struct {
+		name   string
+		token  string
+		status int
+	}{
+		{name: "anonymous", status: http.StatusUnauthorized},
+		{name: "requester", token: f.requesterToken, status: http.StatusForbidden},
+		{name: "missing-playlist", token: f.requesterToken, status: http.StatusNotFound},
+	} {
+		path := "/api/v1/playlists/pl_admin_owned/detach"
+		if authCase.name == "missing-playlist" {
+			path = "/api/v1/playlists/pl_missing/detach"
+		}
+		t.Run("detach/"+authCase.name, func(t *testing.T) {
+			rec := playlistEndpointRequest(t, f, http.MethodPost, path, authCase.token, nil)
+			if rec.Code != authCase.status {
+				t.Fatalf("status = %d, want %d, body = %s",
+					rec.Code, authCase.status, rec.Body.String())
+			}
+		})
 	}
 }
 

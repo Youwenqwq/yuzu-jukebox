@@ -36,8 +36,10 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
 }
 
+// createPlaylist 创建歌单（非 Guest 身份；Guest 是任意昵称自声明身份，
+// 不授予歌单创建权——见 requireNonGuest）。
 func (s *Server) createPlaylist(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	id, ok := s.requireNonGuest(w, r)
 	if !ok {
 		return
 	}
@@ -164,13 +166,8 @@ func (s *Server) syncPlaylist(w http.ResponseWriter, r *http.Request) {
 
 // detachPlaylist 解除 provider 绑定，保留当前歌单条目。
 func (s *Server) detachPlaylist(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	identity, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
-		return
-	}
-	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
 		return
 	}
 	if pl.BoundProvider == "" {
@@ -217,13 +214,8 @@ const maxPlaylistCoverBytes int64 = 8 << 20
 
 // setPlaylistCover 为自建歌单保存上传封面。
 func (s *Server) setPlaylistCover(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	identity, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
-		return
-	}
-	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
 		return
 	}
 	if pl.BoundProvider != "" {
@@ -314,13 +306,8 @@ func (s *Server) setPlaylistCover(w http.ResponseWriter, r *http.Request) {
 
 // clearPlaylistCover 清除自建歌单封面。
 func (s *Server) clearPlaylistCover(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	identity, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
-		return
-	}
-	pl, err := s.st.GetPlaylist(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
 		return
 	}
 	if pl.BoundProvider != "" {
@@ -353,12 +340,64 @@ func (s *Server) playlistCover(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, pl.CoverPath)
 }
 
-func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+// updatePlaylistMeta 更新歌单元数据（创建者或 media_admin）：name/description/pinned
+// 任意子集，缺省字段保持不变。description 可显式置空；name 不可为空。
+// 绑定歌单的名字归外部歌单所有（同步时被远程名覆盖），改名须先 detach——
+// 但 description/pinned 属本地状态，绑定歌单允许单独修改。
+func (s *Server) updatePlaylistMeta(w http.ResponseWriter, r *http.Request) {
+	identity, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
-	plID := r.PathValue("id")
+	plID := pl.ID
+	var body struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+		Pinned      *bool   `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	if body.Name == nil && body.Description == nil && body.Pinned == nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "no fields to update")
+		return
+	}
+	if body.Name != nil {
+		trimmed := strings.TrimSpace(*body.Name)
+		if trimmed == "" {
+			writeErr(w, http.StatusBadRequest, "bad_request", "name must not be empty")
+			return
+		}
+		if pl.BoundProvider != "" {
+			writeErr(w, http.StatusConflict, "playlist_bound",
+				"playlist is provider-bound; detach to rename")
+			return
+		}
+		body.Name = &trimmed
+	}
+	patch := store.PlaylistPatch{Name: body.Name, Description: body.Description, Pinned: body.Pinned}
+	if err := s.st.UpdatePlaylistMeta(r.Context(), plID, patch); err != nil {
+		s.internalError(w, r, "update playlist", err)
+		return
+	}
+	s.audit(r.Context(), identity.ID, "playlist.update", plID, map[string]any{
+		"name": body.Name != nil, "description": body.Description != nil, "pinned": body.Pinned != nil,
+	})
+	updated, err := s.st.GetPlaylist(r.Context(), plID)
+	if err != nil {
+		s.internalError(w, r, "reload playlist", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"playlist": updated})
+}
+
+func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
+	id, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	plID := pl.ID
 	if err := s.st.DeletePlaylist(r.Context(), plID); err != nil {
 		s.internalError(w, r, "delete playlist", err)
 		return
@@ -390,19 +429,14 @@ func playlistItemFromTrack(track provider.Track, now int64) store.PlaylistItem {
 	}
 }
 
-// addPlaylistItems 追加曲目（media_admin）。body: {"track_refs": [...]}。
+// addPlaylistItems 追加曲目（创建者或 media_admin）。body: {"track_refs": [...]}。
 // 每个 ref 经对应 provider GetTrack 取元数据快照。
 func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	id, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
-	plID := r.PathValue("id")
-	pl, err := s.st.GetPlaylist(r.Context(), plID)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
-		return
-	}
+	plID := pl.ID
 	if pl.BoundProvider != "" {
 		writeErr(w, http.StatusConflict, "playlist_bound",
 			"playlist is provider-bound; detach first")
@@ -443,7 +477,7 @@ func (s *Server) addPlaylistItems(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePlaylistItem(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	id, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -452,12 +486,7 @@ func (s *Server) deletePlaylistItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid ord")
 		return
 	}
-	plID := r.PathValue("id")
-	pl, err := s.st.GetPlaylist(r.Context(), plID)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
-		return
-	}
+	plID := pl.ID
 	if pl.BoundProvider != "" {
 		writeErr(w, http.StatusConflict, "playlist_bound",
 			"playlist is provider-bound; detach first")
@@ -471,19 +500,14 @@ func (s *Server) deletePlaylistItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": ord})
 }
 
-// movePlaylistItem 移动条目到 to_ord（media_admin）。body: {"to_ord": N}。
+// movePlaylistItem 移动条目到 to_ord（创建者或 media_admin）。body: {"to_ord": N}。
 // to_ord clamp 到 [1, len]；移动后序号重排保持连续。
 func (s *Server) movePlaylistItem(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireRole(w, r, auth.RoleMediaAdmin)
+	id, pl, ok := s.requirePlaylistManager(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
-	plID := r.PathValue("id")
-	pl, err := s.st.GetPlaylist(r.Context(), plID)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "playlist not found")
-		return
-	}
+	plID := pl.ID
 	if pl.BoundProvider != "" {
 		writeErr(w, http.StatusConflict, "playlist_bound",
 			"playlist is provider-bound; detach first")

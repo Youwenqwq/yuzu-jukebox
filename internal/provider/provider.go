@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -295,6 +296,41 @@ type AccountWriter interface {
 	AccountPlaylists(ctx context.Context) ([]AccountPlaylist, error)
 }
 
+// ArtistDetail 艺人档案的富信息（头像/简介），供 /api/v1/artists/{name}
+// 在本地播放统计之上做最佳努力富化。AvatarURL 为源站原始 URL，
+// 由 httpapi 序列化层改写为服务端代理路径（与实体封面同一不变量）。
+type ArtistDetail struct {
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	Bio       string `json:"bio,omitempty"`
+}
+
+// ArtistDetailer 是可选接口：能把艺人名解析为档案细节（头像/简介）。
+// 名字是唯一的键（play_history 与前端卡片都只有名字）；实现方自行决定
+// 名字到实体 ID 的映射（如 NCM 先 type=100 搜索取首条）。解析失败或
+// 名字不存在时返回错误，httpapi 降级为纯本地统计（不造假）。
+type ArtistDetailer interface {
+	Provider
+	ArtistDetail(ctx context.Context, name string) (ArtistDetail, error)
+}
+
+// RecommendationShelf 推荐 feed 的一个 shelf：标题 + 一组可入队曲目。
+// ID 为 provider 作用域内的稳定标识（如 "toplist:<id>"），供客户端作 key。
+type RecommendationShelf struct {
+	ID     string  `json:"id"`
+	Title  string  `json:"title"`
+	Tracks []Track `json:"tracks"`
+}
+
+// RecommendationProvider 是可选接口：提供首页推荐 feed 的 shelf 列表。
+// 不支持的 provider 直接不实现；httpapi 聚合所有实现者的 shelf 返回。
+// 实现必须自带超时语义（独立短超时 client 或尊重 ctx）；shelf 内的曲目
+// 封面按 provider 正常填充，序列化层统一改写为代理路径。
+type RecommendationProvider interface {
+	Provider
+	Recommendations(ctx context.Context) ([]RecommendationShelf, error)
+}
+
 // Registry 是 provider 注册表。
 type Registry struct {
 	providers map[string]Provider
@@ -330,11 +366,13 @@ func (r *Registry) IDs() []string {
 	return out
 }
 
-// All 返回全部已注册 provider。
+// All 返回全部已注册 provider，按 ID 稳定排序（调用方依赖确定性顺序，
+// 如推荐 feed 聚合与艺人富化优先序、listProviders 的响应顺序）。
 func (r *Registry) All() []Provider {
 	out := make([]Provider, 0, len(r.providers))
 	for _, p := range r.providers {
 		out = append(out, p)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID() < out[j].ID() })
 	return out
 }

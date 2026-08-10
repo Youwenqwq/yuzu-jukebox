@@ -69,7 +69,7 @@ func TestRequesterHistoryEndpointOnlyReturnsCallerRows(t *testing.T) {
 		{"room-2", "ncm:other", "bob", 300},
 		{"room-2", "ncm:new", "alice", 500},
 	} {
-		if err := f.st.AddPlayHistory(ctx, row.roomID, row.ref, row.ref, row.requester, row.startedAt, row.startedAt+1, "finished"); err != nil {
+		if err := f.st.AddPlayHistory(ctx, row.roomID, row.ref, row.ref, "artist", row.requester, row.startedAt, row.startedAt+1, "finished"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -127,7 +127,7 @@ func TestHotTracksEndpoint(t *testing.T) {
 		{"room-1", "ncm:g", "G", "alice", 800},
 	}
 	for _, row := range rows {
-		if err := f.st.AddPlayHistory(ctx, row.roomID, row.ref, row.title, row.requester, row.startedAt, row.startedAt+1, "finished"); err != nil {
+		if err := f.st.AddPlayHistory(ctx, row.roomID, row.ref, row.title, "artist", row.requester, row.startedAt, row.startedAt+1, "finished"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -222,7 +222,7 @@ func setupRoomScopedReadEndpoints(t *testing.T) roomScopedReadFixture {
 			t.Fatalf("create %s: %v", row.ID, err)
 		}
 		rooms.Spawn(row)
-		if err := st.AddPlayHistory(ctx, row.ID, "test:track", "Track", "requester", 10, 20, "finished"); err != nil {
+		if err := st.AddPlayHistory(ctx, row.ID, "test:track", "Track", "Artist", "requester", 10, 20, "finished"); err != nil {
 			t.Fatalf("seed %s history: %v", row.ID, err)
 		}
 	}

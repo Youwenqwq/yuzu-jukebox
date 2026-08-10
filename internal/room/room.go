@@ -758,7 +758,7 @@ func (r *Room) Run(ctx context.Context) {
 			return
 		}
 		cur := playback.Current
-		_ = r.st.AddPlayHistory(ctx, r.ID, cur.TrackRef, cur.Title, cur.RequestedBy,
+		_ = r.st.AddPlayHistory(ctx, r.ID, cur.TrackRef, cur.Title, cur.Artist, cur.RequestedBy,
 			cur.AddedAt, now, reason)
 		r.authm.RevokeTrack(cur.TrackRef)
 		pid, id, err := provider.TrackRef(cur.TrackRef).Split()

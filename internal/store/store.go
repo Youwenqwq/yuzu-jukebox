@@ -563,11 +563,11 @@ func (s *Store) LoadQueue(ctx context.Context, roomID string) ([]QueueRow, strin
 
 // ---------- 播放历史 ----------
 
-func (s *Store) AddPlayHistory(ctx context.Context, roomID, trackRef, title, requestedBy string, startedAt, endedAt int64, reason string) error {
+func (s *Store) AddPlayHistory(ctx context.Context, roomID, trackRef, title, artist, requestedBy string, startedAt, endedAt int64, reason string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO play_history (room_id, track_ref, title, requested_by, started_at, ended_at, end_reason)
-		 VALUES (?,?,?,?,?,?,?)`,
-		roomID, trackRef, title, requestedBy, startedAt, endedAt, reason)
+		`INSERT INTO play_history (room_id, track_ref, title, artist, requested_by, started_at, ended_at, end_reason)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		roomID, trackRef, title, artist, requestedBy, startedAt, endedAt, reason)
 	return err
 }
 
@@ -576,6 +576,7 @@ type PlayHistoryRow struct {
 	RoomID      string `json:"room_id"`
 	TrackRef    string `json:"track_ref"`
 	Title       string `json:"title"`
+	Artist      string `json:"artist"`
 	RequestedBy string `json:"requested_by"`
 	StartedAt   int64  `json:"started_at"`
 	EndedAt     int64  `json:"ended_at"`
@@ -585,7 +586,7 @@ type PlayHistoryRow struct {
 // PlayHistory 房间的播放历史，最新在前。
 func (s *Store) PlayHistory(ctx context.Context, roomID string, offset, limit int) ([]PlayHistoryRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT room_id, track_ref, title, requested_by, started_at, ended_at, end_reason
+		`SELECT room_id, track_ref, title, artist, requested_by, started_at, ended_at, end_reason
 		 FROM play_history WHERE room_id = ? ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
 		roomID, limit, offset)
 	if err != nil {
@@ -595,7 +596,7 @@ func (s *Store) PlayHistory(ctx context.Context, roomID string, offset, limit in
 	out := []PlayHistoryRow{}
 	for rows.Next() {
 		var r PlayHistoryRow
-		if err := rows.Scan(&r.RoomID, &r.TrackRef, &r.Title, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
+		if err := rows.Scan(&r.RoomID, &r.TrackRef, &r.Title, &r.Artist, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -606,7 +607,7 @@ func (s *Store) PlayHistory(ctx context.Context, roomID string, offset, limit in
 // PlayHistoryByRequester 返回点歌人在所有房间的播放历史，最新在前。
 func (s *Store) PlayHistoryByRequester(ctx context.Context, requesterID string, offset, limit int) ([]PlayHistoryRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT room_id, track_ref, title, requested_by, started_at, ended_at, end_reason
+		`SELECT room_id, track_ref, title, artist, requested_by, started_at, ended_at, end_reason
 		 FROM play_history WHERE requested_by = ? ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
 		requesterID, limit, offset)
 	if err != nil {
@@ -616,7 +617,7 @@ func (s *Store) PlayHistoryByRequester(ctx context.Context, requesterID string, 
 	out := []PlayHistoryRow{}
 	for rows.Next() {
 		var r PlayHistoryRow
-		if err := rows.Scan(&r.RoomID, &r.TrackRef, &r.Title, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
+		if err := rows.Scan(&r.RoomID, &r.TrackRef, &r.Title, &r.Artist, &r.RequestedBy, &r.StartedAt, &r.EndedAt, &r.EndReason); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -628,6 +629,7 @@ func (s *Store) PlayHistoryByRequester(ctx context.Context, requesterID string, 
 type HotTrack struct {
 	TrackRef     string `json:"track_ref"`
 	Title        string `json:"title"`
+	Artist       string `json:"artist"`
 	PlayCount    int    `json:"play_count"`
 	LastPlayedAt int64  `json:"last_played_at"`
 }
@@ -639,12 +641,17 @@ func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit, offset int)
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`WITH filtered AS (
-			SELECT id, track_ref, title, started_at
+			SELECT id, track_ref, title, artist, started_at
 			FROM play_history
 			WHERE ? <= 0 OR started_at >= ?
 		)
 		SELECT f.track_ref,
 		       (SELECT recent.title
+		        FROM filtered AS recent
+		        WHERE recent.track_ref = f.track_ref
+		        ORDER BY recent.started_at DESC, recent.id DESC
+		        LIMIT 1),
+		       (SELECT recent.artist
 		        FROM filtered AS recent
 		        WHERE recent.track_ref = f.track_ref
 		        ORDER BY recent.started_at DESC, recent.id DESC
@@ -663,7 +670,7 @@ func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit, offset int)
 	out := []HotTrack{}
 	for rows.Next() {
 		var t HotTrack
-		if err := rows.Scan(&t.TrackRef, &t.Title, &t.PlayCount, &t.LastPlayedAt); err != nil {
+		if err := rows.Scan(&t.TrackRef, &t.Title, &t.Artist, &t.PlayCount, &t.LastPlayedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -675,16 +682,17 @@ func (s *Store) HotTracks(ctx context.Context, sinceMs int64, limit, offset int)
 type TrackStat struct {
 	TrackRef      string `json:"track_ref"`
 	Title         string `json:"title"`
+	Artist        string `json:"artist"`
 	PlayCount     int    `json:"play_count"`
 	FirstPlayedAt int64  `json:"first_played_at"`
 	LastPlayedAt  int64  `json:"last_played_at"`
 }
 
 // PlayStats 房间曲目热度榜，按播放次数降序（次数相同按最近播放降序）。
-// SQLite 特性：GROUP BY + MAX 聚合时，裸列取自最大行，故 title 为最近一次播放的标题。
+// SQLite 特性：GROUP BY + MAX 聚合时，裸列取自最大行，故 title/artist 为最近一次播放的值。
 func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]TrackStat, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT track_ref, title, COUNT(*) AS c, MIN(started_at), MAX(started_at)
+		`SELECT track_ref, title, artist, COUNT(*) AS c, MIN(started_at), MAX(started_at)
 		 FROM play_history WHERE room_id = ? GROUP BY track_ref
 		 ORDER BY c DESC, MAX(started_at) DESC LIMIT ?`,
 		roomID, limit)
@@ -695,12 +703,76 @@ func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]Trac
 	out := []TrackStat{}
 	for rows.Next() {
 		var t TrackStat
-		if err := rows.Scan(&t.TrackRef, &t.Title, &t.PlayCount, &t.FirstPlayedAt, &t.LastPlayedAt); err != nil {
+		if err := rows.Scan(&t.TrackRef, &t.Title, &t.Artist, &t.PlayCount, &t.FirstPlayedAt, &t.LastPlayedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// ArtistTrackStat 艺人档案中的单曲聚合（热门曲目）。
+// CoverURL 由序列化层合成 /api/v1/cover/{ref} 代理路径（历史不存封面）。
+type ArtistTrackStat struct {
+	TrackRef     string `json:"track_ref"`
+	Title        string `json:"title"`
+	Artist       string `json:"artist"`
+	PlayCount    int    `json:"play_count"`
+	LastPlayedAt int64  `json:"last_played_at"`
+	CoverURL     string `json:"cover_url,omitempty"`
+}
+
+// ArtistProfile 按艺人名聚合的播放档案（"月听众"替身 + 热门曲目）。
+type ArtistProfile struct {
+	Name         string            `json:"name"`
+	PlayCount    int               `json:"play_count"`
+	LastPlayedAt int64             `json:"last_played_at"`
+	TopTracks    []ArtistTrackStat `json:"top_tracks"`
+}
+
+// ArtistProfile 按艺人名精确聚合全局播放历史（不含任何历史时返回零值档案）。
+// 多艺人协作曲目的 artist 为 join 串（如 "A/B"），按显示名精确匹配即可，
+// 与前端「标题 + 艺人」双行卡片的链接键一致。
+func (s *Store) ArtistProfile(ctx context.Context, name string, limit int) (ArtistProfile, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	profile := ArtistProfile{Name: name, TopTracks: []ArtistTrackStat{}}
+	rows, err := s.db.QueryContext(ctx,
+		`WITH mine AS (
+			SELECT id, track_ref, title, artist, started_at
+			FROM play_history WHERE artist = ?
+		)
+		SELECT f.track_ref,
+		       (SELECT recent.title
+		        FROM mine AS recent
+		        WHERE recent.track_ref = f.track_ref
+		        ORDER BY recent.started_at DESC, recent.id DESC
+		        LIMIT 1),
+		       MAX(f.artist),
+		       COUNT(*) AS play_count,
+		       MAX(f.started_at) AS last_played_at
+		FROM mine AS f
+		GROUP BY f.track_ref
+		ORDER BY play_count DESC, last_played_at DESC
+		LIMIT ?`,
+		name, limit)
+	if err != nil {
+		return profile, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var t ArtistTrackStat
+		if err := rows.Scan(&t.TrackRef, &t.Title, &t.Artist, &t.PlayCount, &t.LastPlayedAt); err != nil {
+			return profile, err
+		}
+		profile.TopTracks = append(profile.TopTracks, t)
+		profile.PlayCount += t.PlayCount
+		if t.LastPlayedAt > profile.LastPlayedAt {
+			profile.LastPlayedAt = t.LastPlayedAt
+		}
+	}
+	return profile, rows.Err()
 }
 
 // RoomPrefetchHorizon 返回所有房间从队列游标起前 depth 条曲目的 track_ref，按紧迫度
@@ -1072,12 +1144,49 @@ type Playlist struct {
 	CreatedAt     int64  `json:"created_at"`
 	UpdatedAt     int64  `json:"updated_at"`
 	TrackCount    int    `json:"track_count"`
+	Pinned        bool   `json:"pinned"`
 	BoundProvider string `json:"bound_provider,omitempty"`
 	BoundRemoteID string `json:"bound_remote_id,omitempty"`
 	LastSyncAt    int64  `json:"last_sync_at,omitempty"`
 	LastSyncError string `json:"last_sync_error,omitempty"`
 	CoverURL      string `json:"cover_url,omitempty"`
 	CoverPath     string `json:"cover_path,omitempty"`
+}
+
+// PlaylistPatch 歌单元数据更新（PATCH /api/v1/playlists/{id}）。
+// 指针字段为 nil 表示不修改；Name 置空被调用方拒绝（不允许清空歌单名）。
+type PlaylistPatch struct {
+	Name        *string
+	Description *string
+	Pinned      *bool
+}
+
+// UpdatePlaylistMeta 按 PlaylistPatch 更新歌单 name/description/pinned 子集，
+// 同时刷新 updated_at。至少一个字段非 nil。
+func (s *Store) UpdatePlaylistMeta(ctx context.Context, id string, p PlaylistPatch) error {
+	if p.Name == nil && p.Description == nil && p.Pinned == nil {
+		return errors.New("no fields to update")
+	}
+	var sets []string
+	var args []any
+	if p.Name != nil {
+		sets = append(sets, "name = ?")
+		args = append(args, *p.Name)
+	}
+	if p.Description != nil {
+		sets = append(sets, "description = ?")
+		args = append(args, *p.Description)
+	}
+	if p.Pinned != nil {
+		sets = append(sets, "pinned = ?")
+		args = append(args, *p.Pinned)
+	}
+	sets = append(sets, "updated_at = ?")
+	args = append(args, nowMs())
+	args = append(args, id)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE playlists SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	return err
 }
 
 type PlaylistItem struct {
@@ -1097,10 +1206,10 @@ func (s *Store) CreatePlaylist(ctx context.Context, p Playlist) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO playlists
 		 (id, name, description, created_by, created_at, updated_at,
-		  bound_provider, bound_remote_id, last_sync_at, last_sync_error, cover_url, cover_path)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  bound_provider, bound_remote_id, last_sync_at, last_sync_error, cover_url, cover_path, pinned)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.Description, p.CreatedBy, p.CreatedAt, p.UpdatedAt,
-		p.BoundProvider, p.BoundRemoteID, p.LastSyncAt, p.LastSyncError, p.CoverURL, p.CoverPath)
+		p.BoundProvider, p.BoundRemoteID, p.LastSyncAt, p.LastSyncError, p.CoverURL, p.CoverPath, p.Pinned)
 	return err
 }
 
@@ -1121,12 +1230,12 @@ func (s *Store) GetPlaylist(ctx context.Context, id string) (Playlist, error) {
 	err := s.db.QueryRowContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
-		        p.cover_url, p.cover_path,
+		        p.cover_url, p.cover_path, p.pinned,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p WHERE p.id = ?`, id).
 		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
 			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError,
-			&p.CoverURL, &p.CoverPath, &p.TrackCount)
+			&p.CoverURL, &p.CoverPath, &p.Pinned, &p.TrackCount)
 	return p, err
 }
 
@@ -1134,9 +1243,9 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
-		        p.cover_url, p.cover_path,
+		        p.cover_url, p.cover_path, p.pinned,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
-		 FROM playlists p ORDER BY p.created_at`)
+		 FROM playlists p ORDER BY p.pinned DESC, p.created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -1146,7 +1255,7 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 		var p Playlist
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
 			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError,
-			&p.CoverURL, &p.CoverPath, &p.TrackCount); err != nil {
+			&p.CoverURL, &p.CoverPath, &p.Pinned, &p.TrackCount); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -1159,13 +1268,13 @@ func (s *Store) GetPlaylistByBinding(ctx context.Context, providerID, remoteID s
 	err := s.db.QueryRowContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
-		        p.cover_url, p.cover_path,
+		        p.cover_url, p.cover_path, p.pinned,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p WHERE p.bound_provider = ? AND p.bound_remote_id = ?`,
 		providerID, remoteID).
 		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
 			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError,
-			&p.CoverURL, &p.CoverPath, &p.TrackCount)
+			&p.CoverURL, &p.CoverPath, &p.Pinned, &p.TrackCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Playlist{}, false, nil
 	}
@@ -1179,6 +1288,7 @@ func (s *Store) ListBoundPlaylists(ctx context.Context) ([]Playlist, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT p.id, p.name, p.description, p.created_by, p.created_at, p.updated_at,
 		        p.bound_provider, p.bound_remote_id, p.last_sync_at, p.last_sync_error,
+		        p.pinned,
 		        (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id)
 		 FROM playlists p WHERE p.bound_provider != '' ORDER BY p.created_at`)
 	if err != nil {
@@ -1189,7 +1299,7 @@ func (s *Store) ListBoundPlaylists(ctx context.Context) ([]Playlist, error) {
 	for rows.Next() {
 		var p Playlist
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
-			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.TrackCount); err != nil {
+			&p.BoundProvider, &p.BoundRemoteID, &p.LastSyncAt, &p.LastSyncError, &p.Pinned, &p.TrackCount); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

@@ -572,7 +572,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		"playlist create": {
 			usage:  "playlist create <名称> [描述]",
 			desc:   "创建歌单",
-			detail: "创建一张空的通用歌单。\n\n需要 media_admin 角色。",
+			detail: "创建一张空的通用歌单。\n\n需要非 Guest 身份（歌单创建者或 media_admin 角色）。",
 			run: func(args []string) error {
 				if len(args) < 1 {
 					return errUsage("playlist create")
@@ -589,7 +589,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		"playlist delete": {
 			usage:  "playlist delete <id>",
 			desc:   "删除歌单",
-			detail: "删除歌单及其全部条目。\n\n需要 media_admin 角色。",
+			detail: "删除歌单及其全部条目。\n\n需要歌单创建者或 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 1 {
 					return errUsage("playlist delete")
@@ -605,7 +605,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 			detail: `把一个或多个 track_ref 追加到歌单尾部（单次最多 100 首）。
 元数据快照自各 provider 实时获取。
 
-需要 media_admin 角色。`,
+需要歌单创建者或 media_admin 角色。`,
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("playlist add")
@@ -618,7 +618,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		"playlist delitem": {
 			usage:  "playlist delitem <id> <ord>",
 			desc:   "删除歌单中的指定条目",
-			detail: "按序号（ord，playlist show 输出第一列）删除条目，后续序号自动重排。\n\n需要 media_admin 角色。",
+			detail: "按序号（ord，playlist show 输出第一列）删除条目，后续序号自动重排。\n\n需要歌单创建者或 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 2 {
 					return errUsage("playlist delitem")
@@ -635,7 +635,7 @@ rotating_code 从 -room-code-period 读取轮换周期，默认 24h。
 		"playlist move": {
 			usage:  "playlist move <id> <ord> <to_ord>",
 			desc:   "移动歌单条目到指定位置",
-			detail: "把序号 ord 的条目移动到 to_ord（超出范围自动 clamp 到 [1, 歌单长度]），其余序号自动重排。\n\n需要 media_admin 角色。",
+			detail: "把序号 ord 的条目移动到 to_ord（超出范围自动 clamp 到 [1, 歌单长度]），其余序号自动重排。\n\n需要歌单创建者或 media_admin 角色。",
 			run: func(args []string) error {
 				if len(args) < 3 {
 					return errUsage("playlist move")
