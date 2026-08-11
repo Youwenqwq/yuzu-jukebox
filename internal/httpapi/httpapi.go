@@ -161,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/search/entity", s.searchEntity)
 	mux.HandleFunc("GET /api/v1/radio/tracks", s.radioTracks)
+	mux.HandleFunc("GET /api/v1/radio/catalog", s.radioSourceCatalogAll)
 	mux.HandleFunc("GET /api/v1/providers", s.listProviders)
 	mux.HandleFunc("GET /api/v1/providers/{id}/similar", s.similarProviderTracks)
 	mux.HandleFunc("GET /api/v1/providers/{id}/radio-catalog", s.radioSourceCatalog)

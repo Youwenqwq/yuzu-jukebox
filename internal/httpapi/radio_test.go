@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
+	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
+	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
 )
 
 func TestRadioTracksEndpoint(t *testing.T) {
@@ -241,6 +246,173 @@ func TestProviderRadioSourceCatalogEndpoint(t *testing.T) {
 			rec := providerEndpointRequest(t, f, http.MethodGet, tt.path, f.ownerToken, nil)
 			if rec.Code != tt.want {
 				t.Errorf("%s status = %d, want %d, body = %s", tt.path, rec.Code, tt.want, rec.Body.String())
+			}
+		}
+	})
+}
+
+type radioCatalogProviderFake struct {
+	id         string
+	sources    []provider.RadioSource
+	entries    []provider.RadioSourceEntry
+	catalogErr error
+}
+
+func (p *radioCatalogProviderFake) ID() string { return p.id }
+
+func (p *radioCatalogProviderFake) Search(context.Context, string, int, int) ([]provider.Track, error) {
+	return nil, nil
+}
+
+func (p *radioCatalogProviderFake) GetTrack(context.Context, provider.TrackRef) (provider.Track, error) {
+	return provider.Track{}, nil
+}
+
+func (p *radioCatalogProviderFake) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{}, nil
+}
+
+func (p *radioCatalogProviderFake) NewSource(context.Context, string) (provider.TrackSource, error) {
+	return nil, provider.ErrNotSupported
+}
+
+func (p *radioCatalogProviderFake) RadioSources() []provider.RadioSource {
+	return p.sources
+}
+
+func (p *radioCatalogProviderFake) RadioSourceCatalog(context.Context) ([]provider.RadioSourceEntry, error) {
+	return p.entries, p.catalogErr
+}
+
+type radioCatalogEndpointFixture struct {
+	handler http.Handler
+	token   string
+}
+
+func setupRadioCatalogEndpoint(t *testing.T, providers ...provider.Provider) radioCatalogEndpointFixture {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	authm := auth.NewManager("", st)
+	token := authm.IssueSession(auth.Identity{
+		ID: "radio-catalog-requester", Name: "Requester", Kind: "guest",
+		Roles: []string{auth.RoleRequester},
+	})
+	if token == "" {
+		t.Fatal("issue radio catalog session")
+	}
+	reg := provider.NewRegistry()
+	for _, p := range providers {
+		reg.Register(p)
+	}
+	controls := control.NewService(nil, reg, control.NewAuthorizer(st))
+	s := &Server{
+		st: st, authm: authm, reg: reg, controls: controls,
+		ws: wsapi.NewServer(authm, auth.NewPlayerRegistry(st), controls, st),
+	}
+	s.SetCoverSecret([]byte("0123456789abcdef0123456789abcdef"))
+	return radioCatalogEndpointFixture{handler: s.Handler(), token: token}
+}
+
+func radioCatalogEndpointRequest(t *testing.T, f radioCatalogEndpointFixture, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/radio/catalog", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRadioSourceCatalogAllEndpoint(t *testing.T) {
+	t.Run("requires requester role", func(t *testing.T) {
+		f := setupRadioCatalogEndpoint(t)
+		rec := radioCatalogEndpointRequest(t, f, "")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("returns an empty array", func(t *testing.T) {
+		f := setupRadioCatalogEndpoint(t)
+		rec := radioCatalogEndpointRequest(t, f, f.token)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if got := strings.TrimSpace(rec.Body.String()); got != `{"entries":[]}` {
+			t.Fatalf("body = %s, want non-null empty entries", got)
+		}
+	})
+
+	t.Run("aggregates concrete finite sources and degrades catalog failures", func(t *testing.T) {
+		alpha := &radioCatalogProviderFake{
+			id: "alpha",
+			sources: []provider.RadioSource{
+				{Spec: "daily", Name: "每日推荐", Finite: true, RequiresCredential: true},
+				{Spec: "top", Arg: "top_id", Name: "排行榜模板", Finite: true},
+				{Spec: "fm", Name: "无限流", Finite: false},
+			},
+			entries: []provider.RadioSourceEntry{{
+				Spec: "top:26", Name: "飙升榜",
+				CoverURL: "https://img.example/top.jpg", Detail: "每日更新",
+			}},
+		}
+		broken := &radioCatalogProviderFake{
+			id: "broken",
+			sources: []provider.RadioSource{
+				{Spec: "newsong", Name: "故障源静态目录", Finite: true},
+				{Spec: "playlist", Arg: "playlist_id", Name: "歌单模板", Finite: true},
+			},
+			entries:    []provider.RadioSourceEntry{{Spec: "unreachable", Name: "不应返回"}},
+			catalogErr: errors.New("upstream unavailable"),
+		}
+		zeta := &radioCatalogProviderFake{
+			id:      "zeta",
+			sources: []provider.RadioSource{{Spec: "fresh", Name: "新歌", Finite: true}},
+			entries: []provider.RadioSourceEntry{{Spec: "chart:1", Name: "榜单一"}},
+		}
+		f := setupRadioCatalogEndpoint(t, zeta, broken, alpha)
+		rec := radioCatalogEndpointRequest(t, f, f.token)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Entries []radioSourceCatalogEntry `json:"entries"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		want := []radioSourceCatalogEntry{
+			{
+				Provider: "alpha", Spec: "alpha:daily", Name: "每日推荐",
+				Finite: true, RequiresCredential: true,
+			},
+			{
+				Provider: "alpha", Spec: "alpha:top:26", Name: "飙升榜",
+				Detail: "每日更新", Finite: true,
+			},
+			{Provider: "zeta", Spec: "zeta:fresh", Name: "新歌", Finite: true},
+			{Provider: "zeta", Spec: "zeta:chart:1", Name: "榜单一", Finite: true},
+		}
+		if len(body.Entries) != len(want) {
+			t.Fatalf("entries = %#v, want %#v", body.Entries, want)
+		}
+		if got := body.Entries[1].CoverURL; !strings.HasPrefix(got, "/api/v1/cover/ext/") {
+			t.Fatalf("cover_url = %q, want proxied ext cover", got)
+		}
+		want[1].CoverURL = body.Entries[1].CoverURL
+		if !reflect.DeepEqual(body.Entries, want) {
+			t.Fatalf("entries = %#v, want %#v", body.Entries, want)
+		}
+		for _, entry := range body.Entries {
+			if strings.Contains(entry.Spec, "top_id") || strings.Contains(entry.Spec, "playlist_id") ||
+				entry.Spec == "alpha:fm" || strings.HasPrefix(entry.Spec, "broken:") {
+				t.Fatalf("excluded source was returned: %#v", entry)
 			}
 		}
 	})

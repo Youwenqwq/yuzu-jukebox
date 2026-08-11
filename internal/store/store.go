@@ -711,69 +711,6 @@ func (s *Store) PlayStats(ctx context.Context, roomID string, limit int) ([]Trac
 	return out, rows.Err()
 }
 
-// ArtistTrackStat 艺人档案中的单曲聚合（热门曲目）。
-// CoverURL 由序列化层合成 /api/v1/cover/{ref} 代理路径（历史不存封面）。
-type ArtistTrackStat struct {
-	TrackRef     string `json:"track_ref"`
-	Title        string `json:"title"`
-	Artist       string `json:"artist"`
-	PlayCount    int    `json:"play_count"`
-	LastPlayedAt int64  `json:"last_played_at"`
-	CoverURL     string `json:"cover_url,omitempty"`
-}
-
-// ArtistProfile 按艺人名聚合的播放档案（"月听众"替身 + 热门曲目）。
-type ArtistProfile struct {
-	Name         string            `json:"name"`
-	PlayCount    int               `json:"play_count"`
-	LastPlayedAt int64             `json:"last_played_at"`
-	TopTracks    []ArtistTrackStat `json:"top_tracks"`
-}
-
-// ArtistProfile 按艺人名精确聚合全局播放历史（不含任何历史时返回零值档案）。
-// 多艺人协作曲目的 artist 为 join 串（如 "A/B"），按显示名精确匹配即可，
-// 与前端「标题 + 艺人」双行卡片的链接键一致。
-func (s *Store) ArtistProfile(ctx context.Context, name string, limit int) (ArtistProfile, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-	profile := ArtistProfile{Name: name, TopTracks: []ArtistTrackStat{}}
-	rows, err := s.db.QueryContext(ctx,
-		`WITH mine AS (
-			SELECT id, track_ref, title, artist, started_at
-			FROM play_history WHERE artist = ?
-		)
-		SELECT f.track_ref,
-		       (SELECT recent.title
-		        FROM mine AS recent
-		        WHERE recent.track_ref = f.track_ref
-		        ORDER BY recent.started_at DESC, recent.id DESC
-		        LIMIT 1),
-		       MAX(f.artist),
-		       COUNT(*) AS play_count,
-		       MAX(f.started_at) AS last_played_at
-		FROM mine AS f
-		GROUP BY f.track_ref
-		ORDER BY play_count DESC, last_played_at DESC
-		LIMIT ?`,
-		name, limit)
-	if err != nil {
-		return profile, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var t ArtistTrackStat
-		if err := rows.Scan(&t.TrackRef, &t.Title, &t.Artist, &t.PlayCount, &t.LastPlayedAt); err != nil {
-			return profile, err
-		}
-		profile.TopTracks = append(profile.TopTracks, t)
-		profile.PlayCount += t.PlayCount
-		if t.LastPlayedAt > profile.LastPlayedAt {
-			profile.LastPlayedAt = t.LastPlayedAt
-		}
-	}
-	return profile, rows.Err()
-}
 
 // RoomPrefetchHorizon 返回所有房间从队列游标起前 depth 条曲目的 track_ref，按紧迫度
 // 升序去重（越靠近正在播放的位置越紧迫）。room_queue 的队首就是游标：房间在播时是

@@ -45,14 +45,14 @@ func TestArtistDetail(t *testing.T) {
 		t.Fatalf("ArtistDetail error = %v", err)
 	}
 	want := provider.ArtistDetail{
-		Name: "周杰伦", AvatarURL: "https://img/avatar.jpg", Bio: "歌手、词曲创作人",
+		Name: "周杰伦", EntityID: "004Z8Ihr0JIu5s", AvatarURL: "https://img/avatar.jpg", Bio: "歌手、词曲创作人",
 	}
 	if got != want {
 		t.Fatalf("ArtistDetail() = %#v, want %#v", got, want)
 	}
 }
 
-// TestArtistDetailNotFound 名字在 QQ 侧不存在时返回错误（httpapi 降级为本地统计）。
+// TestArtistDetailNotFound 名字在 QQ 侧不存在时返回错误。
 func TestArtistDetailNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search/search_by_type" {

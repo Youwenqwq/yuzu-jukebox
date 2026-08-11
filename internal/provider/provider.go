@@ -316,19 +316,19 @@ type AccountWriter interface {
 	AccountPlaylists(ctx context.Context) ([]AccountPlaylist, error)
 }
 
-// ArtistDetail 艺人档案的富信息（头像/简介），供 /api/v1/artists/{name}
-// 在本地播放统计之上做最佳努力富化。AvatarURL 为源站原始 URL，
-// 由 httpapi 序列化层改写为服务端代理路径（与实体封面同一不变量）。
+// ArtistDetail 是按名字解析出的 provider 歌手实体。EntityID 是该 Provider
+// 的实体键；AvatarURL 为源站原始 URL，由 httpapi 序列化层改写为服务端
+// 代理路径（与实体封面同一不变量）。
 type ArtistDetail struct {
 	Name      string `json:"name"`
+	EntityID  string `json:"entity_id,omitempty"`
 	AvatarURL string `json:"avatar_url,omitempty"`
 	Bio       string `json:"bio,omitempty"`
 }
 
-// ArtistDetailer 是可选接口：能把艺人名解析为档案细节（头像/简介）。
-// 名字是唯一的键（play_history 与前端卡片都只有名字）；实现方自行决定
-// 名字到实体 ID 的映射（如 NCM 先 type=100 搜索取首条）。解析失败或
-// 名字不存在时返回错误，httpapi 降级为纯本地统计（不造假）。
+// ArtistDetailer 是可选接口：能把艺人名解析为 provider 歌手实体。
+// 实现方自行决定名字到实体 ID 的映射（如 NCM 先 type=100 搜索取首条）。
+// 解析失败或名字不存在时返回错误，httpapi 会继续尝试其它 Provider。
 type ArtistDetailer interface {
 	Provider
 	ArtistDetail(ctx context.Context, name string) (ArtistDetail, error)

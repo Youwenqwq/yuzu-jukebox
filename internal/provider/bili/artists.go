@@ -16,7 +16,7 @@ import (
 //   - 有凭据：升级为 /space/acc/info 的权威档案（上游要求 SESSDATA cookie
 //     ≥3 项，匿名 -403/-404）；升级失败保留搜索快照，不阻断。
 //
-// 名字在 B 站侧不存在时返回错误，httpapi 降级为纯本地统计。
+// 名字在 B 站侧不存在时返回错误，httpapi 会继续尝试其它 Provider。
 func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.ArtistDetail, error) {
 	cookie := p.cookie.Load().(string)
 	var searchResp struct {
@@ -37,6 +37,7 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 	first := searchResp.Results[0]
 	detail := provider.ArtistDetail{
 		Name:      first.Name,
+		EntityID:  strconv.FormatInt(first.Mid, 10),
 		AvatarURL: normalizeCoverURL(first.Face),
 		Bio:       first.Sign,
 	}

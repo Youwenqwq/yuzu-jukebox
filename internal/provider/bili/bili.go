@@ -467,6 +467,16 @@ func (p *Provider) RadioSources() []provider.RadioSource {
 	}
 }
 
+// RadioSourceCatalog implements provider.RadioSourceCatalogLister with the
+// concrete anonymous ranking instances intended for catalog discovery.
+func (p *Provider) RadioSourceCatalog(context.Context) ([]provider.RadioSourceEntry, error) {
+	return []provider.RadioSourceEntry{
+		{Spec: "ranking:music", Name: "音乐区排行榜"},
+		{Spec: "ranking:kichiku", Name: "鬼畜区排行榜"},
+		{Spec: "ranking:all", Name: "全站排行榜"},
+	}, nil
+}
+
 // listSource 是一次物化的有限曲目列表源（收藏夹/排行榜共用）。
 type listSource struct {
 	mu     sync.Mutex

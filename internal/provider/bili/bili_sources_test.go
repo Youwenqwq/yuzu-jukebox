@@ -132,6 +132,24 @@ func TestRadioSources(t *testing.T) {
 	}
 }
 
+func TestRadioSourceCatalog(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	got, err := testProvider(server, "").RadioSourceCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("RadioSourceCatalog() error = %v", err)
+	}
+	want := []provider.RadioSourceEntry{
+		{Spec: "ranking:music", Name: "音乐区排行榜"},
+		{Spec: "ranking:kichiku", Name: "鬼畜区排行榜"},
+		{Spec: "ranking:all", Name: "全站排行榜"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RadioSourceCatalog() = %+v, want %+v", got, want)
+	}
+}
+
 // TestNewSourceRanking 分区排行榜物化：key 走 partition 参数、数字走 rid 参数。
 func TestNewSourceRanking(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

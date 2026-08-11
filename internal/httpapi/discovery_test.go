@@ -20,11 +20,14 @@ import (
 
 // discoveryFakeProvider 同时实现 ArtistDetailer 与 RecommendationProvider。
 type discoveryFakeProvider struct {
-	id         string
-	detail     provider.ArtistDetail
-	detailErr  error
-	shelves    []provider.RecommendationShelf
-	shelvesErr error
+	id          string
+	detail      provider.ArtistDetail
+	detailErr   error
+	detailCalls *[]string
+	// detailName 非空时仅在该名字匹配时返回 detail（模拟真实 detailer 的名字敏感）
+	detailName  string
+	shelves     []provider.RecommendationShelf
+	shelvesErr  error
 }
 
 func (p *discoveryFakeProvider) ID() string { return p.id }
@@ -37,7 +40,13 @@ func (*discoveryFakeProvider) GetTrack(context.Context, provider.TrackRef) (prov
 func (*discoveryFakeProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
 	return provider.StreamLocator{}, errors.New("unused")
 }
-func (p *discoveryFakeProvider) ArtistDetail(context.Context, string) (provider.ArtistDetail, error) {
+func (p *discoveryFakeProvider) ArtistDetail(_ context.Context, name string) (provider.ArtistDetail, error) {
+	if p.detailCalls != nil {
+		*p.detailCalls = append(*p.detailCalls, p.id+":"+name)
+	}
+	if p.detailName != "" && name != p.detailName {
+		return provider.ArtistDetail{}, errors.New("artist not found")
+	}
 	return p.detail, p.detailErr
 }
 func (p *discoveryFakeProvider) Recommendations(context.Context) ([]provider.RecommendationShelf, error) {
@@ -87,25 +96,10 @@ func discoveryRequest(t *testing.T, f discoveryFixture, path string) *httptest.R
 
 func TestArtistProfileEndpoint(t *testing.T) {
 	f := setupDiscoveryEndpoints(t)
-	ctx := context.Background()
-	for _, row := range []struct {
-		ref, title, artist string
-		startedAt          int64
-	}{
-		{"ncm:1", "晴天", "周杰伦", 100},
-		{"ncm:1", "晴天", "周杰伦", 200},
-		{"ncm:1", "晴天", "周杰伦", 300},
-		{"ncm:2", "稻香", "周杰伦", 400},
-		{"ncm:3", "海阔天空", "Beyond", 500},
-	} {
-		if err := f.st.AddPlayHistory(ctx, "room-1", row.ref, row.title, row.artist, "alice", row.startedAt, row.startedAt+1, "finished"); err != nil {
-			t.Fatal(err)
-		}
-	}
 	f.reg.Register(&discoveryFakeProvider{
 		id: "ncm",
 		detail: provider.ArtistDetail{
-			Name: "周杰伦", AvatarURL: "https://img/avatar.jpg", Bio: "歌手",
+			Name: "周杰伦", EntityID: "777", AvatarURL: "https://img/avatar.jpg", Bio: "歌手",
 		},
 	})
 
@@ -114,64 +108,107 @@ func TestArtistProfileEndpoint(t *testing.T) {
 		t.Fatalf("artist status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Artist struct {
-			Name         string                  `json:"name"`
-			PlayCount    int                     `json:"play_count"`
-			LastPlayedAt int64                   `json:"last_played_at"`
-			AvatarURL    string                  `json:"avatar_url"`
-			Bio          string                  `json:"bio"`
-			TopTracks    []store.ArtistTrackStat `json:"top_tracks"`
-		} `json:"artist"`
+		Artist map[string]any `json:"artist"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	artist := body.Artist
-	if artist.Name != "周杰伦" || artist.PlayCount != 4 || artist.LastPlayedAt != 400 {
-		t.Fatalf("artist = %#v, want 4 plays last at 400", artist)
+	if body.Artist["name"] != "周杰伦" || body.Artist["provider"] != "ncm" || body.Artist["entity_id"] != "777" || body.Artist["bio"] != "歌手" {
+		t.Fatalf("artist = %#v, want resolved ncm entity", body.Artist)
 	}
-	if artist.Bio != "歌手" || !strings.HasPrefix(artist.AvatarURL, "/api/v1/cover/ext/") {
-		t.Fatalf("enrichment = bio %q avatar %q, want bio + ext proxy avatar", artist.Bio, artist.AvatarURL)
+	avatar, _ := body.Artist["avatar_url"].(string)
+	if !strings.HasPrefix(avatar, "/api/v1/cover/ext/") {
+		t.Fatalf("avatar_url = %q, want ext proxy", avatar)
 	}
-	if len(artist.TopTracks) != 2 {
-		t.Fatalf("top tracks = %#v, want 2", artist.TopTracks)
-	}
-	if artist.TopTracks[0].TrackRef != "ncm:1" || artist.TopTracks[0].PlayCount != 3 {
-		t.Fatalf("top track 0 = %#v, want ncm:1 count 3", artist.TopTracks[0])
-	}
-	if artist.TopTracks[0].CoverURL != "/api/v1/cover/ncm:1" {
-		t.Fatalf("top track cover = %q, want proxy path", artist.TopTracks[0].CoverURL)
+	for _, removed := range []string{"play_count", "last_played_at", "top_tracks"} {
+		if _, exists := body.Artist[removed]; exists {
+			t.Fatalf("artist unexpectedly contains removed field %q: %#v", removed, body.Artist)
+		}
 	}
 }
 
-// TestArtistProfileDegradesWithoutProvider 富化失败（名字不存在/provider 不可用）
-// 时降级为纯本地统计，不造假头像/简介。
-func TestArtistProfileDegradesWithoutProvider(t *testing.T) {
+func TestArtistProfileMultiArtistSegmentFallback(t *testing.T) {
 	f := setupDiscoveryEndpoints(t)
-	ctx := context.Background()
-	if err := f.st.AddPlayHistory(ctx, "room-1", "local:1", "Local Song", "本地歌手", "alice", 100, 200, "finished"); err != nil {
+	var calls []string
+	f.reg.Register(&discoveryFakeProvider{
+		id: "ncm", detailCalls: &calls,
+		detailName: "张晶",
+		detail:     provider.ArtistDetail{Name: "张晶", EntityID: "777", Bio: "歌手"},
+	})
+
+	// 完整 join 串与前面各段都解析失败，第三段 "张晶" 成功 → 返回该段实体。
+	rec := discoveryRequest(t, f, "/api/v1/artists/"+url.PathEscape("塞壬唱片-MSR/F.L.O.A.T (白羽）/张晶"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artist status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Artist artistProfileResponse `json:"artist"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	f.reg.Register(&discoveryFakeProvider{
-		id: "ncm", detailErr: errors.New("artist not found"),
-	})
+	if body.Artist.Provider != "ncm" || body.Artist.EntityID != "777" || body.Artist.Bio != "歌手" {
+		t.Fatalf("artist = %#v, want segment-resolved ncm entity", body.Artist)
+	}
+	// 调用序列：完整串 → 各段，取首个成功
+	want := []string{"ncm:塞壬唱片-MSR/F.L.O.A.T (白羽）/张晶", "ncm:塞壬唱片-MSR", "ncm:F.L.O.A.T (白羽）", "ncm:张晶"}
+	if len(calls) != len(want) {
+		t.Fatalf("detail calls = %#v, want %#v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("detail call[%d] = %q, want %q (all = %#v)", i, calls[i], want[i], calls)
+		}
+	}
+}
+
+func TestArtistProfileAllProvidersFailReturnsNameOnly(t *testing.T) {
+	f := setupDiscoveryEndpoints(t)
+	f.reg.Register(&discoveryFakeProvider{id: "ncm", detailErr: errors.New("artist not found")})
 
 	rec := discoveryRequest(t, f, "/api/v1/artists/"+url.PathEscape("本地歌手"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("artist status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Artist struct {
-			PlayCount int    `json:"play_count"`
-			AvatarURL string `json:"avatar_url"`
-			Bio       string `json:"bio"`
-		} `json:"artist"`
+		Artist map[string]any `json:"artist"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Artist.PlayCount != 1 || body.Artist.AvatarURL != "" || body.Artist.Bio != "" {
-		t.Fatalf("degraded artist = %#v, want stats only", body.Artist)
+	if len(body.Artist) != 1 || body.Artist["name"] != "本地歌手" {
+		t.Fatalf("artist = %#v, want name only", body.Artist)
+	}
+}
+
+func TestArtistProfileTrackRefProviderTakesPriority(t *testing.T) {
+	f := setupDiscoveryEndpoints(t)
+	var calls []string
+	f.reg.Register(&discoveryFakeProvider{
+		id: "aaa", detailCalls: &calls,
+		detail: provider.ArtistDetail{Name: "全局首项", EntityID: "global"},
+	})
+	f.reg.Register(&discoveryFakeProvider{
+		id: "zzz", detailCalls: &calls,
+		detail: provider.ArtistDetail{Name: "锚定项", EntityID: "anchored"},
+	})
+
+	path := "/api/v1/artists/" + url.PathEscape("歌手") + "?track_ref=" + url.QueryEscape("zzz:track")
+	rec := discoveryRequest(t, f, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artist status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Artist artistProfileResponse `json:"artist"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Artist.Provider != "zzz" || body.Artist.EntityID != "anchored" {
+		t.Fatalf("artist = %#v, want anchored zzz entity", body.Artist)
+	}
+	if len(calls) != 1 || calls[0] != "zzz:歌手" {
+		t.Fatalf("detail calls = %#v, want anchored provider only", calls)
 	}
 }
 
@@ -182,29 +219,22 @@ func TestArtistProfileValidation(t *testing.T) {
 		t.Fatalf("empty name status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	// 多艺人 join 串（含 /）经 {name...} 通配仍可匹配
-	ctx := context.Background()
-	if err := f.st.AddPlayHistory(ctx, "room-1", "ncm:9", "合唱", "A/B", "alice", 100, 200, "finished"); err != nil {
+	rec = discoveryRequest(t, f, "/api/v1/artists/x?track_ref=invalid")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid track_ref status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var errBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
 		t.Fatal(err)
 	}
-	rec = discoveryRequest(t, f, "/api/v1/artists/"+url.PathEscape("A/B"))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("slashed name status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var body struct {
-		Artist struct {
-			Name      string `json:"name"`
-			PlayCount int    `json:"play_count"`
-		} `json:"artist"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Artist.Name != "A/B" || body.Artist.PlayCount != 1 {
-		t.Fatalf("slashed artist = %#v, want A/B with 1 play", body.Artist)
+	if errBody.Error.Code != "bad_request" {
+		t.Fatalf("invalid track_ref error = %#v, want bad_request", errBody.Error)
 	}
 
-	// 未认证 → 401
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/artists/x", nil)
 	rec = httptest.NewRecorder()
 	f.handler.ServeHTTP(rec, req)
@@ -212,7 +242,6 @@ func TestArtistProfileValidation(t *testing.T) {
 		t.Fatalf("anonymous artist status = %d, want 401", rec.Code)
 	}
 
-	// 仅 listener 角色 → 403
 	listenerToken := f.authm.IssueSession(auth.Identity{
 		ID: "bob", Name: "Bob", Kind: "guest", Roles: []string{auth.RoleListener},
 	})

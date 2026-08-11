@@ -88,46 +88,6 @@ func TestHotTracks(t *testing.T) {
 	}
 }
 
-func TestArtistProfile(t *testing.T) {
-	st := openHistoryStore(t)
-	ctx := context.Background()
-	seedPlayHistory(t, st)
-
-	profile, err := st.ArtistProfile(ctx, "artist-1", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if profile.Name != "artist-1" || profile.PlayCount != 4 || profile.LastPlayedAt != 500 {
-		t.Fatalf("artist-1 profile = %+v, want 4 plays, last at 500", profile)
-	}
-	if len(profile.TopTracks) != 2 {
-		t.Fatalf("artist-1 top tracks = %#v, want 2", profile.TopTracks)
-	}
-	first := profile.TopTracks[0]
-	if first.TrackRef != "ncm:a" || first.Title != "A new" || first.PlayCount != 3 || first.LastPlayedAt != 500 {
-		t.Fatalf("artist-1 first top track = %#v, want ncm:a latest title count 3", first)
-	}
-	second := profile.TopTracks[1]
-	if second.TrackRef != "ncm:c" || second.PlayCount != 1 {
-		t.Fatalf("artist-1 second top track = %#v, want ncm:c count 1", second)
-	}
-
-	other, err := st.ArtistProfile(ctx, "artist-2", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if other.PlayCount != 2 || other.LastPlayedAt != 600 || len(other.TopTracks) != 1 {
-		t.Fatalf("artist-2 profile = %+v, want 2 plays, last at 600, 1 top track", other)
-	}
-
-	unknown, err := st.ArtistProfile(ctx, "nobody", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unknown.PlayCount != 0 || unknown.LastPlayedAt != 0 || len(unknown.TopTracks) != 0 {
-		t.Fatalf("unknown artist profile = %+v, want zero-value", unknown)
-	}
-}
 
 func openHistoryStore(t *testing.T) *Store {
 	t.Helper()

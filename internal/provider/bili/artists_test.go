@@ -33,6 +33,7 @@ func TestArtistDetailSnapshot(t *testing.T) {
 	}
 	want := provider.ArtistDetail{
 		Name:      "老番茄",
+		EntityID:  "1577803",
 		AvatarURL: "https://i0.hdslb.com/bfs/face/up.jpg", // 协议相对 URL 归一化
 		Bio:       "知名游戏区UP主",
 	}
@@ -73,7 +74,7 @@ func TestArtistDetailWithCredential(t *testing.T) {
 		t.Fatal("acc/info not called with credential set")
 	}
 	want := provider.ArtistDetail{
-		Name: "老番茄", AvatarURL: "https://i0.hdslb.com/bfs/face/new.jpg", Bio: "权威签名",
+		Name: "老番茄", EntityID: "1577803", AvatarURL: "https://i0.hdslb.com/bfs/face/new.jpg", Bio: "权威签名",
 	}
 	if got != want {
 		t.Fatalf("ArtistDetail() = %#v, want %#v", got, want)
@@ -97,12 +98,12 @@ func TestArtistDetailAccInfoFailureDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ArtistDetail error = %v", err)
 	}
-	if got.Name != "老番茄" || got.Bio != "快照签名" || got.AvatarURL != "https://i0.hdslb.com/bfs/face/up.jpg" {
+	if got.Name != "老番茄" || got.EntityID != "1577803" || got.Bio != "快照签名" || got.AvatarURL != "https://i0.hdslb.com/bfs/face/up.jpg" {
 		t.Fatalf("degraded detail = %#v, want search snapshot", got)
 	}
 }
 
-// TestArtistDetailNotFound 名字不存在时返回错误（httpapi 降级为本地统计）。
+// TestArtistDetailNotFound 名字不存在时返回错误。
 func TestArtistDetailNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"results":[]}`))

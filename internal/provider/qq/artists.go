@@ -11,7 +11,7 @@ import (
 
 // ArtistDetail 实现 provider.ArtistDetailer：艺人名 → 歌手搜索首条
 // （/search/search_by_type search_type=1）→ /singer/{mid}/desc 取头像与简介。
-// 名字在 QQ 侧不存在时返回错误，httpapi 降级为纯本地统计。
+// 名字在 QQ 侧不存在时返回错误，httpapi 会继续尝试其它 Provider。
 // 该端点匿名可用（web 层 AuthPolicy.NONE），凭据仅用于写操作。
 func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.ArtistDetail, error) {
 	q := url.Values{
@@ -57,6 +57,7 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 	s := desc.SingerList[0]
 	detail := provider.ArtistDetail{
 		Name:      s.BasicInfo.Name,
+		EntityID:  mid,
 		AvatarURL: s.Pic.Pic,
 		Bio:       strings.TrimSpace(s.ExInfo.Desc),
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,65 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 )
+
+type radioSourceCatalogEntry struct {
+	Provider           string `json:"provider"`
+	Spec               string `json:"spec"`
+	Name               string `json:"name"`
+	CoverURL           string `json:"cover_url,omitempty"`
+	Detail             string `json:"detail,omitempty"`
+	Finite             bool   `json:"finite"`
+	RequiresCredential bool   `json:"requires_credential,omitempty"`
+}
+
+// radioSourceCatalogAll aggregates every concrete finite radio source into a
+// client-ready catalog. Static no-argument sources precede dynamic entries for
+// each provider; a dynamic catalog failure omits only that provider.
+func (s *Server) radioSourceCatalogAll(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
+		return
+	}
+	entries := []radioSourceCatalogEntry{}
+	for _, p := range s.reg.All() {
+		providerID := p.ID()
+		providerStart := len(entries)
+		if catalog, ok := p.(provider.SourceCatalog); ok {
+			for _, source := range catalog.RadioSources() {
+				if !source.Finite || source.Arg != "" {
+					continue
+				}
+				entries = append(entries, radioSourceCatalogEntry{
+					Provider:           providerID,
+					Spec:               providerID + ":" + source.Spec,
+					Name:               source.Name,
+					Finite:             true,
+					RequiresCredential: source.RequiresCredential,
+				})
+			}
+		}
+		lister, ok := p.(provider.RadioSourceCatalogLister)
+		if !ok {
+			continue
+		}
+		catalogEntries, err := lister.RadioSourceCatalog(r.Context())
+		if err != nil {
+			log.Printf("radio catalog provider %s: %v", providerID, err)
+			entries = entries[:providerStart]
+			continue
+		}
+		for _, entry := range catalogEntries {
+			entries = append(entries, radioSourceCatalogEntry{
+				Provider: providerID,
+				Spec:     providerID + ":" + entry.Spec,
+				Name:     entry.Name,
+				CoverURL: s.proxiedEntityCover(providerID, entry.CoverURL),
+				Detail:   entry.Detail,
+				Finite:   true,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
 
 // radioTracks materializes a fresh finite source instance into a paged track list.
 func (s *Server) radioTracks(w http.ResponseWriter, r *http.Request) {

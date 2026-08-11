@@ -1,36 +1,28 @@
-// discovery.go 首页漫游的只读端点：艺人档案与推荐 feed。
+// discovery.go 首页漫游的只读端点：歌手实体解析与推荐 feed。
 package httpapi
 
 import (
 	"context"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
-	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
-// artistProfileLimit 艺人档案的「热门曲目」固定取前 10（卡片容量上限）。
-const artistProfileLimit = 10
-
-// artistProfileResponse 艺人档案端点响应体。AvatarURL/Bio 来自 provider
-// 富化（最佳努力，缺失即省略）；TopTracks 为本地 play_history 聚合。
+// artistProfileResponse 是名字解析出的 provider 歌手实体。
 type artistProfileResponse struct {
-	Name         string                  `json:"name"`
-	PlayCount    int                     `json:"play_count"`
-	LastPlayedAt int64                   `json:"last_played_at"`
-	AvatarURL    string                  `json:"avatar_url,omitempty"`
-	Bio          string                  `json:"bio,omitempty"`
-	TopTracks    []store.ArtistTrackStat `json:"top_tracks"`
+	Name      string `json:"name"`
+	Provider  string `json:"provider,omitempty"`
+	EntityID  string `json:"entity_id,omitempty"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	Bio       string `json:"bio,omitempty"`
 }
 
-// artistProfile 艺人档案：本地播放统计（"月听众"替身）+ 热门曲目，
-// 再由首个支持 ArtistDetailer 的 provider 最佳努力富化头像/简介。
-// 名字是唯一键（play_history 与前端卡片都只有名字），富化失败不降级数据。
+// artistProfile 将请求名字解析为 provider 歌手实体。track_ref 仅作为
+// Provider 优先级锚点；锚定解析失败后仍按注册表顺序回退其它 Provider。
 func (s *Server) artistProfile(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
 		return
@@ -40,47 +32,79 @@ func (s *Server) artistProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 		return
 	}
-	profile, err := s.st.ArtistProfile(r.Context(), name, artistProfileLimit)
-	if err != nil {
-		s.internalError(w, r, "load artist profile", err)
-		return
+
+	var preferred provider.Provider
+	trackRef := strings.TrimSpace(r.URL.Query().Get("track_ref"))
+	if trackRef != "" {
+		providerID, _, err := provider.TrackRef(trackRef).Split()
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid track_ref")
+			return
+		}
+		preferred, _ = s.reg.Get(providerID)
 	}
-	// 历史不存封面：热门曲目统一发代理路径，封面端点按 ref 现场解析。
-	for i := range profile.TopTracks {
-		profile.TopTracks[i].CoverURL = "/api/v1/cover/" + url.PathEscape(profile.TopTracks[i].TrackRef)
-	}
-	resp := artistProfileResponse{
-		Name:         profile.Name,
-		PlayCount:    profile.PlayCount,
-		LastPlayedAt: profile.LastPlayedAt,
-		TopTracks:    profile.TopTracks,
-	}
-	if detail, ok := s.enrichArtist(r.Context(), name); ok {
+
+	resp := artistProfileResponse{Name: name}
+	if detail, providerID, ok := s.enrichArtist(r.Context(), name, preferred); ok {
+		resp.Provider = providerID
+		resp.EntityID = detail.EntityID
 		resp.AvatarURL = detail.AvatarURL
 		resp.Bio = detail.Bio
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"artist": resp})
 }
 
-// enrichArtist 用首个支持 ArtistDetailer 的 provider 解析艺人档案富信息。
-// 任何失败（provider 不可用、名字不存在、能力缺席）都跳过富化；
-// 头像 URL 走实体封面代理签发（与搜索实体同一机制，防伪造 token）。
-func (s *Server) enrichArtist(ctx context.Context, name string) (provider.ArtistDetail, bool) {
-	for _, p := range s.reg.All() {
-		ad, ok := p.(provider.ArtistDetailer)
-		if !ok {
-			continue
+// enrichArtist 先尝试 track_ref 锚定的 Provider，再按 Provider ID 稳定顺序
+// 回退全局解析。任何失败或能力缺席都继续；头像统一改写为实体封面代理。
+// 多歌手 join 串（如 "塞壬唱片-MSR/F.L.O.A.T (白羽）/张晶"）先按完整串试，
+// 失败再逐段（'/' 分割去空白）尝试，取首个成功段。
+func (s *Server) enrichArtist(ctx context.Context, name string, preferred provider.Provider) (provider.ArtistDetail, string, bool) {
+	for _, candidate := range artistCandidates(name) {
+		if detail, ok := s.resolveArtist(ctx, candidate, preferred); ok {
+			return detail, preferred.ID(), true
 		}
-		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		detail, err := ad.ArtistDetail(dctx, name)
-		cancel()
-		if err != nil || strings.TrimSpace(detail.Name) == "" {
-			continue
+		for _, p := range s.reg.All() {
+			if preferred != nil && p.ID() == preferred.ID() {
+				continue
+			}
+			if detail, ok := s.resolveArtist(ctx, candidate, p); ok {
+				return detail, p.ID(), true
+			}
 		}
-		detail.AvatarURL = s.proxiedEntityCover(p.ID(), detail.AvatarURL)
-		return detail, true
 	}
-	return provider.ArtistDetail{}, false
+	return provider.ArtistDetail{}, "", false
+}
+
+// artistCandidates 解析候选名字序列：完整名优先，join 串各段（去空白）随后。
+// 名字本身含 '/' 的单艺人（如 "AC/DC"）完整名解析通常直接成功，不触发拆段。
+func artistCandidates(name string) []string {
+	candidates := make([]string, 0, 4)
+	candidates = append(candidates, name)
+	for _, segment := range strings.Split(name, "/") {
+		segment = strings.TrimSpace(segment)
+		if segment != "" && segment != name {
+			candidates = append(candidates, segment)
+		}
+	}
+	return candidates
+}
+
+func (s *Server) resolveArtist(ctx context.Context, name string, p provider.Provider) (provider.ArtistDetail, bool) {
+	if p == nil {
+		return provider.ArtistDetail{}, false
+	}
+	ad, ok := p.(provider.ArtistDetailer)
+	if !ok {
+		return provider.ArtistDetail{}, false
+	}
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	detail, err := ad.ArtistDetail(dctx, name)
+	cancel()
+	if err != nil {
+		return provider.ArtistDetail{}, false
+	}
+	detail.AvatarURL = s.proxiedEntityCover(p.ID(), detail.AvatarURL)
+	return detail, true
 }
 
 // recommendations 推荐 feed：聚合所有支持 RecommendationProvider 的 provider
