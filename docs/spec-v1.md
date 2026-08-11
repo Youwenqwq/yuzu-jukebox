@@ -799,7 +799,6 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/radio/catalog` | `requester` | 聚合全部 Provider 的可枚举有限电台源实例，返回 `{"entries":[...]}`；每项含完整 Provider 前缀规格，可直接传给 `radio.play` 或 `/api/v1/radio/tracks`。无条目时返回 `{"entries":[]}`（200）（见 6.2.4） |
 | `GET /api/v1/providers` | `requester` | 已注册的 Provider 列表 |
 | `GET /api/v1/artists/{name}?track_ref=` | `requester` | 歌手实体解析：以请求名字解析 Provider 歌手实体；可选 `track_ref` 先锚定其 Provider，失败后按 Provider ID 升序全局回退。返回 `{"artist":{"name","provider"?,"entity_id"?,"avatar_url"?,"bio"?}}`；全失败仅返回 `name`。`entity_id` 可用于 `search/entity?provider=<provider>&category=artist&id=<entity_id>` 钻取；非法 `track_ref` 为 400（见 6.2.4） |
-| `GET /api/v1/recommendations` | `requester` | 推荐 feed：聚合所有实现 `provider.RecommendationProvider` 的 Provider 的 shelf（`{"shelves":[{id,title,tracks:[...]}]}`），曲目与 song 搜索元素同构且封面改写为代理路径；单个 Provider 失败记日志跳过，无任何数据源时返回空 `shelves`（200）（见 6.2.4） |
 | `GET /api/v1/providers/{id}/similar?track=&limit=` | `requester` | Provider 作用域内按裸 `track_id` 查询相似曲目，返回 `{"tracks":[...]}`；`limit` 缺省 30、上限 100。Provider 不存在为 404；能力缺席为 501 `not_supported` |
 | `GET /api/v1/providers/{id}/radio-catalog` | `requester` | 动态电台源目录（静态 `radio_sources` 之外的可枚举项，如 QQ 榜单全集），返回 `{"sources":[{spec,name,cover_url?,detail?}]}`；`cover_url` 为实体封面代理路径（ext token）。Provider 不存在 404；未实现 `provider.RadioSourceCatalogLister` 501 `not_supported`；上游失败 502 |
 | `POST /api/v1/providers/{id}/credential` | `media_admin` | body `{"payload":"..."}`；先校验再热生效，凭据存储于服务端且永不下发 |
@@ -950,15 +949,13 @@ Content-Type: application/json
 
 配置 `cache_auto_prune_days` 控制自动按龄清理：默认 `0`（关闭）；正整数时每 6 小时清理超过该天数未访问的缓存，正在下载的条目跳过。
 
-#### 6.2.4 歌手实体解析、推荐 feed 与电台源目录合同
+#### 6.2.4 歌手实体解析与电台源目录合同
 
 **歌手实体解析**：`GET /api/v1/artists/{name}?provider=<可选>&entity_id=<可选>&track_ref=<可选>` 把请求名字解析为 Provider 的歌手实体，不读取或聚合本地 `play_history`。`provider` 与 `entity_id` 必须同时提供非空值或同时省略；仅提供其中一个、任一值为空均返回 400 `bad_request`，指定的 Provider 不存在返回 404 `not_found`。响应信封为 `{"artist":{...}}`：`name` 恒为请求的艺人名；解析成功时携带 `provider` 与该 Provider 的歌手实体键 `entity_id`，并可携带 `avatar_url`（经实体封面 ext token 代理）和 `bio`；字段为空时省略。解析全部失败返回 `{"artist":{"name":"..."}}`，不视为端点错误。
 
 解析按以下稳定顺序取首个成功者：首先，若同时提供非空 `provider` 与 `entity_id`，服务端在该 Provider 实现 `provider.ArtistIDDetailer` 时直接调用 `ArtistDetailByID(entity_id)`，全程不做名字搜索；能力缺席或按 ID 解析失败时优雅回退，不返回 Provider 错误。其次，若非空 `track_ref` 能由 `TrackRef.Split()` 拆出已注册的 Provider，由该 Provider `GetTrack` 读取锚定曲目，并在 `contributors[]` 中查找 `role` 为 `artist` 或 `uploader`、`name` 与请求名字精确匹配且 `entity_id` 非空的贡献者；Provider 实现 `provider.ArtistIDDetailer` 时，以贡献者的 `entity_id` 直接解析实体。GetTrack 失败、无匹配贡献者/实体键、能力缺席或按 ID 解析失败时，回退原有名字解析：先用 `track_ref` 锚定 Provider 的 `provider.ArtistDetailer`，再按 `registry.All()` 的 Provider ID 升序尝试其它 Provider；没有有效锚点时直接按该稳定全局顺序尝试。**多歌手 join 串**（如 `"塞壬唱片-MSR/F.L.O.A.T (白羽）/张晶"`）先按完整串解析，失败再按 `/` 分割去空白逐段尝试，取首个成功段；名字本身含 `/` 的单艺人（如 `"AC/DC"`）完整串通常直接成功，不触发拆段。名字为空或在需要继续回退时 `track_ref` 无法拆分均返回 400 `bad_request`。
 
 Client 可在 `provider` 与 `entity_id` 同时存在时调用 `GET /api/v1/search/entity?provider=<provider>&category=artist&id=<entity_id>` 钻取该歌手的曲目，或在 Provider 声明 `entity_albums` 能力时以 `into=albums` 钻取专辑。端点不再返回 `play_count`、`last_played_at` 或 `top_tracks`。
-
-**推荐 feed**：`GET /api/v1/recommendations` 聚合所有实现 `provider.RecommendationProvider` 的 Provider 的 shelf。shelf 元素 `{"id","title","tracks"}`：`id` 为 Provider 作用域内的稳定标识（如 `toplist:<id>`），供 Client 作 React key；`tracks` 与 song 搜索元素同构，封面统一改写为 `/api/v1/cover/{track_ref}`。NCM 首批实现：`/toplist` 前 3 榜 → `/playlist/track/all`（**不用 `/toplist/detail`**——enhanced v4.39.0 该端点 `tracks[]` 只返回 `{first,second}` 摘要，无 id/ar/al/dt，解码会产出空壳曲目），每榜 10 首；单个榜单拉取失败跳过该 shelf、榜单列表失败则该 Provider 整体跳过并记日志。无任何数据源时返回 `{"shelves":[]}`（200），Client 据此隐藏区块而非报错。
 
 **曲目级简介**：`provider.Track` 可选富字段 `description`（曲目级简介）只在零成本可得时填充（随元数据端点同响应返回，不进热路径）：qq 取 `/song/{mid}/detail` 的 `info.intro[].value|content`；bili 取 `/detail` 的 `desc`（视频简介）。NCM 歌曲百科（`/song/wiki/summary`，匿名）是独立端点、正文深埋 `blocks[].creatives[].resources[].uiElement.descriptions[]`，未接入 GetTrack 热路径。空值按富字段惯例降级。
 

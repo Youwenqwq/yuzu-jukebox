@@ -637,6 +637,7 @@ func TestListProvidersOwnershipAndCapabilities(t *testing.T) {
 			map[string]any{"spec": "simi", "arg": "track_id", "name": "相似歌曲", "finite": false, "requires_credential": true},
 			map[string]any{"spec": "heart", "arg": "track_id", "name": "心动模式", "finite": false, "requires_credential": true},
 			map[string]any{"spec": "playlist", "arg": "playlist_id", "name": "歌单电台", "finite": true},
+			map[string]any{"spec": "toplist", "arg": "toplist_id", "name": "网易云排行榜", "finite": true},
 		}
 		if got := ncmCapabilities["radio_sources"]; !reflect.DeepEqual(got, wantRadioSources) {
 			t.Fatalf("ncm radio_sources = %#v, want %#v", got, wantRadioSources)

@@ -1,9 +1,8 @@
-// discovery.go 首页漫游的只读端点：歌手实体解析与推荐 feed。
+// discovery.go 首页漫游的歌手实体只读端点。
 package httpapi
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -177,33 +176,4 @@ func (s *Server) resolveArtistByID(ctx context.Context, entityID string, p provi
 	}
 	detail.AvatarURL = s.proxiedEntityCover(p.ID(), detail.AvatarURL)
 	return detail, true
-}
-
-// recommendations 推荐 feed：聚合所有支持 RecommendationProvider 的 provider
-// 的 shelf。单个 provider 失败只记日志跳过（首页 feed 不因一个数据源
-// 故障整体 5xx）；无任何数据源时返回空 shelves（200），前端据此隐藏区块。
-func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
-		return
-	}
-	// 无任何数据源时输出 [] 而非 null（客户端 shelves.map 不炸）。
-	shelves := []provider.RecommendationShelf{}
-	for _, p := range s.reg.All() {
-		rec, ok := p.(provider.RecommendationProvider)
-		if !ok {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		got, err := rec.Recommendations(ctx)
-		cancel()
-		if err != nil {
-			log.Printf("recommendations provider %s: %v", p.ID(), err)
-			continue
-		}
-		for i := range got {
-			proxiedSearchTracks(got[i].Tracks)
-		}
-		shelves = append(shelves, got...)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"shelves": shelves})
 }

@@ -12,7 +12,7 @@ play them in sync across rooms, and control everything from CLI, Web UI, or chat
 - **Real-time sync** — WebSocket-pushed playback state; all clients stay in sync within ~100ms
 - **Headless playback** — `yuzu-agent` runs on any machine with MPV and acts as a room speaker
 - **Chat bot integration** — connect Discord/Telegram/IM bots via the Integration API
-- **Radio mode** — playlist shuffle, daily recommendations, personal FM, similar-song stations
+- **Radio mode** — playlist shuffle, daily mixes, personal FM, similar-song stations
 - **OIDC login** — authenticate via Zitadel or any OIDC IdP; roles map to Yuzu permissions
 - **Streaming cache** — first play caches to disk, replays hit local files; LRU eviction
 

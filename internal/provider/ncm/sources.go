@@ -110,10 +110,19 @@ func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSo
 			return nil, fmt.Errorf("playlist source: %w", err)
 		}
 		return &listSource{desc: "网易云歌单《" + name + "》", tracks: tracks}, nil
+	case "toplist":
+		if arg == "" {
+			return nil, fmt.Errorf("toplist source requires an id: ncm:toplist:<toplist_id>")
+		}
+		name, _, tracks, err := p.ImportPlaylist(ctx, arg)
+		if err != nil {
+			return nil, fmt.Errorf("toplist source: %w", err)
+		}
+		return &listSource{desc: "网易云榜单《" + name + "》", tracks: tracks}, nil
 	case "newsong":
 		return p.newsongSource(ctx)
 	default:
-		return nil, fmt.Errorf("unknown ncm source %q (want daily|fm|simi:<id>|heart:<id>|playlist:<id>|newsong)", spec)
+		return nil, fmt.Errorf("unknown ncm source %q (want daily|fm|simi:<id>|heart:<id>|playlist:<id>|toplist:<id>|newsong)", spec)
 	}
 }
 
@@ -143,6 +152,7 @@ func (p *Provider) RadioSources() []provider.RadioSource {
 		{Spec: "simi", Arg: "track_id", Name: "相似歌曲", Finite: false, RequiresCredential: true},
 		{Spec: "heart", Arg: "track_id", Name: "心动模式", Finite: false, RequiresCredential: true},
 		{Spec: "playlist", Arg: "playlist_id", Name: "歌单电台", Finite: true},
+		{Spec: "toplist", Arg: "toplist_id", Name: "网易云排行榜", Finite: true},
 	}
 }
 

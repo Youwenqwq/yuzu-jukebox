@@ -50,6 +50,11 @@ func TestRadioSources(t *testing.T) {
 			want:   provider.RadioSource{Spec: "playlist", Arg: "playlist_id", Name: "歌单电台", Finite: true},
 			source: &listSource{},
 		},
+		{
+			name:   "toplist",
+			want:   provider.RadioSource{Spec: "toplist", Arg: "toplist_id", Name: "网易云排行榜", Finite: true},
+			source: &listSource{},
+		},
 	}
 	if len(got) != len(tests) {
 		t.Fatalf("RadioSources() returned %d entries, want %d: %#v", len(got), len(tests), got)
@@ -273,17 +278,20 @@ func TestNewsongSourceMaterializesAndDrains(t *testing.T) {
 	}
 }
 
-func TestNewSourceUnknownMentionsPlaylist(t *testing.T) {
+func TestNewSourceUnknownMentionsFiniteLists(t *testing.T) {
 	p := &Provider{}
 	_, err := p.NewSource(context.Background(), "unknown")
 	if err == nil {
 		t.Fatal("NewSource() error = nil")
 	}
-	if !strings.Contains(err.Error(), "playlist:<id>") {
-		t.Fatalf("NewSource() error = %q, want playlist:<id>", err)
+	if !strings.Contains(err.Error(), "playlist:<id>") || !strings.Contains(err.Error(), "toplist:<id>") {
+		t.Fatalf("NewSource() error = %q, want playlist:<id> and toplist:<id>", err)
 	}
 	if _, err := p.NewSource(context.Background(), "playlist:"); err == nil {
 		t.Fatal("NewSource(playlist:) error = nil")
+	}
+	if _, err := p.NewSource(context.Background(), "toplist:"); err == nil {
+		t.Fatal("NewSource(toplist:) error = nil")
 	}
 }
 

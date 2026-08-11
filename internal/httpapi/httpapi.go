@@ -132,7 +132,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/history", s.requesterHistory)
 	mux.HandleFunc("GET /api/v1/stats/hot", s.hotTracks)
 	mux.HandleFunc("GET /api/v1/artists/{name...}", s.artistProfile)
-	mux.HandleFunc("GET /api/v1/recommendations", s.recommendations)
 	mux.HandleFunc("GET /api/v1/rooms", s.listRooms)
 	mux.HandleFunc("POST /api/v1/rooms", s.createRoom)
 	mux.HandleFunc("PATCH /api/v1/rooms/{id}", s.updateRoom)

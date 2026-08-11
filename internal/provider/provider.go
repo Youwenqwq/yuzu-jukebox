@@ -342,23 +342,6 @@ type ArtistIDDetailer interface {
 	ArtistDetailByID(ctx context.Context, entityID string) (ArtistDetail, error)
 }
 
-// RecommendationShelf 推荐 feed 的一个 shelf：标题 + 一组可入队曲目。
-// ID 为 provider 作用域内的稳定标识（如 "toplist:<id>"），供客户端作 key。
-type RecommendationShelf struct {
-	ID     string  `json:"id"`
-	Title  string  `json:"title"`
-	Tracks []Track `json:"tracks"`
-}
-
-// RecommendationProvider 是可选接口：提供首页推荐 feed 的 shelf 列表。
-// 不支持的 provider 直接不实现；httpapi 聚合所有实现者的 shelf 返回。
-// 实现必须自带超时语义（独立短超时 client 或尊重 ctx）；shelf 内的曲目
-// 封面按 provider 正常填充，序列化层统一改写为代理路径。
-type RecommendationProvider interface {
-	Provider
-	Recommendations(ctx context.Context) ([]RecommendationShelf, error)
-}
-
 // Registry 是 provider 注册表。
 type Registry struct {
 	providers map[string]Provider
