@@ -235,6 +235,9 @@ func TestProxyCoverDirectRedirectThumbnailSelection(t *testing.T) {
 			if got := rec.Header().Get("Location"); got != tt.wantURL {
 				t.Fatalf("Location = %q, want %q", got, tt.wantURL)
 			}
+			if got := rec.Header().Get("Cache-Control"); got != "private, max-age=604800" {
+				t.Fatalf("Cache-Control = %q, want %q", got, "private, max-age=604800")
+			}
 		})
 	}
 }

@@ -87,6 +87,10 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	// 是 CORS 消费者（crossOrigin img / fetch）：重定向目标（源站 CDN）不保证
 	// ACAO 且可能混 http 链接，读像素会失败——直接流式回源，CORS 中间件补 ACAO。
 	if s.coverMode(p) == provider.CoverModeRedirect && r.Header.Get("Origin") == "" {
+		// private：只让浏览器（no-cors 分区）缓存 302，下次启动按 Location 直取 CDN，
+		// 不再逐封面打代理；共享缓存（边缘）禁存，避免把无 ACAO 的 302 错发给带
+		// Origin 的 CORS 探针。Location 由确定性 token/ref 派生，7 天内稳定。
+		w.Header().Set("Cache-Control", "private, max-age=604800")
 		http.Redirect(w, r, rawURL, http.StatusFound)
 		return
 	}
