@@ -205,8 +205,12 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "list playlist items", err)
 		return
 	}
+	responseItems := make([]playlistItemResponse, len(items))
+	for i, item := range items {
+		responseItems[i] = playlistItemForResponse(item)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"playlist": pl, "items": items, "offset": offset, "limit": limit,
+		"playlist": pl, "items": responseItems, "offset": offset, "limit": limit,
 	})
 }
 
@@ -404,6 +408,40 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), id.ID, "playlist.delete", plID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": plID})
+}
+
+type playlistItemResponse struct {
+	Ord          int                    `json:"ord"`
+	TrackRef     string                 `json:"track_ref"`
+	Title        string                 `json:"title"`
+	Artist       string                 `json:"artist"`
+	DurationMs   int64                  `json:"duration_ms"`
+	Album        string                 `json:"album,omitempty"`
+	CoverURL     string                 `json:"cover_url,omitempty"`
+	SourceURL    string                 `json:"source_url,omitempty"`
+	Contributors []provider.Contributor `json:"contributors,omitempty"`
+	AddedAt      int64                  `json:"added_at"`
+}
+
+func playlistItemForResponse(item store.PlaylistItem) playlistItemResponse {
+	var contributors []provider.Contributor
+	if item.ContributorsJSON != "" {
+		if err := json.Unmarshal([]byte(item.ContributorsJSON), &contributors); err != nil {
+			contributors = nil
+		}
+	}
+	return playlistItemResponse{
+		Ord:          item.Ord,
+		TrackRef:     item.TrackRef,
+		Title:        item.Title,
+		Artist:       item.Artist,
+		DurationMs:   item.DurationMs,
+		Album:        item.Album,
+		CoverURL:     item.CoverURL,
+		SourceURL:    item.SourceURL,
+		Contributors: contributors,
+		AddedAt:      item.AddedAt,
+	}
 }
 
 // playlistItemFromTrack 把 provider 曲目快照成歌单条目（与 plsync 落库格式一致）。

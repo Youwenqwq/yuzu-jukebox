@@ -323,6 +323,60 @@ func TestListPlaylistsHidesStoreError(t *testing.T) {
 	}
 }
 
+func TestGetPlaylistSerializesContributors(t *testing.T) {
+	f := setupPlaylistBindingEndpoints(t)
+	const playlistID = "playlist-contributors"
+	if err := f.st.CreatePlaylist(context.Background(), store.Playlist{
+		ID: playlistID, Name: "Contributors", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.AppendPlaylistItems(context.Background(), playlistID, []store.PlaylistItem{
+		{
+			TrackRef: "ncm:1", Title: "structured",
+			ContributorsJSON: `[{"role":"artist","name":"歌手"}]`,
+		},
+		{TrackRef: "ncm:2", Title: "empty", ContributorsJSON: ""},
+		{TrackRef: "ncm:3", Title: "null", ContributorsJSON: "null"},
+		{TrackRef: "ncm:4", Title: "malformed", ContributorsJSON: "not-json"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := playlistEndpointRequest(t, f, http.MethodGet,
+		"/api/v1/playlists/"+playlistID, f.requesterToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := playlistResponse(t, rec)
+	items, ok := body["items"].([]any)
+	if !ok || len(items) != 4 {
+		t.Fatalf("items = %#v", body["items"])
+	}
+	for i, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("item %d = %#v", i, raw)
+		}
+		if _, found := item["contributors_json"]; found {
+			t.Fatalf("item %d leaked contributors_json: %#v", i, item)
+		}
+		if i > 0 {
+			if _, found := item["contributors"]; found {
+				t.Fatalf("item %d should omit contributors: %#v", i, item)
+			}
+		}
+	}
+	contributors, ok := items[0].(map[string]any)["contributors"].([]any)
+	if !ok || len(contributors) != 1 {
+		t.Fatalf("contributors = %#v", items[0].(map[string]any)["contributors"])
+	}
+	contributor, ok := contributors[0].(map[string]any)
+	if !ok || contributor["role"] != "artist" || contributor["name"] != "歌手" {
+		t.Fatalf("contributor = %#v", contributors[0])
+	}
+}
+
 func TestBindPlaylistEndpoint(t *testing.T) {
 	f := setupPlaylistBindingEndpoints(t)
 	rec := playlistEndpointRequest(t, f, http.MethodPost, "/api/v1/playlists/bind",

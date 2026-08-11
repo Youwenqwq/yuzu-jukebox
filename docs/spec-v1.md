@@ -811,7 +811,7 @@ Room create/PATCH/list/get 的错误合同：
 | `GET /api/v1/providers/{id}/like-check?track=<id>` | 凭据 owner（标准 session） | 回读喜欢状态 `{"liked":bool}`；Client 在 now-playing 变化时自行查询，服务端不广播该私有状态 |
 | `GET /api/v1/playlists` | `requester` | 歌单列表（含曲目数与 `pinned`，不含条目）；排序：置顶优先，其余按创建时间 |
 | `POST /api/v1/playlists` | 非 Guest 身份 | 创建歌单 `{name, description}`。Guest 为任意昵称自声明身份（含 Integration synthetic guest），不授予歌单创建权；`password`/`oidc`/`player` 身份均可创建 |
-| `GET /api/v1/playlists/{id}?offset=&limit=` | `requester` | 歌单详情 + 条目分页（默认 50，上限 200） |
+| `GET /api/v1/playlists/{id}?offset=&limit=` | `requester` | 歌单详情 + 条目分页（默认 50，上限 200）；`items[]` 为 `{ord,track_ref,title,artist,duration_ms,album?,cover_url?,source_url?,contributors?:[{role,name}],added_at}`，贡献者与其它曲目响应同为结构化数组，空值省略，内部存储字段 `contributors_json` 不下发 |
 | `PATCH /api/v1/playlists/{id}` | 创建者或 `media_admin` | 更新歌单元数据 `{name?, description?, pinned?}` 任意子集，缺省字段保持不变；`description` 可显式置空、`name` 不可为空。绑定歌单的名字归外部歌单所有（同步时被远程名覆盖），改名返回 409 `playlist_bound`（须先 `detach`）；`description`/`pinned` 为本地状态，绑定歌单允许单独修改。成功返回更新后的 `{"playlist":...}` |
 | `DELETE /api/v1/playlists/{id}` | 创建者或 `media_admin` | 删除歌单 |
 | `POST /api/v1/playlists/{id}/items` | 创建者或 `media_admin` | 追加 `{track_refs:[...]}`（单次≤100） |
