@@ -506,6 +506,90 @@ func TestCredentialStatusExpiredThenRefreshed(t *testing.T) {
 	}
 }
 
+func TestCredentialStatusCheckExpiredHealthy(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/login/check_expired" {
+			t.Errorf("path = %q, want /login/check_expired", r.URL.Path)
+		}
+		if got := r.Header.Get("Cookie"); !strings.Contains(got, "musicid=12345") || !strings.Contains(got, "musickey=MK_OK") {
+			t.Errorf("Cookie = %q, want musicid+musickey", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// 健康凭据 → check_expired=false → sidecar 统一信封 {code:-1}
+		_, _ = w.Write([]byte(`{"code":-1,"msg":"操作失败","data":null}`))
+	}))
+	defer server.Close()
+	p, _ := testProviderWithStore(t, server)
+
+	cred, err := parseCredential(`{"musicid":12345,"musickey":"MK_OK","str_musicid":"12345"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.cred.Store(cred)
+
+	if got := p.CredentialStatus(context.Background()); got != "ok" {
+		t.Fatalf("CredentialStatus() = %q, want ok (healthy)", got)
+	}
+	if requests != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", requests)
+	}
+}
+
+func TestCredentialStatusCheckExpiredExpired(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 已过期 → check_expired=true → {code:0, data:null}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":null}`))
+	}))
+	defer server.Close()
+	p, _ := testProviderWithStore(t, server)
+
+	// 无 refresh 材料（管理端粘贴形态）：过期即 invalid，不尝试刷新
+	cred, err := parseCredential(`{"musicid":12345,"musickey":"MK_EXP","str_musicid":"12345"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.cred.Store(cred)
+
+	if got := p.CredentialStatus(context.Background()); got != "invalid" {
+		t.Fatalf("CredentialStatus() = %q, want invalid (expired, no refresh material)", got)
+	}
+}
+
+// 兼容形态：sidecar 若改为在 data 直接携带布尔值。
+func TestCredentialStatusCheckExpiredDataBool(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "healthy data false", body: `{"code":0,"msg":"ok","data":false}`, want: "ok"},
+		{name: "expired data true", body: `{"code":0,"msg":"ok","data":true}`, want: "invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			p, _ := testProviderWithStore(t, server)
+
+			cred, err := parseCredential(`{"musicid":12345,"musickey":"MK","str_musicid":"12345"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.cred.Store(cred)
+
+			if got := p.CredentialStatus(context.Background()); got != tt.want {
+				t.Fatalf("CredentialStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------- 二维码登录 ----------
 
 func TestQRLoginStartAndPoll(t *testing.T) {

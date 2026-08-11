@@ -96,7 +96,16 @@ func (p *Provider) CredentialStatus(ctx context.Context) string {
 }
 
 // checkLogin 用 /login/status 验证 cookie，并返回登录账号资料。
+//
+// /login/status 契约（上游 NeteaseCloudMusicApi 及其 Enhanced 分支一致）：
+// 业务 code 嵌在响应 data.code 内，顶层没有 code 字段；未登录时
+// data.account/data.profile 为 null（Enhanced 分支 code 仍为 200，原版返回 301）。
+// 因此不能走 getWithClient 的顶层 code==200 校验，只按 profile/account 存在性判定。
 func (p *Provider) checkLogin(ctx context.Context, cookie string) (store.AccountProfile, error) {
+	body, err := p.doGet(ctx, p.client, "/login/status", url.Values{}, cookie)
+	if err != nil {
+		return store.AccountProfile{}, err
+	}
 	var resp struct {
 		Data struct {
 			Profile *struct {
@@ -109,8 +118,8 @@ func (p *Provider) checkLogin(ctx context.Context, cookie string) (store.Account
 			} `json:"account"`
 		} `json:"data"`
 	}
-	if err := p.get(ctx, "/login/status", url.Values{}, cookie, &resp); err != nil {
-		return store.AccountProfile{}, err
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return store.AccountProfile{}, fmt.Errorf("ncm api /login/status: decode: %w", err)
 	}
 
 	var account store.AccountProfile
@@ -479,6 +488,38 @@ func (p *Provider) write(ctx context.Context, path string, q url.Values) error {
 	return nil
 }
 
+// doGet 发 GET 请求并返回原始 JSON body，不校验业务 code。
+// 供需要自行解析业务 code 的端点使用（如 /login/status，其 code 嵌在 data 内）。
+func (p *Provider) doGet(
+	ctx context.Context,
+	client *http.Client,
+	path string,
+	q url.Values,
+	cookie string,
+) (json.RawMessage, error) {
+	if cookie != "" {
+		q.Set("cookie", cookie)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		p.base+path+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ncm api %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ncm api %s: HTTP %d", path, resp.StatusCode)
+	}
+	var body json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
 func (p *Provider) getWithClient(
 	ctx context.Context,
 	client *http.Client,
@@ -487,24 +528,8 @@ func (p *Provider) getWithClient(
 	cookie string,
 	out any,
 ) error {
-	if cookie != "" {
-		q.Set("cookie", cookie)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		p.base+path+"?"+q.Encode(), nil)
+	body, err := p.doGet(ctx, client, path, q, cookie)
 	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("ncm api %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ncm api %s: HTTP %d", path, resp.StatusCode)
-	}
-	var body json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return err
 	}
 	var envelope struct {

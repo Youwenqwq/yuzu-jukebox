@@ -378,12 +378,52 @@ func (c *qqCredential) locallyExpired() bool {
 }
 
 // checkExpired 调 /login/check_expired；返回 true 表示凭据已过期。
+//
+// sidecar 对 bool 结果走统一信封序列化（其所有 bool 路由同款约定）：
+//   - true（已过期）  → {code: 0, data: null}
+//   - false（未过期） → {code: -1, msg: "操作失败"}
+//
+// 这里按该契约解析；若未来 sidecar 改为在 data 里直接携带布尔值
+// （{code: 0, data: true/false}），同样兼容。
 func (p *Provider) checkExpired(ctx context.Context, cred *qqCredential) (bool, error) {
-	var expired bool
-	if err := p.get(ctx, p.client, "/login/check_expired", nil, cred, &expired); err != nil {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/login/check_expired", nil)
+	if err != nil {
 		return false, err
 	}
-	return expired, nil
+	if cred != nil {
+		req.Header.Set("Cookie", cred.cookieHeader())
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("qq api /login/check_expired: %w", err)
+	}
+	defer resp.Body.Close()
+	var env apiEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return false, fmt.Errorf("qq api /login/check_expired: decode: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := env.Msg
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		return false, fmt.Errorf("qq api /login/check_expired: HTTP %d (%s)", resp.StatusCode, msg)
+	}
+	switch env.Code {
+	case 0:
+		if len(env.Data) > 0 && string(env.Data) != "null" {
+			var expired bool
+			if err := json.Unmarshal(env.Data, &expired); err != nil {
+				return false, fmt.Errorf("qq api /login/check_expired: data: %w", err)
+			}
+			return expired, nil
+		}
+		return true, nil // data 为 null → 已过期（当前 sidecar 形态）
+	case -1:
+		return false, nil // 未过期（sidecar 对 False 的统一编码）
+	default:
+		return false, fmt.Errorf("qq api /login/check_expired: code %d (%s)", env.Code, env.Msg)
+	}
 }
 
 // refreshCredential 调 /login/refresh_credential 续期并返回新凭据。
