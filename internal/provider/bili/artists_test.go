@@ -48,14 +48,14 @@ func TestArtistDetailWithCredential(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/search/up":
-			_, _ = w.Write([]byte(`{"results":[{"mid":1577803,"name":"旧名","face":"https://i0.hdslb.com/bfs/face/old.jpg","sign":"快照签名"}]}`))
+			_, _ = w.Write([]byte(`{"results":[{"mid":1577803,"name":"老番茄","face":"https://i0.hdslb.com/bfs/face/old.jpg","sign":"快照签名"}]}`))
 		case "/space/acc/info":
 			sawAccInfo = true
 			if got := r.URL.Query().Get("mid"); got != "1577803" {
 				t.Errorf("mid = %q, want 1577803", got)
 			}
-			if got := r.Header.Get("X-Yuzu-Bilibili-Cookie"); got != "SESSDATA=abc" {
-				t.Errorf("cookie = %q, want SESSDATA=abc", got)
+			if got := r.Header.Get("X-Yuzu-Bilibili-Cookie"); got != "SESSDATA=abc; bili_jct=csrf; DedeUserID=1" {
+				t.Errorf("cookie = %q, want complete three-item cookie", got)
 			}
 			_, _ = w.Write([]byte(`{"mid":1577803,"name":"老番茄","face":"https://i0.hdslb.com/bfs/face/new.jpg","sign":"权威签名"}`))
 		default:
@@ -64,7 +64,7 @@ func TestArtistDetailWithCredential(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	p := testProvider(server, "SESSDATA=abc")
+	p := testProvider(server, "SESSDATA=abc; bili_jct=csrf; DedeUserID=1")
 
 	got, err := p.ArtistDetail(context.Background(), "老番茄")
 	if err != nil {
@@ -92,7 +92,7 @@ func TestArtistDetailAccInfoFailureDegrades(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	p := testProvider(server, "SESSDATA=abc")
+	p := testProvider(server, "SESSDATA=abc; bili_jct=csrf; DedeUserID=1")
 
 	got, err := p.ArtistDetail(context.Background(), "老番茄")
 	if err != nil {
@@ -100,6 +100,67 @@ func TestArtistDetailAccInfoFailureDegrades(t *testing.T) {
 	}
 	if got.Name != "老番茄" || got.EntityID != "1577803" || got.Bio != "快照签名" || got.AvatarURL != "https://i0.hdslb.com/bfs/face/up.jpg" {
 		t.Fatalf("degraded detail = %#v, want search snapshot", got)
+	}
+}
+
+func TestArtistDetailCookieGateKeepsSearchSnapshot(t *testing.T) {
+	var sawAccInfo bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search/up":
+			_, _ = w.Write([]byte(`{"results":[{"mid":1577803,"name":"老番茄","face":"https://i0.hdslb.com/bfs/face/up.jpg","sign":"快照签名"}]}`))
+		case "/space/acc/info":
+			sawAccInfo = true
+			t.Error("acc/info called with fewer than three cookie pairs")
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	p := testProvider(server, "SESSDATA=abc; bili_jct=csrf; not-a-pair;")
+
+	got, err := p.ArtistDetail(context.Background(), "老番茄")
+	if err != nil {
+		t.Fatalf("ArtistDetail error = %v", err)
+	}
+	if sawAccInfo {
+		t.Fatal("acc/info called despite insufficient cookie items")
+	}
+	if got.Name != "老番茄" || got.EntityID != "1577803" || got.Bio != "快照签名" || got.AvatarURL != "https://i0.hdslb.com/bfs/face/up.jpg" {
+		t.Fatalf("gated detail = %#v, want search snapshot", got)
+	}
+}
+
+func TestArtistDetailVerifiesFirstSearchHitName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/up" {
+			t.Errorf("path = %q, want /search/up only", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"mid":1,"name":"另一个 UP"},{"mid":1577803,"name":"老番茄"}]}`))
+	}))
+	defer server.Close()
+	p := testProvider(server, "")
+
+	if _, err := p.ArtistDetail(context.Background(), "  老番茄  "); err == nil {
+		t.Fatal("ArtistDetail = nil error, want first-hit name mismatch error")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("ArtistDetail error = %v, want not-found mention", err)
+	}
+}
+
+func TestArtistDetailNameVerificationIgnoresCaseAndOuterSpace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{"mid":42,"name":"  MixedCase UP  ","face":"//img/face.jpg"}]}`))
+	}))
+	defer server.Close()
+
+	got, err := testProvider(server, "").ArtistDetail(context.Background(), "mixedcase up")
+	if err != nil {
+		t.Fatalf("ArtistDetail error = %v", err)
+	}
+	if got.EntityID != "42" {
+		t.Fatalf("ArtistDetail = %#v, want case-insensitive trimmed match", got)
 	}
 }
 

@@ -222,6 +222,7 @@ func TestGetTrackDescription(t *testing.T) {
 			"bvid":        "BV1xx411c7mD",
 			"title":       "测试视频",
 			"author":      "UP主",
+			"owner":       map[string]any{"mid": 1577803, "name": "UP主"},
 			"cover":       "https://i0.hdslb.com/bfs/cover.jpg",
 			"tname":       "音乐",
 			"desc":        "这是视频简介",
@@ -243,5 +244,8 @@ func TestGetTrackDescription(t *testing.T) {
 	}
 	if got.Description != "这是视频简介" {
 		t.Fatalf("Description = %q, want 这是视频简介", got.Description)
+	}
+	if len(got.Contributors) != 1 || got.Contributors[0].EntityID != "1577803" {
+		t.Fatalf("contributors = %#v, want owner mid 1577803", got.Contributors)
 	}
 }

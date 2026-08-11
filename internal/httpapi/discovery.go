@@ -21,8 +21,8 @@ type artistProfileResponse struct {
 	Bio       string `json:"bio,omitempty"`
 }
 
-// artistProfile 将请求名字解析为 provider 歌手实体。track_ref 仅作为
-// Provider 优先级锚点；锚定解析失败后仍按注册表顺序回退其它 Provider。
+// artistProfile 将请求名字解析为 provider 歌手实体。显式 provider+entity_id
+// 最优先直接解析；失败后依次尝试 track_ref 贡献者实体 ID 和原有名字解析。
 func (s *Server) artistProfile(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, auth.RoleRequester); !ok {
 		return
@@ -33,25 +33,82 @@ func (s *Server) artistProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	query := r.URL.Query()
+	hasProvider := query.Has("provider")
+	hasEntityID := query.Has("entity_id")
+	providerID := strings.TrimSpace(query.Get("provider"))
+	entityID := strings.TrimSpace(query.Get("entity_id"))
+	if hasProvider != hasEntityID || (hasProvider && (providerID == "" || entityID == "")) {
+		writeErr(w, http.StatusBadRequest, "bad_request", "provider and entity_id must be provided together")
+		return
+	}
+
+	var (
+		detail             provider.ArtistDetail
+		resolvedProviderID string
+		resolved           bool
+	)
+	if hasProvider {
+		p, ok := s.reg.Get(providerID)
+		if !ok {
+			writeErr(w, http.StatusNotFound, "not_found", "unknown provider: "+providerID)
+			return
+		}
+		if detail, resolved = s.resolveArtistByID(r.Context(), entityID, p); resolved {
+			resolvedProviderID = p.ID()
+		}
+	}
+
 	var preferred provider.Provider
-	trackRef := strings.TrimSpace(r.URL.Query().Get("track_ref"))
-	if trackRef != "" {
-		providerID, _, err := provider.TrackRef(trackRef).Split()
+	var anchoredRef provider.TrackRef
+	trackRef := strings.TrimSpace(query.Get("track_ref"))
+	if !resolved && trackRef != "" {
+		anchoredRef = provider.TrackRef(trackRef)
+		trackProviderID, _, err := anchoredRef.Split()
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", "invalid track_ref")
 			return
 		}
-		preferred, _ = s.reg.Get(providerID)
+		preferred, _ = s.reg.Get(trackProviderID)
+	}
+
+	if !resolved && preferred != nil {
+		if detail, resolved = s.resolveAnchoredArtist(r.Context(), name, anchoredRef, preferred); resolved {
+			resolvedProviderID = preferred.ID()
+		}
+	}
+	if !resolved {
+		detail, resolvedProviderID, resolved = s.enrichArtist(r.Context(), name, preferred)
 	}
 
 	resp := artistProfileResponse{Name: name}
-	if detail, providerID, ok := s.enrichArtist(r.Context(), name, preferred); ok {
-		resp.Provider = providerID
+	if resolved {
+		resp.Provider = resolvedProviderID
 		resp.EntityID = detail.EntityID
 		resp.AvatarURL = detail.AvatarURL
 		resp.Bio = detail.Bio
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"artist": resp})
+}
+
+func (s *Server) resolveAnchoredArtist(ctx context.Context, name string, trackRef provider.TrackRef, p provider.Provider) (provider.ArtistDetail, bool) {
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	track, err := p.GetTrack(dctx, trackRef)
+	cancel()
+	if err != nil {
+		return provider.ArtistDetail{}, false
+	}
+	for _, contributor := range track.Contributors {
+		if contributor.Name != name || (contributor.Role != "artist" && contributor.Role != "uploader") {
+			continue
+		}
+		entityID := strings.TrimSpace(contributor.EntityID)
+		if entityID == "" {
+			continue
+		}
+		return s.resolveArtistByID(ctx, entityID, p)
+	}
+	return provider.ArtistDetail{}, false
 }
 
 // enrichArtist 先尝试 track_ref 锚定的 Provider，再按 Provider ID 稳定顺序
@@ -99,6 +156,21 @@ func (s *Server) resolveArtist(ctx context.Context, name string, p provider.Prov
 	}
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	detail, err := ad.ArtistDetail(dctx, name)
+	cancel()
+	if err != nil {
+		return provider.ArtistDetail{}, false
+	}
+	detail.AvatarURL = s.proxiedEntityCover(p.ID(), detail.AvatarURL)
+	return detail, true
+}
+
+func (s *Server) resolveArtistByID(ctx context.Context, entityID string, p provider.Provider) (provider.ArtistDetail, bool) {
+	ad, ok := p.(provider.ArtistIDDetailer)
+	if !ok {
+		return provider.ArtistDetail{}, false
+	}
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	detail, err := ad.ArtistDetailByID(dctx, entityID)
 	cancel()
 	if err != nil {
 		return provider.ArtistDetail{}, false

@@ -97,7 +97,7 @@ func TestSearchCategoryUsesNCMSearchType(t *testing.T) {
 }
 
 func TestSearchCategorySongWrapsSearch(t *testing.T) {
-	const fixture = `{"code":200,"result":{"songs":[{"id":101,"name":"First","duration":1234,"al":{"name":"Record","picUrl":"https://cover/101"},"artists":[{"name":"A"},{"name":"B"}]},{"id":102,"name":"Second","duration":5678,"al":{"name":"Other","picUrl":"https://cover/102"},"artists":[{"name":"C"}]}]}}`
+	const fixture = `{"code":200,"result":{"songs":[{"id":101,"name":"First","duration":1234,"al":{"name":"Record","picUrl":"https://cover/101"},"artists":[{"id":201,"name":"A"},{"name":"B"}]},{"id":102,"name":"Second","duration":5678,"al":{"name":"Other","picUrl":"https://cover/102"},"artists":[{"id":203,"name":"C"}]}]}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(fixture))
@@ -123,6 +123,31 @@ func TestSearchCategorySongWrapsSearch(t *testing.T) {
 		if !reflect.DeepEqual(*got[i].Track, want[i]) {
 			t.Fatalf("result %d track = %#v, want %#v", i, *got[i].Track, want[i])
 		}
+	}
+	if got[0].Track.Contributors[0].EntityID != "201" || got[0].Track.Contributors[1].EntityID != "" {
+		t.Fatalf("contributors = %#v, want upstream ID then absent legacy ID", got[0].Track.Contributors)
+	}
+}
+
+func TestGetTrackContributorEntityIDs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/song/detail" {
+			t.Errorf("path = %q, want /song/detail", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":101,"name":"First","dt":1234,"al":{"name":"Record","picUrl":"https://cover/101"},"ar":[{"id":201,"name":"A"},{"name":"Legacy"}]}]}`))
+	}))
+	defer server.Close()
+
+	track, err := categoryTestProvider(server).GetTrack(context.Background(), provider.NewRef("ncm", "101"))
+	if err != nil {
+		t.Fatalf("GetTrack() error = %v", err)
+	}
+	want := []provider.Contributor{
+		{Role: "artist", Name: "A", EntityID: "201"},
+		{Role: "artist", Name: "Legacy"},
+	}
+	if !reflect.DeepEqual(track.Contributors, want) {
+		t.Fatalf("contributors = %#v, want %#v", track.Contributors, want)
 	}
 }
 
@@ -194,12 +219,12 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 			if got := r.URL.Query().Get("id"); got != "artist-id" {
 				t.Errorf("artist id = %q, want artist-id", got)
 			}
-			_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":301,"name":"Artist Song","duration":3010,"al":{"name":"Artist Album","picUrl":"https://cover/301"},"artists":[{"name":"Lead"},{"name":"Guest"}]}]}`))
+			_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":301,"name":"Artist Song","duration":3010,"al":{"name":"Artist Album","picUrl":"https://cover/301"},"artists":[{"id":901,"name":"Lead"},{"id":902,"name":"Guest"}]}]}`))
 		case "/album":
 			if got := r.URL.Query().Get("id"); got != "album-id" {
 				t.Errorf("album id = %q, want album-id", got)
 			}
-			_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":302,"name":"Album Song","dt":3020,"al":{"name":"Drilled Album","picUrl":"https://cover/302"},"ar":[{"name":"Album Artist"}]}]}`))
+			_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":302,"name":"Album Song","dt":3020,"al":{"name":"Drilled Album","picUrl":"https://cover/302"},"ar":[{"id":903,"name":"Album Artist"}]}]}`))
 		default:
 			t.Errorf("unexpected path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -221,8 +246,8 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 		CoverURL:   "https://cover/301",
 		SourceURL:  "https://music.163.com/song?id=301",
 		Contributors: []provider.Contributor{
-			{Role: "artist", Name: "Lead"},
-			{Role: "artist", Name: "Guest"},
+			{Role: "artist", Name: "Lead", EntityID: "901"},
+			{Role: "artist", Name: "Guest", EntityID: "902"},
 		},
 	}
 	if len(artistTracks) != 1 || !reflect.DeepEqual(artistTracks[0], wantArtist) {
@@ -241,10 +266,30 @@ func TestEntityTracksArtistAndAlbum(t *testing.T) {
 		Album:        "Drilled Album",
 		CoverURL:     "https://cover/302",
 		SourceURL:    "https://music.163.com/song?id=302",
-		Contributors: []provider.Contributor{{Role: "artist", Name: "Album Artist"}},
+		Contributors: []provider.Contributor{{Role: "artist", Name: "Album Artist", EntityID: "903"}},
 	}
 	if len(albumTracks) != 1 || !reflect.DeepEqual(albumTracks[0], wantAlbum) {
 		t.Fatalf("album tracks = %#v, want [%#v]", albumTracks, wantAlbum)
+	}
+}
+
+func TestEntityTracksSkipsZeroIDSongsBeforePaging(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":0,"name":"Missing"},{"id":303,"name":"Available","dt":3030,"ar":[{"name":"Artist"}]}]}`))
+	}))
+	defer server.Close()
+
+	p := categoryTestProvider(server)
+	tracks, err := p.EntityTracks(context.Background(), provider.SearchCategoryAlbum, "album-id", 1, 0)
+	if err != nil {
+		t.Fatalf("EntityTracks() error = %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("EntityTracks() returned %d tracks, want 1", len(tracks))
+	}
+	if got, want := tracks[0].Ref.String(), "ncm:303"; got != want {
+		t.Fatalf("track ref = %q, want %q", got, want)
 	}
 }
 
@@ -263,7 +308,7 @@ func TestEntityAlbums(t *testing.T) {
 			t.Errorf("offset = %q, want 7", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hotAlbums":[{"id":401,"name":"First Album","picUrl":"https://cover/401","artists":[{"name":"Singer"}],"size":12},{"id":402,"name":"Second Album","picUrl":"https://cover/402","artists":[],"size":0}]}`))
+		_, _ = w.Write([]byte(`{"code":200,"hotAlbums":[{"id":401,"name":"First Album","picUrl":"https://cover/401","artists":[{"name":"Singer"}],"size":12},{"id":402,"name":"Second Album","picUrl":"https://cover/402","artists":[],"size":0}]}`))
 	}))
 	defer server.Close()
 
@@ -312,7 +357,7 @@ func TestEntityTracksSlicesLocally(t *testing.T) {
 			t.Errorf("path = %q, want /artist/top/song", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"songs":[{"id":1,"name":"One"},{"id":2,"name":"Two"},{"id":3,"name":"Three"},{"id":4,"name":"Four"},{"id":5,"name":"Five"}]}`))
+		_, _ = w.Write([]byte(`{"code":200,"songs":[{"id":1,"name":"One"},{"id":2,"name":"Two"},{"id":3,"name":"Three"},{"id":4,"name":"Four"},{"id":5,"name":"Five"}]}`))
 	}))
 	defer server.Close()
 
@@ -342,6 +387,7 @@ func TestImportPlaylistPaginatesThousandSongPages(t *testing.T) {
 				t.Errorf("detail id = %q, want 9876", got)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 200,
 				"playlist": map[string]any{
 					"name":        "Long Playlist",
 					"coverImgUrl": "https://p1.music.126.net/playlist-cover.jpg",
@@ -373,7 +419,7 @@ func TestImportPlaylistPaginatesThousandSongPages(t *testing.T) {
 				id := int64(offset + i + 1)
 				songs[i] = songFixture{ID: id, Name: "song-" + strconv.FormatInt(id, 10)}
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"songs": songs})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "songs": songs})
 		default:
 			t.Errorf("unexpected path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

@@ -38,8 +38,9 @@ func (r TrackRef) Split() (providerID, id string, err error) {
 // "artist"(歌手/出演) "composer"(作曲) "lyricist"(作词)
 // "uploader"(上传者/UP主)。provider 尽力而为，可为空。
 type Contributor struct {
-	Role string `json:"role"`
-	Name string `json:"name"`
+	Role     string `json:"role"`
+	Name     string `json:"name"`
+	EntityID string `json:"entity_id,omitempty"`
 }
 
 // Track 是媒体元数据（曲目层）。Album/CoverURL/SourceURL/Contributors/
@@ -332,6 +333,13 @@ type ArtistDetail struct {
 type ArtistDetailer interface {
 	Provider
 	ArtistDetail(ctx context.Context, name string) (ArtistDetail, error)
+}
+
+// ArtistIDDetailer 是可选接口：按 Provider 原生实体 ID 直接解析歌手，
+// 不经过名字搜索。
+type ArtistIDDetailer interface {
+	Provider
+	ArtistDetailByID(ctx context.Context, entityID string) (ArtistDetail, error)
 }
 
 // RecommendationShelf 推荐 feed 的一个 shelf：标题 + 一组可入队曲目。

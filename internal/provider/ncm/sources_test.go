@@ -80,9 +80,9 @@ func TestSimilarQueriesOnceAndLimits(t *testing.T) {
 			t.Errorf("cookie = %q, want MUSIC_U=test", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"songs":[
-			{"id":11,"name":"相似一","duration":111000,"album":{"name":"专辑一","picUrl":"https://cover/11"},"artists":[{"name":"甲"},{"name":"乙"}]},
-			{"id":12,"name":"相似二","duration":222000,"album":{"name":"专辑二","picUrl":"https://cover/12"},"artists":[{"name":"丙"}]}
+		_, _ = w.Write([]byte(`{"code":200,"songs":[
+			{"id":11,"name":"相似一","duration":111000,"album":{"name":"专辑一","picUrl":"https://cover/11"},"artists":[{"id":501,"name":"甲"},{"name":"乙"}]},
+			{"id":12,"name":"相似二","duration":222000,"album":{"name":"专辑二","picUrl":"https://cover/12"},"artists":[{"id":503,"name":"丙"}]}
 		]}`))
 	}))
 	defer server.Close()
@@ -107,7 +107,7 @@ func TestSimilarQueriesOnceAndLimits(t *testing.T) {
 		Album:        "专辑一",
 		CoverURL:     "https://cover/11",
 		SourceURL:    "https://music.163.com/song?id=11",
-		Contributors: []provider.Contributor{{Role: "artist", Name: "甲"}, {Role: "artist", Name: "乙"}},
+		Contributors: []provider.Contributor{{Role: "artist", Name: "甲", EntityID: "501"}, {Role: "artist", Name: "乙"}},
 	}
 	if !reflect.DeepEqual(tracks[0], want) {
 		t.Fatalf("track = %#v, want %#v", tracks[0], want)
@@ -132,7 +132,7 @@ func TestPlaylistSourceMaterializesAndDrains(t *testing.T) {
 			if got := r.URL.Query().Get("id"); got != "123" {
 				t.Errorf("detail id = %q, want 123", got)
 			}
-			_, _ = w.Write([]byte(`{"playlist":{"name":"顺序歌单"}}`))
+			_, _ = w.Write([]byte(`{"code":200,"playlist":{"name":"顺序歌单"}}`))
 		case "/playlist/track/all":
 			trackRequests++
 			if got := r.URL.Query().Get("id"); got != "123" {
@@ -145,6 +145,7 @@ func TestPlaylistSourceMaterializesAndDrains(t *testing.T) {
 				t.Errorf("offset = %q, want 0", got)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 200,
 				"songs": []map[string]any{
 					{"id": 1, "name": "一", "dt": 1000, "al": map[string]any{"name": "专辑一", "picUrl": "https://cover/1"}, "ar": []map[string]any{{"name": "甲"}}},
 					{"id": 2, "name": "二", "dt": 2000, "al": map[string]any{"name": "专辑二", "picUrl": "https://cover/2"}, "ar": []map[string]any{{"name": "乙"}}},

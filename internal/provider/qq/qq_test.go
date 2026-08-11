@@ -128,6 +128,9 @@ func TestSearchParamsAndMapping(t *testing.T) {
 	if first.SourceURL != "https://y.qq.com/n/ryqq/songDetail/"+testMid {
 		t.Fatalf("SourceURL = %q", first.SourceURL)
 	}
+	if len(first.Contributors) != 1 || first.Contributors[0].EntityID != "001" {
+		t.Fatalf("contributors = %#v, want singer mid 001", first.Contributors)
+	}
 }
 
 func TestSearchPaginationMapping(t *testing.T) {
@@ -168,9 +171,7 @@ func TestGetTrack(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(envelope(map[string]any{
 			"track": songFixture(testMid, testName, 101, 267, "周杰伦"),
-			"info": map[string]any{
-				"intro": []any{map[string]any{"id": 1, "value": "歌曲简介文本", "show_type": 1}},
-			},
+			"intro": []any{map[string]any{"id": 1, "value": "歌曲简介文本", "show_type": 1, "jumpurl": ""}},
 		})))
 	}))
 	defer server.Close()
@@ -186,6 +187,28 @@ func TestGetTrack(t *testing.T) {
 	}
 	if got.Description != "歌曲简介文本" {
 		t.Fatalf("Description() = %q, want 歌曲简介文本", got.Description)
+	}
+	if len(got.Contributors) != 1 || got.Contributors[0].EntityID != "001" {
+		t.Fatalf("contributors = %#v, want singer mid 001", got.Contributors)
+	}
+}
+
+func TestGetTrackEmptyIntro(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(envelope(map[string]any{
+			"track": songFixture(testMid, testName, 101, 267, "周杰伦"),
+			"intro": []any{},
+		})))
+	}))
+	defer server.Close()
+	p := testProvider(t, server)
+
+	got, err := p.GetTrack(context.Background(), provider.NewRef(p.ID(), testMid))
+	if err != nil {
+		t.Fatalf("GetTrack() error = %v", err)
+	}
+	if got.Description != "" {
+		t.Fatalf("Description() = %q, want empty", got.Description)
 	}
 }
 

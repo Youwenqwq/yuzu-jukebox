@@ -337,7 +337,7 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
     "title": "海阔天空", "artist": "Beyond", "duration_ms": 326000,
     "album": "乐与怒", "cover_url": "/api/v1/cover/ncm:347230",
     "source_url": "https://music.163.com/song?id=347230",
-    "contributors": [{"role": "artist", "name": "Beyond"}],
+    "contributors": [{"role": "artist", "name": "Beyond", "entity_id": "11127"}],
     "size_bytes": 8172890, "bitrate_kbps": 320,
     "requested_by": "g_8f3k2", "requester_name": "小柚", "added_at": 1720000000000,
     "stream_url": "/stream/v1/ncm:347230?ticket=tk_abc"
@@ -411,7 +411,7 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 
 **曲目元数据层次**（客户端只需面对这一个形状，字段可空即降级）：
 
-- 曲目层（入队 snapshot/patch 与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors/requester_name`。`requester_name` 是入队时操作者 identity 的显示名快照，请求人后来改名不影响历史条目；旧数据为空串时客户端可降级显示 `requested_by`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
+- 曲目层（入队 snapshot/patch 与播放广播都带）：`title/artist/duration_ms/album/cover_url/source_url/contributors/requester_name`。`contributors[]` 每项含 `role` 与 `name`，可选 `entity_id` 是 Provider 原生的艺人/上传者实体键（仅在上游提供时出现）。`requester_name` 是入队时操作者 identity 的显示名快照，请求人后来改名不影响历史条目；旧数据为空串时客户端可降级显示 `requested_by`。`cover_url` 一律为服务端代理路径 `/api/v1/cover/{track_ref}`（源站可能需 Referer）。
 - 物理层（仅 `playback.current`，Resolve/缓存后可得）：`size_bytes/bitrate_kbps`。
 - provider 能力缺席合法：bili 无歌词、local 无 source_url，字段缺省即降级。
 
@@ -952,9 +952,9 @@ Content-Type: application/json
 
 #### 6.2.4 歌手实体解析、推荐 feed 与电台源目录合同
 
-**歌手实体解析**：`GET /api/v1/artists/{name}?track_ref=<可选>` 把请求名字解析为 Provider 的歌手实体，不读取或聚合本地 `play_history`。响应信封为 `{"artist":{...}}`：`name` 恒为请求的艺人名；解析成功时携带 `provider` 与该 Provider 的歌手实体键 `entity_id`，并可携带 `avatar_url`（经实体封面 ext token 代理）和 `bio`；字段为空时省略。解析全部失败返回 `{"artist":{"name":"..."}}`，不视为端点错误。
+**歌手实体解析**：`GET /api/v1/artists/{name}?provider=<可选>&entity_id=<可选>&track_ref=<可选>` 把请求名字解析为 Provider 的歌手实体，不读取或聚合本地 `play_history`。`provider` 与 `entity_id` 必须同时提供非空值或同时省略；仅提供其中一个、任一值为空均返回 400 `bad_request`，指定的 Provider 不存在返回 404 `not_found`。响应信封为 `{"artist":{...}}`：`name` 恒为请求的艺人名；解析成功时携带 `provider` 与该 Provider 的歌手实体键 `entity_id`，并可携带 `avatar_url`（经实体封面 ext token 代理）和 `bio`；字段为空时省略。解析全部失败返回 `{"artist":{"name":"..."}}`，不视为端点错误。
 
-解析按以下稳定顺序取首个成功者：若非空 `track_ref` 能由 `TrackRef.Split()` 拆出 Provider ID，先用该 Provider 的 `provider.ArtistDetailer` 按名字解析；锚定 Provider 失败、未注册或能力缺席后，再按 `registry.All()` 的 Provider ID 升序全局回退。**多歌手 join 串**（如 `"塞壬唱片-MSR/F.L.O.A.T (白羽）/张晶"`）先按完整串解析，失败再按 `/` 分割去空白逐段尝试，取首个成功段；名字本身含 `/` 的单艺人（如 `"AC/DC"`）完整串通常直接成功，不触发拆段。当前实体键来源：**ncm** 为 type=100 搜索首条数字 ID 的十进制字符串；**qq** 为歌手搜索首条 `mid`；**bili** 为 `/search/up` 首条 `mid`（配置凭据时可升级 `/space/acc/info` 档案，实体键不变）。名字为空或 `track_ref` 无法拆分均返回 400 `bad_request`。
+解析按以下稳定顺序取首个成功者：首先，若同时提供非空 `provider` 与 `entity_id`，服务端在该 Provider 实现 `provider.ArtistIDDetailer` 时直接调用 `ArtistDetailByID(entity_id)`，全程不做名字搜索；能力缺席或按 ID 解析失败时优雅回退，不返回 Provider 错误。其次，若非空 `track_ref` 能由 `TrackRef.Split()` 拆出已注册的 Provider，由该 Provider `GetTrack` 读取锚定曲目，并在 `contributors[]` 中查找 `role` 为 `artist` 或 `uploader`、`name` 与请求名字精确匹配且 `entity_id` 非空的贡献者；Provider 实现 `provider.ArtistIDDetailer` 时，以贡献者的 `entity_id` 直接解析实体。GetTrack 失败、无匹配贡献者/实体键、能力缺席或按 ID 解析失败时，回退原有名字解析：先用 `track_ref` 锚定 Provider 的 `provider.ArtistDetailer`，再按 `registry.All()` 的 Provider ID 升序尝试其它 Provider；没有有效锚点时直接按该稳定全局顺序尝试。**多歌手 join 串**（如 `"塞壬唱片-MSR/F.L.O.A.T (白羽）/张晶"`）先按完整串解析，失败再按 `/` 分割去空白逐段尝试，取首个成功段；名字本身含 `/` 的单艺人（如 `"AC/DC"`）完整串通常直接成功，不触发拆段。名字为空或在需要继续回退时 `track_ref` 无法拆分均返回 400 `bad_request`。
 
 Client 可在 `provider` 与 `entity_id` 同时存在时调用 `GET /api/v1/search/entity?provider=<provider>&category=artist&id=<entity_id>` 钻取该歌手的曲目，或在 Provider 声明 `entity_albums` 能力时以 `into=albums` 钻取专辑。端点不再返回 `play_count`、`last_played_at` 或 `top_tracks`。
 

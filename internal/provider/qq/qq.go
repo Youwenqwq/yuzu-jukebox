@@ -576,16 +576,13 @@ func (p *Provider) Search(ctx context.Context, query string, limit, offset int) 
 }
 
 // songDetail 取单曲详情（数字 id 与 type 也在这里回读，供账号写操作使用），
-// 并顺带取曲目简介（detail 响应的 info.intro，零额外请求）。
+// 并顺带取曲目简介（detail 响应顶层的 intro，零额外请求）。
 func (p *Provider) songDetail(ctx context.Context, mid string) (qqSong, string, error) {
 	var data struct {
 		Track qqSong `json:"track"`
-		Info  struct {
-			Intro []struct {
-				Value   string `json:"value"`
-				Content string `json:"content"`
-			} `json:"intro"`
-		} `json:"info"`
+		Intro []struct {
+			Value string `json:"value"`
+		} `json:"intro"`
 	}
 	if err := p.get(ctx, p.client, "/song/"+url.PathEscape(mid)+"/detail", nil, nil, &data); err != nil {
 		return qqSong{}, "", err
@@ -594,11 +591,8 @@ func (p *Provider) songDetail(ctx context.Context, mid string) (qqSong, string, 
 		return qqSong{}, "", fmt.Errorf("track not found: %s", mid)
 	}
 	desc := ""
-	for _, it := range data.Info.Intro {
+	for _, it := range data.Intro {
 		text := strings.TrimSpace(it.Value)
-		if text == "" {
-			text = strings.TrimSpace(it.Content)
-		}
 		if text != "" {
 			desc = text
 			break
@@ -793,7 +787,7 @@ func (p *Provider) songTrack(s qqSong) provider.Track {
 	contributors := make([]provider.Contributor, 0, len(s.Singer))
 	for _, sg := range s.Singer {
 		artists = append(artists, sg.Name)
-		contributors = append(contributors, provider.Contributor{Role: "artist", Name: sg.Name})
+		contributors = append(contributors, provider.Contributor{Role: "artist", Name: sg.Name, EntityID: sg.Mid})
 	}
 	return provider.Track{
 		Ref:          provider.NewRef(p.ID(), s.Mid),

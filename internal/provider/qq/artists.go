@@ -9,10 +9,8 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 )
 
-// ArtistDetail 实现 provider.ArtistDetailer：艺人名 → 歌手搜索首条
-// （/search/search_by_type search_type=1）→ /singer/{mid}/desc 取头像与简介。
-// 名字在 QQ 侧不存在时返回错误，httpapi 会继续尝试其它 Provider。
-// 该端点匿名可用（web 层 AuthPolicy.NONE），凭据仅用于写操作。
+// ArtistDetail implements provider.ArtistDetailer by resolving the first singer
+// search result, then fetching that entity directly by its provider-native ID.
 func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.ArtistDetail, error) {
 	q := url.Values{
 		"keyword":     {name},
@@ -30,9 +28,30 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 	if len(data.Singer) == 0 {
 		return provider.ArtistDetail{}, fmt.Errorf("qq singer %q not found", name)
 	}
-	mid := data.Singer[0].Mid
-	if mid == "" {
+	searchSinger := data.Singer[0]
+	if searchSinger.Mid == "" {
 		return provider.ArtistDetail{}, fmt.Errorf("qq singer %q: empty mid", name)
+	}
+
+	detail, err := p.ArtistDetailByID(ctx, searchSinger.Mid)
+	if err != nil {
+		return provider.ArtistDetail{}, err
+	}
+	if detail.Name == "" {
+		detail.Name = searchSinger.Name
+		if detail.Name == "" {
+			detail.Name = name
+		}
+	}
+	return detail, nil
+}
+
+// ArtistDetailByID implements provider.ArtistIDDetailer without performing a
+// name search. The singer description endpoint is anonymously accessible.
+func (p *Provider) ArtistDetailByID(ctx context.Context, entityID string) (provider.ArtistDetail, error) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return provider.ArtistDetail{}, fmt.Errorf("qq singer: empty entity id")
 	}
 
 	var desc struct {
@@ -48,23 +67,22 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 			} `json:"pic"`
 		} `json:"singer_list"`
 	}
-	if err := p.get(ctx, p.client, "/singer/"+url.PathEscape(mid)+"/desc", nil, nil, &desc); err != nil {
+	if err := p.get(ctx, p.client, "/singer/"+url.PathEscape(entityID)+"/desc", nil, nil, &desc); err != nil {
 		return provider.ArtistDetail{}, err
 	}
 	if len(desc.SingerList) == 0 {
-		return provider.ArtistDetail{}, fmt.Errorf("qq singer %q: empty desc", mid)
+		return provider.ArtistDetail{}, fmt.Errorf("qq singer %q: empty desc", entityID)
 	}
-	s := desc.SingerList[0]
-	detail := provider.ArtistDetail{
-		Name:      s.BasicInfo.Name,
-		EntityID:  mid,
-		AvatarURL: s.Pic.Pic,
-		Bio:       strings.TrimSpace(s.ExInfo.Desc),
-	}
-	if detail.Name == "" {
-		detail.Name = name
-	}
-	return detail, nil
+	singer := desc.SingerList[0]
+	return provider.ArtistDetail{
+		Name:      singer.BasicInfo.Name,
+		EntityID:  entityID,
+		AvatarURL: singer.Pic.Pic,
+		Bio:       strings.TrimSpace(singer.ExInfo.Desc),
+	}, nil
 }
 
-var _ provider.ArtistDetailer = (*Provider)(nil)
+var (
+	_ provider.ArtistDetailer   = (*Provider)(nil)
+	_ provider.ArtistIDDetailer = (*Provider)(nil)
+)

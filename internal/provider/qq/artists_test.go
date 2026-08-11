@@ -52,6 +52,35 @@ func TestArtistDetail(t *testing.T) {
 	}
 }
 
+func TestArtistDetailByIDSkipsSearch(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/singer/004Z8Ihr0JIu5s/desc" {
+			t.Errorf("path = %q, want direct singer desc", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(envelope(map[string]any{"singer_list": []any{
+			map[string]any{
+				"basic_info": map[string]any{"name": "周杰伦"},
+				"ex_info":    map[string]any{"desc": "歌手"},
+				"pic":        map[string]any{"pic": "https://img/avatar.jpg"},
+			},
+		}})))
+	}))
+	p := testProvider(t, server)
+
+	got, err := p.ArtistDetailByID(context.Background(), "004Z8Ihr0JIu5s")
+	if err != nil {
+		t.Fatalf("ArtistDetailByID error = %v", err)
+	}
+	if got.EntityID != "004Z8Ihr0JIu5s" || got.Name != "周杰伦" {
+		t.Fatalf("ArtistDetailByID() = %#v, want direct singer entity", got)
+	}
+	if len(paths) != 1 || paths[0] != "/singer/004Z8Ihr0JIu5s/desc" {
+		t.Fatalf("paths = %#v, want one direct desc request and no search", paths)
+	}
+}
+
 // TestArtistDetailNotFound 名字在 QQ 侧不存在时返回错误。
 func TestArtistDetailNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -51,9 +51,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 				Name string `json:"name"`
 				Dt   int64  `json:"dt"`
 				Al   ncmAl  `json:"al"`
-				Ar   []struct {
-					Name string `json:"name"`
-				} `json:"ar"`
+				Ar []ncmArtist `json:"ar"`
 			} `json:"songs"`
 		}
 		q := url.Values{"id": {id}, "limit": {strconv.Itoa(pageSize)}, "offset": {strconv.Itoa(offset)}}
@@ -81,7 +79,7 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 
 // ---------- 曲目源工厂（provider.SourceFactory） ----------
 
-// NewSource 创建曲目源。spec 取值：daily | fm | simi:<id> | heart:<id> | playlist:<id>。
+// NewSource 创建曲目源。spec 取值：daily | fm | simi:<id> | heart:<id> | playlist:<id> | toplist:<id>。
 func (p *Provider) NewSource(ctx context.Context, spec string) (provider.TrackSource, error) {
 	kind, arg, _ := strings.Cut(spec, ":")
 	switch kind {
@@ -224,9 +222,7 @@ func (s *dailySource) refresh(ctx context.Context) error {
 				Name string `json:"name"`
 				Dt   int64  `json:"dt"`
 				Al   ncmAl  `json:"al"`
-				Ar   []struct {
-					Name string `json:"name"`
-				} `json:"ar"`
+				Ar []ncmArtist `json:"ar"`
 			} `json:"dailySongs"`
 		} `json:"data"`
 	}
@@ -278,9 +274,7 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
 				Album    ncmAl  `json:"album"`
-				Artists  []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
+				Artists []ncmArtist `json:"artists"`
 			} `json:"data"`
 		}
 		if err := s.p.get(ctx, "/personal_fm", url.Values{}, cookie, &resp); err != nil {
@@ -334,9 +328,7 @@ func (p *Provider) fetchSimilar(ctx context.Context, trackID, cookie string) ([]
 			Name     string `json:"name"`
 			Duration int64  `json:"duration"`
 			Album    ncmAl  `json:"album"`
-			Artists  []struct {
-				Name string `json:"name"`
-			} `json:"artists"`
+			Artists []ncmArtist `json:"artists"`
 		} `json:"songs"`
 	}
 	if err := p.get(ctx, "/simi/song", url.Values{"id": {trackID}}, cookie, &resp); err != nil {
@@ -444,17 +436,13 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
 				Album    ncmAl  `json:"album"`
-				Artists  []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
+				Artists []ncmArtist `json:"artists"`
 				SongInfo *struct {
 					ID   int64  `json:"id"`
 					Name string `json:"name"`
 					Dt   int64  `json:"dt"`
 					Al   ncmAl  `json:"al"`
-					Ar   []struct {
-						Name string `json:"name"`
-					} `json:"ar"`
+					Ar []ncmArtist `json:"ar"`
 				} `json:"songInfo"`
 			} `json:"data"`
 		}

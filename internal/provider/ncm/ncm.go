@@ -351,9 +351,7 @@ func (p *Provider) Search(ctx context.Context, query string, limit, offset int) 
 				Name     string `json:"name"`
 				Duration int64  `json:"duration"`
 				Al       ncmAl  `json:"al"`
-				Artists  []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
+				Artists []ncmArtist `json:"artists"`
 			} `json:"songs"`
 		} `json:"result"`
 	}
@@ -392,9 +390,7 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 				Name   string `json:"name"`
 				PicURL string `json:"picUrl"`
 			} `json:"al"`
-			Ar []struct {
-				Name string `json:"name"`
-			} `json:"ar"`
+			Ar []ncmArtist `json:"ar"`
 		} `json:"songs"`
 	}
 	if err := p.get(ctx, "/song/detail", q, "", &resp); err != nil {
@@ -507,17 +503,46 @@ func (p *Provider) getWithClient(
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ncm api %s: HTTP %d", path, resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	var body json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return err
+	}
+	var envelope struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return err
+	}
+	if envelope.Code != http.StatusOK {
+		return fmt.Errorf("ncm api %s: code %d", path, envelope.Code)
+	}
+	return json.Unmarshal(body, out)
 }
 
-func namesOf(as []struct {
+type ncmArtist struct {
+	ID   int64  `json:"id"`
 	Name string `json:"name"`
-}) []string {
-	out := make([]string, 0, len(as))
-	for _, a := range as {
-		out = append(out, a.Name)
+}
+
+func namesOf(as any) []string {
+	switch artists := as.(type) {
+	case []ncmArtist:
+		out := make([]string, 0, len(artists))
+		for _, artist := range artists {
+			out = append(out, artist.Name)
+		}
+		return out
+	case []struct {
+		Name string `json:"name"`
+	}:
+		out := make([]string, 0, len(artists))
+		for _, artist := range artists {
+			out = append(out, artist.Name)
+		}
+		return out
+	default:
+		panic(fmt.Sprintf("unsupported NCM artist list type %T", as))
 	}
-	return out
 }
 
 func joinArtists(names []string) string { return strings.Join(names, "/") }
@@ -557,13 +582,18 @@ func sourceURL(id int64) string {
 	return "https://music.163.com/song?id=" + strconv.FormatInt(id, 10)
 }
 
-func artistContributors(as []struct {
-	Name string `json:"name"`
-}) []provider.Contributor {
-	names := namesOf(as)
-	out := make([]provider.Contributor, 0, len(names))
-	for _, n := range names {
-		out = append(out, provider.Contributor{Role: "artist", Name: n})
+func artistContributors(as []ncmArtist) []provider.Contributor {
+	out := make([]provider.Contributor, 0, len(as))
+	for _, artist := range as {
+		entityID := ""
+		if artist.ID != 0 {
+			entityID = strconv.FormatInt(artist.ID, 10)
+		}
+		out = append(out, provider.Contributor{
+			Role:     "artist",
+			Name:     artist.Name,
+			EntityID: entityID,
+		})
 	}
 	return out
 }

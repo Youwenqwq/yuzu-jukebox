@@ -116,6 +116,24 @@ func TestAccountPlaylistsMissingAccountUIDDoesNotRequest(t *testing.T) {
 	}
 }
 
+func TestGetRejectsBusinessError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":404,"message":"not found"}`))
+	}))
+	defer server.Close()
+
+	p := &Provider{base: server.URL, client: server.Client()}
+	var out struct{}
+	err := p.get(context.Background(), "/search", nil, "", &out)
+	if err == nil {
+		t.Fatal("get() error = nil, want business code error")
+	}
+	if got, want := err.Error(), "ncm api /search: code 404"; got != want {
+		t.Fatalf("get() error = %q, want %q", got, want)
+	}
+}
+
 func accountTestProvider(t *testing.T, server *httptest.Server, uid string) *Provider {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "ncm.db"), nil)

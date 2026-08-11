@@ -158,6 +158,7 @@ type videoResult struct {
 	Bvid       string `json:"bvid"`
 	Title      string `json:"title"`
 	Author     string `json:"author"`
+	Mid        int64  `json:"mid"`
 	Cover      string `json:"cover"`     // 可能是协议相对 URL（//i0.hdslb.com/...）
 	Partition  string `json:"partition"` // 仅搜索结果提供，作为 Album
 	DurationMs int64  `json:"duration_ms"`
@@ -208,7 +209,7 @@ func (p *Provider) trackFromVideo(v videoResult) (provider.Track, bool) {
 		CoverURL:     normalizeCoverURL(v.Cover),
 		SourceURL:    videoURL(v.Bvid),
 		DurationMs:   v.DurationMs,
-		Contributors: uploaderContributor(v.Author),
+		Contributors: uploaderContributor(v.Author, v.Mid),
 	}, true
 }
 
@@ -554,7 +555,8 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 		Pic    string `json:"pic"`   // 预留：上游 bilibili API 原生封面字段
 		Desc   string `json:"desc"`  // 视频简介（sidecar 透传自 view API data.desc）
 		TName  string `json:"tname"` // 预留：视频分区，作为 Album
-		Owner  struct {
+		Owner struct {
+			Mid  int64  `json:"mid"`
 			Name string `json:"name"` // 预留：UP 主名
 		} `json:"owner"`
 		DurationMs int64 `json:"duration_ms"` // 顶层：所有分 P 总时长
@@ -612,7 +614,7 @@ func (p *Provider) GetTrack(ctx context.Context, ref provider.TrackRef) (provide
 		CoverURL:     normalizeCoverURL(cover),
 		SourceURL:    sourceURL,
 		DurationMs:   duration,
-		Contributors: uploaderContributor(uploader),
+		Contributors: uploaderContributor(uploader, resp.Owner.Mid),
 	}, nil
 }
 
@@ -700,11 +702,15 @@ func normalizeCoverURL(u string) string {
 }
 
 // uploaderContributor 组装 UP 主贡献者；名字为空时返回 nil（字段留空合法）。
-func uploaderContributor(name string) []provider.Contributor {
+func uploaderContributor(name string, mid int64) []provider.Contributor {
 	if name == "" {
 		return nil
 	}
-	return []provider.Contributor{{Role: "uploader", Name: name}}
+	entityID := ""
+	if mid != 0 {
+		entityID = strconv.FormatInt(mid, 10)
+	}
+	return []provider.Contributor{{Role: "uploader", Name: name, EntityID: entityID}}
 }
 
 // ---------- 内部 ----------

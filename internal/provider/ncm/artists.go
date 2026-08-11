@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 )
 
-// ArtistDetail 实现 provider.ArtistDetailer：把艺人名解析为歌手实体。
-// 名字 → 实体 ID 的映射走 type=100 搜索取首条，再取 /artist/detail 的简介；
-// 头像优先用详情字段，并回退搜索快照（部分艺人的详情 picUrl 为空）。
-// 名字在 NCM 侧不存在时返回错误，httpapi 会继续尝试其它 Provider。
+// ArtistDetail implements provider.ArtistDetailer by resolving the first artist
+// name-search result, then fetching that entity directly by its provider-native ID.
 func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.ArtistDetail, error) {
 	var searchResp struct {
 		Result struct {
 			Artists []struct {
 				ID        int64  `json:"id"`
+				Name      string `json:"name"`
 				PicURL    string `json:"picUrl"`
 				Img1v1URL string `json:"img1v1Url"`
 			} `json:"artists"`
@@ -34,6 +34,35 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 		return provider.ArtistDetail{}, fmt.Errorf("ncm artist %q not found", name)
 	}
 
+	searchArtist := searchResp.Result.Artists[0]
+	detail, err := p.ArtistDetailByID(ctx, strconv.FormatInt(searchArtist.ID, 10))
+	if err != nil {
+		return provider.ArtistDetail{}, err
+	}
+	if detail.Name == "" {
+		detail.Name = searchArtist.Name
+		if detail.Name == "" {
+			detail.Name = name
+		}
+	}
+	if detail.AvatarURL == "" {
+		detail.AvatarURL = searchArtist.PicURL
+	}
+	if detail.AvatarURL == "" {
+		detail.AvatarURL = searchArtist.Img1v1URL
+	}
+	return detail, nil
+}
+
+// ArtistDetailByID implements provider.ArtistIDDetailer without performing a
+// name search. The optional artist-description request only enriches an entity
+// whose detail response has no brief description; its failure leaves Bio empty.
+func (p *Provider) ArtistDetailByID(ctx context.Context, entityID string) (provider.ArtistDetail, error) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return provider.ArtistDetail{}, fmt.Errorf("ncm artist: empty entity id")
+	}
+
 	var detailResp struct {
 		Data struct {
 			Artist struct {
@@ -44,27 +73,49 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 			} `json:"artist"`
 		} `json:"data"`
 	}
-	searchArtist := searchResp.Result.Artists[0]
-	entityID := strconv.FormatInt(searchArtist.ID, 10)
-	if err := p.get(ctx, "/artist/detail", url.Values{
-		"id": {entityID},
-	}, "", &detailResp); err != nil {
+	if err := p.get(ctx, "/artist/detail", url.Values{"id": {entityID}}, "", &detailResp); err != nil {
 		return provider.ArtistDetail{}, err
 	}
-	avatarURL := detailResp.Data.Artist.PicURL
+
+	artist := detailResp.Data.Artist
+	avatarURL := artist.PicURL
 	if avatarURL == "" {
-		avatarURL = detailResp.Data.Artist.Cover
+		avatarURL = artist.Cover
 	}
-	if avatarURL == "" {
-		avatarURL = searchArtist.PicURL
-	}
-	if avatarURL == "" {
-		avatarURL = searchArtist.Img1v1URL
+	bio := strings.TrimSpace(artist.BriefDesc)
+	if bio == "" {
+		var descResp struct {
+			Introduction []struct {
+				Title string `json:"ti"`
+				Text  string `json:"txt"`
+			} `json:"introduction"`
+		}
+		if err := p.get(ctx, "/artist/desc", url.Values{"id": {entityID}}, "", &descResp); err == nil {
+			paragraphs := make([]string, 0, len(descResp.Introduction))
+			for _, intro := range descResp.Introduction {
+				parts := make([]string, 0, 2)
+				if title := strings.TrimSpace(intro.Title); title != "" {
+					parts = append(parts, title)
+				}
+				if text := strings.TrimSpace(intro.Text); text != "" {
+					parts = append(parts, text)
+				}
+				if len(parts) != 0 {
+					paragraphs = append(paragraphs, strings.Join(parts, "\n"))
+				}
+			}
+			bio = strings.Join(paragraphs, "\n\n")
+		}
 	}
 	return provider.ArtistDetail{
-		Name:      detailResp.Data.Artist.Name,
+		Name:      artist.Name,
 		EntityID:  entityID,
 		AvatarURL: avatarURL,
-		Bio:       detailResp.Data.Artist.BriefDesc,
+		Bio:       bio,
 	}, nil
 }
+
+var (
+	_ provider.ArtistDetailer   = (*Provider)(nil)
+	_ provider.ArtistIDDetailer = (*Provider)(nil)
+)

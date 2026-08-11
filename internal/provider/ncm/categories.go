@@ -167,14 +167,20 @@ func (p *Provider) EntityTracks(ctx context.Context, cat provider.SearchCategory
 	if err := p.get(ctx, path, url.Values{"id": {entityID}}, "", &resp); err != nil {
 		return nil, err
 	}
-	if offset >= len(resp.Songs) {
+	songs := resp.Songs[:0]
+	for _, song := range resp.Songs {
+		if song.ID != 0 {
+			songs = append(songs, song)
+		}
+	}
+	if offset >= len(songs) {
 		return []provider.Track{}, nil
 	}
-	end := len(resp.Songs)
+	end := len(songs)
 	if limit < end-offset {
 		end = offset + limit
 	}
-	songs := resp.Songs[offset:end]
+	songs = songs[offset:end]
 	tracks := make([]provider.Track, 0, len(songs))
 	for _, song := range songs {
 		tracks = append(tracks, p.entitySongTrack(song))
@@ -228,12 +234,8 @@ type ncmEntitySong struct {
 	Dt       int64  `json:"dt"`
 	Al       ncmAl  `json:"al"`
 	Album    ncmAl  `json:"album"`
-	Artists  []struct {
-		Name string `json:"name"`
-	} `json:"artists"`
-	Ar []struct {
-		Name string `json:"name"`
-	} `json:"ar"`
+	Artists []ncmArtist `json:"artists"`
+	Ar      []ncmArtist `json:"ar"`
 }
 
 func (p *Provider) entitySongTrack(song ncmEntitySong) provider.Track {

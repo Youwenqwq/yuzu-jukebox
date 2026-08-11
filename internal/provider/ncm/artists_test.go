@@ -53,6 +53,47 @@ func TestArtistDetail(t *testing.T) {
 	}
 }
 
+func TestArtistDetailByIDUsesDescriptionFallbackWithoutSearch(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if got := r.URL.Query().Get("id"); got != "777" {
+			t.Errorf("artist id = %q, want 777", got)
+		}
+		switch r.URL.Path {
+		case "/artist/detail":
+			_, _ = w.Write([]byte(`{"code":200,"data":{"artist":{"name":"周杰伦","cover":"https://img/cover.jpg","briefDesc":""}}}`))
+		case "/artist/desc":
+			_, _ = w.Write([]byte(`{"code":200,"introduction":[{"ti":"艺人介绍","txt":"华语歌手"},{"ti":"","txt":"词曲创作人"},{"ti":" ","txt":" "}]} `))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	got, err := categoryTestProvider(server).ArtistDetailByID(context.Background(), "777")
+	if err != nil {
+		t.Fatalf("ArtistDetailByID error = %v", err)
+	}
+	want := provider.ArtistDetail{
+		Name: "周杰伦", EntityID: "777", AvatarURL: "https://img/cover.jpg",
+		Bio: "艺人介绍\n华语歌手\n\n词曲创作人",
+	}
+	if got != want {
+		t.Fatalf("ArtistDetailByID() = %#v, want %#v", got, want)
+	}
+	wantPaths := []string{"/artist/detail", "/artist/desc"}
+	if len(paths) != len(wantPaths) {
+		t.Fatalf("paths = %#v, want %#v (no search)", paths, wantPaths)
+	}
+	for i := range wantPaths {
+		if paths[i] != wantPaths[i] {
+			t.Fatalf("path[%d] = %q, want %q", i, paths[i], wantPaths[i])
+		}
+	}
+}
+
 func TestArtistDetailAvatarFallbacks(t *testing.T) {
 	tests := []struct {
 		name         string

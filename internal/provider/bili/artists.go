@@ -10,13 +10,9 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 )
 
-// ArtistDetail 实现 provider.ArtistDetailer：艺人名 → /search/up 首条 UP主 →
-// 档案富化。两级策略：
-//   - 无凭据：直接用搜索快照的 face/sign（匿名可用，-412 风控时失败降级）；
-//   - 有凭据：升级为 /space/acc/info 的权威档案（上游要求 SESSDATA cookie
-//     ≥3 项，匿名 -403/-404）；升级失败保留搜索快照，不阻断。
-//
-// 名字在 B 站侧不存在时返回错误，httpapi 会继续尝试其它 Provider。
+// ArtistDetail implements provider.ArtistDetailer by resolving the first exact
+// UP-name search result. The search snapshot remains the fallback when the
+// credential is insufficient for, or the request to, /space/acc/info fails.
 func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.ArtistDetail, error) {
 	cookie := p.cookie.Load().(string)
 	var searchResp struct {
@@ -35,30 +31,26 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 		return provider.ArtistDetail{}, fmt.Errorf("bili up %q not found", name)
 	}
 	first := searchResp.Results[0]
+	if !strings.EqualFold(strings.TrimSpace(first.Name), strings.TrimSpace(name)) {
+		return provider.ArtistDetail{}, fmt.Errorf("bili up %q not found", name)
+	}
+
 	detail := provider.ArtistDetail{
 		Name:      first.Name,
 		EntityID:  strconv.FormatInt(first.Mid, 10),
 		AvatarURL: normalizeCoverURL(first.Face),
 		Bio:       first.Sign,
 	}
-
-	if strings.TrimSpace(cookie) != "" {
-		var acc struct {
-			Name string `json:"name"`
-			Face string `json:"face"`
-			Sign string `json:"sign"`
-		}
-		if err := p.get(ctx, "/space/acc/info", url.Values{
-			"mid": {strconv.FormatInt(first.Mid, 10)},
-		}, cookie, &acc); err == nil {
-			if acc.Name != "" {
-				detail.Name = acc.Name
+	if artistInfoCookieReady(cookie) {
+		if upgraded, err := p.ArtistDetailByID(ctx, detail.EntityID); err == nil {
+			if upgraded.Name != "" {
+				detail.Name = upgraded.Name
 			}
-			if acc.Face != "" {
-				detail.AvatarURL = normalizeCoverURL(acc.Face)
+			if upgraded.AvatarURL != "" {
+				detail.AvatarURL = upgraded.AvatarURL
 			}
-			if acc.Sign != "" {
-				detail.Bio = acc.Sign
+			if upgraded.Bio != "" {
+				detail.Bio = upgraded.Bio
 			}
 		}
 	}
@@ -68,4 +60,51 @@ func (p *Provider) ArtistDetail(ctx context.Context, name string) (provider.Arti
 	return detail, nil
 }
 
-var _ provider.ArtistDetailer = (*Provider)(nil)
+// ArtistDetailByID implements provider.ArtistIDDetailer without performing a
+// name search. Bilibili's account-info endpoint requires at least three cookie
+// items; callers can fall back to the anonymous search snapshot otherwise.
+func (p *Provider) ArtistDetailByID(ctx context.Context, entityID string) (provider.ArtistDetail, error) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return provider.ArtistDetail{}, fmt.Errorf("bili artist: empty entity id")
+	}
+	cookie := p.cookie.Load().(string)
+	if !artistInfoCookieReady(cookie) {
+		return provider.ArtistDetail{}, fmt.Errorf("bili artist %q: account detail requires at least 3 cookie items", entityID)
+	}
+
+	var acc struct {
+		Name string `json:"name"`
+		Face string `json:"face"`
+		Sign string `json:"sign"`
+	}
+	if err := p.get(ctx, "/space/acc/info", url.Values{"mid": {entityID}}, cookie, &acc); err != nil {
+		return provider.ArtistDetail{}, err
+	}
+	return provider.ArtistDetail{
+		Name:      acc.Name,
+		EntityID:  entityID,
+		AvatarURL: normalizeCoverURL(acc.Face),
+		Bio:       acc.Sign,
+	}, nil
+}
+
+func artistInfoCookieReady(cookie string) bool {
+	pairs := 0
+	for _, item := range strings.Split(cookie, ";") {
+		key, _, ok := strings.Cut(strings.TrimSpace(item), "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		pairs++
+		if pairs >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	_ provider.ArtistDetailer   = (*Provider)(nil)
+	_ provider.ArtistIDDetailer = (*Provider)(nil)
+)

@@ -331,6 +331,7 @@ func makeVideos(prefix string, count, emptyAt int) []videoResult {
 			Bvid:       id,
 			Title:      "title " + id,
 			Author:     "uploader",
+			Mid:        42,
 			Cover:      "//i0.hdslb.com/" + id + ".jpg",
 			DurationMs: int64(i + 1),
 			Published:  1_700_000_000,
@@ -341,7 +342,7 @@ func makeVideos(prefix string, count, emptyAt int) []videoResult {
 
 func assertVideoTrack(t *testing.T, track provider.Track, id string) {
 	t.Helper()
-	if track.Ref != provider.NewRef("bili", id) || track.Title != "title "+id || track.Artist != "uploader" || track.CoverURL != "https://i0.hdslb.com/"+id+".jpg" || track.SourceURL != "https://www.bilibili.com/video/"+id || len(track.Contributors) != 1 || track.Contributors[0].Role != "uploader" || track.Contributors[0].Name != "uploader" {
+	if track.Ref != provider.NewRef("bili", id) || track.Title != "title "+id || track.Artist != "uploader" || track.CoverURL != "https://i0.hdslb.com/"+id+".jpg" || track.SourceURL != "https://www.bilibili.com/video/"+id || len(track.Contributors) != 1 || track.Contributors[0].Role != "uploader" || track.Contributors[0].Name != "uploader" || track.Contributors[0].EntityID != "42" {
 		t.Errorf("track = %+v", track)
 	}
 }
