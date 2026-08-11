@@ -34,7 +34,7 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found", "no cover")
 			return
 		}
-		w.Header().Set("Cache-Control", "public, max-age=2592000")
+		w.Header().Set("Cache-Control", "private, max-age=2592000")
 		http.ServeFile(w, r, mf.CoverPath)
 		return
 	}
@@ -115,7 +115,10 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	if ct := resp.Header.Get("Content-Type"); ct != "" && strings.HasPrefix(ct, "image/") {
 		w.Header().Set("Content-Type", ct)
 	}
-	w.Header().Set("Cache-Control", "public, max-age=2592000")
+	// private：CORS 消费者的响应带 ACAO 且随请求 Origin 变化，必须禁止共享缓存
+	// （边缘 CDN 不守 Vary: Origin 会把 A origin 的变体错发给 B origin）；浏览器
+	// 自己的缓存仍按 max-age 复用（CORS 分区）。
+	w.Header().Set("Cache-Control", "private, max-age=2592000")
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, io.LimitReader(resp.Body, 20<<20))
 }
