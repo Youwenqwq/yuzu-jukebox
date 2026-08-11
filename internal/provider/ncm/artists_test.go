@@ -2,6 +2,7 @@ package ncm
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,13 +47,84 @@ func TestArtistDetail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ArtistDetail error = %v", err)
 	}
-	want := provider.ArtistDetail{Name: "周杰伦", AvatarURL: "https://img/avatar.jpg", Bio: "歌手"}
+	want := provider.ArtistDetail{Name: "周杰伦", EntityID: "777", AvatarURL: "https://img/avatar.jpg", Bio: "歌手"}
 	if got != want {
 		t.Fatalf("ArtistDetail() = %#v, want %#v", got, want)
 	}
 }
 
-// TestArtistDetailNotFound 名字在 NCM 侧不存在时返回错误（httpapi 降级为本地统计）。
+func TestArtistDetailAvatarFallbacks(t *testing.T) {
+	tests := []struct {
+		name         string
+		searchFields string
+		detailFields string
+		wantAvatar   string
+	}{
+		{
+			name:         "detail cover",
+			searchFields: `,"picUrl":"https://img/search.jpg"`,
+			detailFields: `,"cover":"https://img/detail-cover.jpg"`,
+			wantAvatar:   "https://img/detail-cover.jpg",
+		},
+		{
+			name:         "search pic",
+			searchFields: `,"picUrl":"https://img/search.jpg"`,
+			wantAvatar:   "https://img/search.jpg",
+		},
+		{
+			name:         "search square pic",
+			searchFields: `,"img1v1Url":"https://img/search-square.jpg"`,
+			wantAvatar:   "https://img/search-square.jpg",
+		},
+		{
+			name: "no upstream avatar",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/search":
+					_, _ = w.Write([]byte(`{"code":200,"result":{"artists":[{"id":32540734,"name":"塞壬唱片-MSR"` + tc.searchFields + `}]}}`))
+				case "/artist/detail":
+					_, _ = w.Write([]byte(`{"code":200,"data":{"artist":{"id":32540734,"name":"塞壬唱片-MSR","briefDesc":"音乐厂牌"` + tc.detailFields + `}}}`))
+				default:
+					t.Errorf("unexpected path %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			p := categoryTestProvider(server)
+			got, err := p.ArtistDetail(context.Background(), "塞壬唱片-MSR")
+			if err != nil {
+				t.Fatalf("ArtistDetail error = %v", err)
+			}
+			want := provider.ArtistDetail{
+				Name:      "塞壬唱片-MSR",
+				EntityID:  "32540734",
+				AvatarURL: tc.wantAvatar,
+				Bio:       "音乐厂牌",
+			}
+			if got != want {
+				t.Fatalf("ArtistDetail() = %#v, want %#v", got, want)
+			}
+			if tc.wantAvatar == "" {
+				body, err := json.Marshal(got)
+				if err != nil {
+					t.Fatalf("Marshal ArtistDetail: %v", err)
+				}
+				if strings.Contains(string(body), `"avatar_url"`) {
+					t.Fatalf("ArtistDetail JSON = %s, want avatar_url omitted", body)
+				}
+			}
+		})
+	}
+}
+
+// TestArtistDetailNotFound 名字在 NCM 侧不存在时返回错误。
 func TestArtistDetailNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search" {
