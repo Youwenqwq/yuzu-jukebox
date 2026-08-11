@@ -78,11 +78,15 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 		r.URL.Query().Get("size") != "original" {
 		rawURL = thumbnailer.ThumbnailCoverURL(rawURL)
 	}
+	rawURL = upgradeCoverScheme(rawURL)
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid cover url")
 		return
 	}
-	if s.coverMode(p) == provider.CoverModeRedirect {
+	// 302 只服务于无 Origin 的普通 <img>（no-cors，省服务器带宽）。带 Origin 的
+	// 是 CORS 消费者（crossOrigin img / fetch）：重定向目标（源站 CDN）不保证
+	// ACAO 且可能混 http 链接，读像素会失败——直接流式回源，CORS 中间件补 ACAO。
+	if s.coverMode(p) == provider.CoverModeRedirect && r.Header.Get("Origin") == "" {
 		http.Redirect(w, r, rawURL, http.StatusFound)
 		return
 	}
@@ -114,6 +118,25 @@ func (s *Server) proxyCover(w http.ResponseWriter, r *http.Request, p provider.P
 	w.Header().Set("Cache-Control", "public, max-age=2592000")
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, io.LimitReader(resp.Body, 20<<20))
+}
+
+// upgradeCoverScheme 把已知封面 CDN 的 http 链接升级为 https（同路径可用），
+// 消除 https 页面跟随 http 重定向时的混合内容拦截。
+func upgradeCoverScheme(rawURL string) string {
+	if !strings.HasPrefix(rawURL, "http://") {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := u.Hostname()
+	if host == "y.gtimg.cn" || strings.HasSuffix(host, ".y.gtimg.cn") ||
+		host == "music.126.net" || strings.HasSuffix(host, ".music.126.net") {
+		u.Scheme = "https"
+		return u.String()
+	}
+	return rawURL
 }
 
 // coverMode 决定封面取图模式，优先级：

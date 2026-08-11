@@ -239,6 +239,61 @@ func TestProxyCoverDirectRedirectThumbnailSelection(t *testing.T) {
 	}
 }
 
+func TestProxyCoverRedirectUpgradesScheme(t *testing.T) {
+	s := &Server{}
+	p := &coverModeRedirectProvider{}
+	tests := []struct {
+		name     string
+		rawURL   string
+		location string
+	}{
+		{
+			name:     "netease subdomain",
+			rawURL:   "http://p3.music.126.net/x.jpg",
+			location: "https://p3.music.126.net/x.jpg",
+		},
+		{
+			name:     "tencent root",
+			rawURL:   "http://y.gtimg.cn/x.jpg",
+			location: "https://y.gtimg.cn/x.jpg",
+		},
+		{
+			name:     "unlisted host",
+			rawURL:   "http://example.com/x.jpg",
+			location: "http://example.com/x.jpg",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/x?size=original", nil)
+			s.proxyCover(rec, req, p, tt.rawURL)
+			if rec.Code != http.StatusFound {
+				t.Fatalf("status = %d, want 302", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); got != tt.location {
+				t.Fatalf("Location = %q, want %q", got, tt.location)
+			}
+		})
+	}
+}
+
+func TestProxyCoverStreamsForCorsOrigin(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake-image"))
+	}))
+	defer upstream.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cover/x", nil)
+	req.Header.Set("Origin", "https://localhost")
+	s := &Server{}
+	s.proxyCover(rec, req, &coverModeRedirectProvider{}, upstream.URL+"/x.jpg")
+	if rec.Code != http.StatusOK || rec.Body.String() != "fake-image" {
+		t.Fatalf("CORS origin: status = %d body = %q, want 200 fake-image", rec.Code, rec.Body.String())
+	}
+}
+
 // TestProxyCoverModePriority 封面取图模式决策优先级：
 // 声明 > 全局默认；CoverAware 恒代理（安全网）。
 func TestProxyCoverModePriority(t *testing.T) {
