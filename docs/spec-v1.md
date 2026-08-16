@@ -132,7 +132,7 @@ should_be = position_ms                                        (paused 时)
 - **房间访问凭据不在此处传递**——它只作为受保护 Room 的 `room.join.password` 最终 fallback；身份具备免密准入条件时无需提供（见 4.2、6.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
 - 普通 guest 身份 ID 由名字确定性派生，同名重连仍是同一人；管理员口令身份使用上述独立 `password` 命名空间。
-- 普通会话默认 TTL 24h，**持久化于 sessions 表**：重启不失效，过期自动清理；`DELETE /api/v1/auth/session` 吊销。Integration actor 会话例外，固定 TTL 5 分钟（见 3.6）。
+- 普通会话（guest/password/OIDC）默认 TTL 30 天，可通过 server config 的 `session_ttl_hours` 调整；每次成功认证都会把内存中的过期时间顺延一个完整 TTL。会话**持久化于 sessions 表**，但为避免每次 REST 调用都写 SQLite，仅当顺延后的过期时间比已持久化值超出 24h 时才更新 `expires_at`；重启不失效，过期自动清理，`DELETE /api/v1/auth/session` 吊销。Integration actor 会话例外，固定 TTL 5 分钟且不滑动续期（见 3.6）。
 - 授权不以 `kind` 判断；以当前 Principal 的 `roles` 与 Room grant 为准（见 3.4）。`kind` 仅可参与房间队列限额策略。
 
 ### 3.2 会话 token 认证（OIDC 等 REST 登录后的 WS 接入）
