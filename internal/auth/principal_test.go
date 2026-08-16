@@ -220,13 +220,164 @@ func TestIssueSessionWithTTLReturnsExactShortExpiry(t *testing.T) {
 
 	normalToken := manager.IssueSession(identity)
 	normalTTL := time.Until(manager.sessions[sessionTokenDigest(normalToken)].expiresAt)
-	if normalTTL < 23*time.Hour+59*time.Minute || normalTTL > 24*time.Hour {
-		t.Fatalf("normal session TTL = %v, want 24h", normalTTL)
+	if normalTTL < 30*24*time.Hour-time.Minute || normalTTL > 30*24*time.Hour {
+		t.Fatalf("normal session TTL = %v, want 30 days", normalTTL)
 	}
 
 	time.Sleep(200 * time.Millisecond)
 	if _, err := manager.Session(token); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expired short session error = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestSessionSlidesNormalExpiry(t *testing.T) {
+	manager := NewManager("", nil, WithSessionTTL(2*time.Hour))
+	token := manager.IssueSession(Identity{
+		ID: "sliding-session", Name: "Sliding Session", Kind: "guest",
+		Roles: []string{RoleListener, RoleRequester},
+	})
+	digest := sessionTokenDigest(token)
+	current := manager.sessions[digest]
+	current.expiresAt = time.Now().Add(time.Minute)
+	previousExpiry := current.expiresAt
+	manager.sessions[digest] = current
+
+	if _, err := manager.Session(token); err != nil {
+		t.Fatal(err)
+	}
+	renewedExpiry := manager.sessions[digest].expiresAt
+	if !renewedExpiry.After(previousExpiry.Add(time.Hour)) {
+		t.Fatalf("renewed expiry = %v, previous expiry = %v", renewedExpiry, previousExpiry)
+	}
+}
+
+func TestSessionExpiryPersistenceIsThrottled(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "sliding-throttle.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	manager := NewManager("", st, WithSessionTTL(2*time.Hour))
+	token := manager.IssueSession(Identity{
+		ID: "throttled-session", Name: "Throttled Session", Kind: "guest",
+		Roles: []string{RoleListener, RoleRequester},
+	})
+	digest := sessionTokenDigest(token)
+	var persistedBefore int64
+	if err := st.DB().QueryRowContext(
+		ctx, `SELECT expires_at FROM sessions WHERE token = ?`, digest,
+	).Scan(&persistedBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	current := manager.sessions[digest]
+	current.expiresAt = time.Now().Add(time.Minute)
+	manager.sessions[digest] = current
+	if _, err := manager.Session(token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Session(token); err != nil {
+		t.Fatal(err)
+	}
+
+	var persistedAfter int64
+	if err := st.DB().QueryRowContext(
+		ctx, `SELECT expires_at FROM sessions WHERE token = ?`, digest,
+	).Scan(&persistedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if persistedAfter != persistedBefore {
+		t.Fatalf("persisted expiry changed below throttle threshold: before=%d after=%d", persistedBefore, persistedAfter)
+	}
+}
+
+func TestSessionPersistsExpiryBeyondThrottleThreshold(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "sliding-persist.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	manager := NewManager("", st)
+	token := manager.IssueSession(Identity{
+		ID: "persisted-sliding-session", Name: "Persisted Sliding Session", Kind: "guest",
+		Roles: []string{RoleListener, RoleRequester},
+	})
+	digest := sessionTokenDigest(token)
+	current := manager.sessions[digest]
+	stalePersistedExpiry := current.persistedExpiresAt.Add(-25 * time.Hour)
+	if err := st.UpdateSessionExpiry(ctx, digest, stalePersistedExpiry.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	const persistedIdentity = `{"id":"persistence-sentinel"}`
+	if _, err := st.DB().ExecContext(
+		ctx, `UPDATE sessions SET identity_json = ? WHERE token = ?`, persistedIdentity, digest,
+	); err != nil {
+		t.Fatal(err)
+	}
+	current.persistedExpiresAt = stalePersistedExpiry
+	manager.sessions[digest] = current
+
+	if _, err := manager.Session(token); err != nil {
+		t.Fatal(err)
+	}
+	var persistedAfter int64
+	var identityAfter string
+	if err := st.DB().QueryRowContext(
+		ctx, `SELECT expires_at, identity_json FROM sessions WHERE token = ?`, digest,
+	).Scan(&persistedAfter, &identityAfter); err != nil {
+		t.Fatal(err)
+	}
+	if persistedAfter <= stalePersistedExpiry.UnixMilli() {
+		t.Fatalf("persisted expiry = %d, want later than %d", persistedAfter, stalePersistedExpiry.UnixMilli())
+	}
+	if persistedAfter != manager.sessions[digest].expiresAt.UnixMilli() {
+		t.Fatalf("persisted expiry = %d, in-memory expiry = %d", persistedAfter, manager.sessions[digest].expiresAt.UnixMilli())
+	}
+	if identityAfter != persistedIdentity {
+		t.Fatalf("expiry update rewrote identity_json: got %q, want %q", identityAfter, persistedIdentity)
+	}
+}
+
+func TestExpiredSessionIsNotRenewed(t *testing.T) {
+	manager := NewManager("", nil, WithSessionTTL(2*time.Hour))
+	token := manager.IssueSession(Identity{
+		ID: "expired-session", Name: "Expired Session", Kind: "guest",
+		Roles: []string{RoleListener, RoleRequester},
+	})
+	digest := sessionTokenDigest(token)
+	current := manager.sessions[digest]
+	current.expiresAt = time.Now().Add(-time.Millisecond)
+	manager.sessions[digest] = current
+
+	if _, err := manager.Session(token); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expired session error = %v, want ErrSessionNotFound", err)
+	}
+	if _, ok := manager.sessions[digest]; ok {
+		t.Fatal("expired session remained in memory")
+	}
+}
+
+func TestIntegrationSessionDoesNotSlide(t *testing.T) {
+	manager := NewManager("", nil, WithSessionTTL(2*time.Hour))
+	token, issuedExpiry, err := manager.IssueIntegrationSession(
+		Identity{
+			ID: "integration-actor", Name: "Integration Actor", Kind: "guest",
+			Roles: []string{RoleListener, RoleRequester},
+		},
+		IntegrationSessionSource{IntegrationID: "bridge"},
+		5*time.Minute,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sessionTokenDigest(token)
+	if _, err := manager.Session(token); err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.sessions[digest].expiresAt.UnixMilli(); got != issuedExpiry {
+		t.Fatalf("Integration actor expiry slid from %d to %d", issuedExpiry, got)
 	}
 }
 

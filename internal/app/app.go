@@ -58,7 +58,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	bindings := auth.NewBindingService(st)
 	playerAuth := auth.NewPlayerRegistry(st)
 
-	authm := auth.NewManager(cfg.AdminPassword, st)
+	authm := auth.NewManager(cfg.AdminPassword, st, auth.WithSessionTTL(cfg.SessionTTL()))
 	go runSessionJanitor(ctx, authm, st)
 	reg := provider.NewRegistry()
 	lp := local.New(cfg.MediaDir, st)

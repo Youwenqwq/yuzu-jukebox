@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRejectsRemovedIntegrationSecrets(t *testing.T) {
@@ -32,5 +33,20 @@ func TestDefaultUploadAndCacheObjectLimits(t *testing.T) {
 	}
 	if cfg.Cache.MaxObjectBytes != 512<<20 {
 		t.Fatalf("cache.max_object_bytes = %d, want %d", cfg.Cache.MaxObjectBytes, int64(512<<20))
+	}
+}
+
+func TestDefaultSessionTTL(t *testing.T) {
+	cfg := Default()
+	if cfg.SessionTTLHours != 30*24 {
+		t.Fatalf("session_ttl_hours = %d, want %d", cfg.SessionTTLHours, 30*24)
+	}
+	if cfg.SessionTTL() != 30*24*time.Hour {
+		t.Fatalf("SessionTTL() = %v, want 30 days", cfg.SessionTTL())
+	}
+
+	cfg.SessionTTLHours = 12
+	if cfg.SessionTTL() != 12*time.Hour {
+		t.Fatalf("configured SessionTTL() = %v, want 12h", cfg.SessionTTL())
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
 
 type CORSConfig struct {
@@ -49,6 +50,8 @@ type Config struct {
 	// 全局管理员口令：guest 认证时携带即可获得 room_admin/media_admin 角色。
 	// v1 没有账号体系，这是唯一的管理员入口。
 	AdminPassword string `json:"admin_password"`
+	// 普通 guest/password/OIDC 会话的滑动 TTL（小时）；缺省为 30 天。
+	SessionTTLHours int `json:"session_ttl_hours"`
 	// 凭据加密主密钥（64 位 hex = 32 字节）。缺省时 LoadOrCreate 自动生成并回写。
 	// 用于 credentials 表 AES-GCM 加密；丢失则已存凭据不可解密。
 	SecretKey string `json:"secret_key"`
@@ -100,6 +103,8 @@ type QQConfig struct {
 	FileType int `json:"file_type"`
 }
 
+const defaultSessionTTL = 30 * 24 * time.Hour
+
 func Default() Config {
 	return Config{
 		Addr:                        ":8080",
@@ -109,6 +114,7 @@ func Default() Config {
 		CacheMaxBytes:               20 << 30, // 20 GiB
 		CacheAutoPruneDays:          0,
 		PlaylistSyncIntervalMinutes: 0,
+		SessionTTLHours:             int(defaultSessionTTL / time.Hour),
 		Media: MediaConfig{
 			MaxUploadBytes: 1 << 30,
 		},
@@ -135,6 +141,16 @@ func Default() Config {
 			FileType: 12,
 		},
 	}
+}
+
+// SessionTTL returns the configured normal-session TTL. A non-positive value
+// falls back to the default so programmatic Config literals retain safe
+// production behavior.
+func (c Config) SessionTTL() time.Duration {
+	if c.SessionTTLHours <= 0 {
+		return defaultSessionTTL
+	}
+	return time.Duration(c.SessionTTLHours) * time.Hour
 }
 
 func Load(path string) (Config, error) {

@@ -808,6 +808,13 @@ func (s *Store) SaveSessionWithActorSource(
 	return err
 }
 
+// UpdateSessionExpiry advances a session's persisted expiry without rewriting
+// its identity snapshot or Integration source.
+func (s *Store) UpdateSessionExpiry(ctx context.Context, token string, expiresAt int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET expires_at = ? WHERE token = ?`, expiresAt, token)
+	return err
+}
+
 // SessionRow is a persisted session.
 type SessionRow struct {
 	Token         string

@@ -30,6 +30,11 @@ const (
 	RoleSysAdmin = "sys_admin"
 )
 
+const (
+	defaultSessionTTL             = 30 * 24 * time.Hour
+	sessionExpiryPersistThreshold = 24 * time.Hour
+)
+
 type Identity struct {
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
@@ -70,9 +75,11 @@ var (
 )
 
 type session struct {
-	identity  Identity
-	expiresAt time.Time
-	source    IntegrationSessionSource
+	identity           Identity
+	expiresAt          time.Time
+	persistedExpiresAt time.Time
+	renewalTTL         time.Duration
+	source             IntegrationSessionSource
 }
 
 type ticket struct {
@@ -95,14 +102,30 @@ type Manager struct {
 	tickets  map[string]ticket
 }
 
-func NewManager(adminPassword string, st *store.Store) *Manager {
+// ManagerOption configures a Manager.
+type ManagerOption func(*Manager)
+
+// WithSessionTTL sets the sliding TTL for normal guest/password/OIDC sessions.
+// Integration actor sessions retain the fixed TTL supplied by their issuer.
+func WithSessionTTL(ttl time.Duration) ManagerOption {
+	return func(m *Manager) {
+		if ttl > 0 {
+			m.sessionTTL = ttl
+		}
+	}
+}
+
+func NewManager(adminPassword string, st *store.Store, options ...ManagerOption) *Manager {
 	m := &Manager{
 		adminPassword:  adminPassword,
-		sessionTTL:     24 * time.Hour,
+		sessionTTL:     defaultSessionTTL,
 		ticketTTL:      5 * time.Minute,
 		sessions:       map[string]session{},
 		tickets:        map[string]ticket{},
 		passwordProbes: newPasswordProbeLimiter(),
+	}
+	for _, option := range options {
+		option(m)
 	}
 	if st == nil {
 		return m
@@ -131,8 +154,10 @@ func NewManager(adminPassword string, st *store.Store) *Manager {
 				ScopeType:     r.ScopeType,
 				ScopeID:       r.ScopeID,
 			}
+			expiresAt := time.UnixMilli(r.ExpiresAt)
 			m.sessions[r.Token] = session{
-				identity: id, source: source, expiresAt: time.UnixMilli(r.ExpiresAt),
+				identity: id, source: source, expiresAt: expiresAt,
+				persistedExpiresAt: expiresAt, renewalTTL: m.sessionTTL,
 			}
 			previous, ok := legacyPrincipals[id.ID]
 			if !ok || r.ExpiresAt > previous.expiresAt {
@@ -228,7 +253,7 @@ func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, s
 }
 
 // IssueAuthenticatedSession persists the freshly authenticated identity as the
-// current principal and issues a normal 24-hour session.
+// current principal and issues a normal sliding session.
 func (m *Manager) IssueAuthenticatedSession(id Identity) (string, error) {
 	if err := m.persistPrincipal(id); err != nil {
 		return "", err
@@ -343,7 +368,10 @@ func (m *Manager) issueSession(
 		}
 	}
 	m.mu.Lock()
-	m.sessions[tokenDigest] = session{identity: id, source: source, expiresAt: expiresAt}
+	m.sessions[tokenDigest] = session{
+		identity: id, source: source, expiresAt: expiresAt,
+		persistedExpiresAt: expiresAt, renewalTTL: ttl,
+	}
 	m.mu.Unlock()
 	return token, expiresAtMS, nil
 }
@@ -394,12 +422,14 @@ func (m *Manager) PruneExpired(ctx context.Context, now time.Time) error {
 	return m.st.PruneSessions(ctx, now.UnixMilli())
 }
 
-// Session 按 token 取身份。
+// Session 按 token 取身份。普通会话认证成功后滑动续期；Integration actor
+// 会话保持签发时的固定过期时间。
 func (m *Manager) Session(token string) (Identity, error) {
 	tokenDigest := sessionTokenDigest(token)
+	now := time.Now()
 	m.mu.Lock()
 	s, ok := m.sessions[tokenDigest]
-	if ok && time.Now().After(s.expiresAt) {
+	if ok && !now.Before(s.expiresAt) {
 		delete(m.sessions, tokenDigest)
 		ok = false
 	}
@@ -408,6 +438,7 @@ func (m *Manager) Session(token string) (Identity, error) {
 		return Identity{}, ErrSessionNotFound
 	}
 	if m.st == nil {
+		m.renewSession(tokenDigest, time.Now())
 		return s.identity, nil
 	}
 
@@ -447,7 +478,51 @@ func (m *Manager) Session(token string) (Identity, error) {
 			return Identity{}, err
 		}
 	}
+	m.renewSession(tokenDigest, time.Now())
 	return id, nil
+}
+
+func (m *Manager) renewSession(tokenDigest string, now time.Time) {
+	var newExpiry time.Time
+	var previousPersistedExpiry time.Time
+	shouldPersist := false
+
+	m.mu.Lock()
+	current, ok := m.sessions[tokenDigest]
+	if !ok || current.source.IntegrationID != "" || !now.Before(current.expiresAt) {
+		m.mu.Unlock()
+		return
+	}
+	newExpiry = now.Add(current.renewalTTL).UTC().Truncate(time.Millisecond)
+	if newExpiry.After(current.expiresAt) {
+		current.expiresAt = newExpiry
+	}
+	if m.st != nil &&
+		current.expiresAt.Sub(current.persistedExpiresAt) > sessionExpiryPersistThreshold {
+		previousPersistedExpiry = current.persistedExpiresAt
+		current.persistedExpiresAt = current.expiresAt
+		newExpiry = current.expiresAt
+		shouldPersist = true
+	}
+	m.sessions[tokenDigest] = current
+	m.mu.Unlock()
+
+	if !shouldPersist {
+		return
+	}
+	if err := m.st.UpdateSessionExpiry(
+		context.Background(), tokenDigest, newExpiry.UnixMilli(),
+	); err != nil {
+		// Keep authentication available and make the next request retry the
+		// lightweight persistence update.
+		m.mu.Lock()
+		current, ok := m.sessions[tokenDigest]
+		if ok && current.persistedExpiresAt.Equal(newExpiry) {
+			current.persistedExpiresAt = previousPersistedExpiry
+			m.sessions[tokenDigest] = current
+		}
+		m.mu.Unlock()
+	}
 }
 
 // IssueTicket 签发某身份拉取某曲目的出流票据。
