@@ -55,8 +55,65 @@ func TestImportPlaylistPagingAndDedup(t *testing.T) {
 
 func TestImportPlaylistBadID(t *testing.T) {
 	p := &Provider{}
-	if _, _, _, err := p.ImportPlaylist(context.Background(), "no-digits"); err == nil {
-		t.Fatal("ImportPlaylist() error = nil, want id parse error")
+	for _, id := range []string{"no-digits", "", "https://i.y.qq.com/n2/m/share/details/taoge.html"} {
+		if _, _, _, err := p.ImportPlaylist(context.Background(), id); err == nil {
+			t.Errorf("ImportPlaylist(%q) error = nil, want id parse error", id)
+		}
+	}
+}
+
+// 线上复现：QQ 音乐 App「复制链接」产出 i.y.qq.com/n2/m/share/details/taoge.html?id=…，
+// 路径里的 "n2" 先于 id 命中旧的首个数字串正则，歌单被截成 /songlist/2/detail。
+func TestImportPlaylistMobileShareURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/songlist/777/detail" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		info := map[string]any{"id": 777, "title": "分享的歌单", "picurl": "https://cover/pl", "songnum": 1}
+		songs := []any{songFixture("mid-1", "一", 1, 100, "a")}
+		_, _ = w.Write([]byte(envelope(map[string]any{"code": 0, "subcode": 0, "msg": "", "info": info, "size": 1, "songs": songs, "total": 1, "hasmore": 0})))
+	}))
+	defer server.Close()
+	p := testProvider(t, server)
+
+	name, _, tracks, err := p.ImportPlaylist(context.Background(),
+		"https://i.y.qq.com/n2/m/share/details/taoge.html?id=777&hosteuin=Ne-A7KEF7wSz&appversion=141100&ADTAG=wxfshare")
+	if err != nil {
+		t.Fatalf("ImportPlaylist() error = %v", err)
+	}
+	if name != "分享的歌单" || len(tracks) != 1 || tracks[0].Ref.String() != "qq:mid-1" {
+		t.Fatalf("name=%q tracks=%+v", name, tracks)
+	}
+}
+
+func TestImportPlaylistIDExtraction(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"7523179433", "7523179433"},
+		{" 7523179433 ", "7523179433"},
+		{"https://y.qq.com/n/ryqq/playlist/7523179433", "7523179433"},
+		{"https://y.qq.com/n/ryqq/playlist/7523179433?from=singlemessage", "7523179433"},
+		{"https://i.y.qq.com/n2/m/share/details/taoge.html?id=7523179433", "7523179433"},
+		{"https://i.y.qq.com/n2/m/share/details/taoge.html?id=7523179433&hosteuin=Ne-A7KEF7wSz&ADTAG=wxfshare", "7523179433"},
+		{"https://y.qq.com/playlist/123456", "123456"},
+		{"123 / 456", "123"},
+	}
+	for _, tt := range tests {
+		got, err := importPlaylistID(tt.raw)
+		if err != nil {
+			t.Errorf("importPlaylistID(%q) error = %v", tt.raw, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("importPlaylistID(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+	for _, raw := range []string{"", "   ", "no-digits", "https://i.y.qq.com/n2/m/share/details/taoge.html", "https://y.qq.com/n/ryqq/songDetail/abc"} {
+		if _, err := importPlaylistID(raw); err == nil {
+			t.Errorf("importPlaylistID(%q) error = nil, want error", raw)
+		}
 	}
 }
 

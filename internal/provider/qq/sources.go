@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -13,15 +15,58 @@ import (
 
 // ---------- 歌单导入（provider.PlaylistImporter） ----------
 
+// songlistIDRe 兜底提取裸串中的数字 ID（非 URL 输入，如 "123 / 456"）。
 var songlistIDRe = regexp.MustCompile(`(\d+)`)
 
+// importPlaylistID 从裸 id 或完整 URL 中提取歌单 TID。QQ 分享链接有两种常见形态：
+//   - 桌面端：https://y.qq.com/n/ryqq/playlist/1234567890
+//   - 移动端（App「复制链接」）：https://i.y.qq.com/n2/m/share/details/taoge.html?id=1234567890&hosteuin=…
+//
+// URL 按「id 查询参数 → 路径末段数字」的顺序解析；非 URL 输入沿用首个数字串兜底。
+// 不能对整个 URL 跑数字正则——移动端链接路径里的 "n2" 会先于 id 命中，把歌单
+// 截成 /songlist/2/detail，导入恒失败（线上复现：502 provider request failed）。
+func importPlaylistID(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("qq playlist id not found in %q", raw)
+	}
+	if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" {
+		if id := u.Query().Get("id"); allDigits(id) {
+			return id, nil
+		}
+		if seg := path.Base(u.Path); allDigits(seg) {
+			return seg, nil
+		}
+		return "", fmt.Errorf("qq playlist id not found in %q", raw)
+	}
+	m := songlistIDRe.FindString(raw)
+	if m == "" {
+		return "", fmt.Errorf("qq playlist id not found in %q", raw)
+	}
+	return m, nil
+}
+
+// allDigits 判断字符串是否为非空纯数字（QQ 歌单 TID 恒为数字）。
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // ImportPlaylist 拉取 QQ 歌单全量曲目及封面。接受裸 id 或完整 URL
-// （如 https://y.qq.com/n/ryqq/playlist/1234567890）。
+// （如 https://y.qq.com/n/ryqq/playlist/1234567890、
+// https://i.y.qq.com/n2/m/share/details/taoge.html?id=1234567890）。
 // 用 /songlist/{id}/detail 分页（hasmore 驱动，按 mid 去重）。
 func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (string, string, []provider.Track, error) {
-	m := songlistIDRe.FindString(playlistID)
-	if m == "" {
-		return "", "", nil, fmt.Errorf("qq playlist id not found in %q", playlistID)
+	m, err := importPlaylistID(playlistID)
+	if err != nil {
+		return "", "", nil, err
 	}
 	const perPage = 100
 	var name, cover string
