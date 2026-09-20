@@ -15,12 +15,19 @@ type HealthMonitor struct {
 	client   *http.Client
 	interval time.Duration
 	now      func() time.Time
+	probes   map[string]healthProbe
+}
+
+type healthProbe struct {
+	failures int
+	next     time.Time
 }
 
 func NewHealthMonitor(st *store.Store) *HealthMonitor {
 	return &HealthMonitor{
 		st: st, client: &http.Client{Timeout: 10 * time.Second},
-		interval: time.Minute, now: time.Now,
+		interval: 5 * time.Minute, now: time.Now,
+		probes: make(map[string]healthProbe),
 	}
 }
 
@@ -44,9 +51,29 @@ func (m *HealthMonitor) checkAll(ctx context.Context) {
 		return
 	}
 	for _, acceleration := range accelerations {
+		if !acceleration.Enabled {
+			continue
+		}
+		now := m.now()
+		probe := m.probes[acceleration.ID]
+		if now.Before(probe.next) {
+			continue
+		}
 		controlOK, backendOK, detail := CheckHealth(ctx, m.client, acceleration, acceleration.BackendToken)
 		_ = m.st.UpdateAccelerationHealth(ctx, acceleration.ID, controlOK, backendOK,
 			detail, m.now().UnixMilli())
+		delay := m.interval
+		if !controlOK || !backendOK {
+			probe.failures = min(probe.failures+1, 5)
+			delay = min(m.interval*time.Duration(1<<probe.failures), time.Hour)
+		} else {
+			probe.failures = 0
+		}
+		probe.next = now.Add(delay)
+		if m.probes == nil {
+			m.probes = make(map[string]healthProbe)
+		}
+		m.probes[acceleration.ID] = probe
 	}
 }
 

@@ -45,6 +45,9 @@ func TestHealthMonitorRecordsControlAndBackendHealth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.DB().Exec(`UPDATE accelerations SET enabled = 1 WHERE id = 'edgeone-main'`); err != nil {
+		t.Fatal(err)
+	}
 
 	monitor := NewHealthMonitor(st)
 	monitor.client = server.Client()

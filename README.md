@@ -162,7 +162,7 @@ Agent 自动断线重连、同步播放进度，始终绑定到已分配的房�
 
 **运行环境：** Linux 服务器（x86/ARM）。Agent 可运行在任何有 MPV 的 Linux 机器上——树莓派、旧笔记本皆可。
 
-公网源站带宽较小时，可评估 [EdgeOne CDN 旁路分发](docs/edgeone-distribution.md)——**实验性功能，仍在开发中，暂不建议使用**。
+公网访问优先使用源站直出与可靠的接入链路。[EdgeOne CDN 旁路分发](docs/edgeone-distribution.md)为**可选实验性模块，已停止新功能开发，仅维护现有功能与修复 Bug**；新建加速资源默认停用。超过加速对象上限的文件直接回源，不进行分块加速。
 
 ## 文档
 
@@ -170,7 +170,7 @@ Agent 自动断线重连、同步播放进度，始终绑定到已分配的房�
 |------|------|
 | [docs/spec-v1.md](docs/spec-v1.md) | 协议、房间状态机、认证流程、Integration 契约 |
 | [docs/deploy.md](docs/deploy.md) | 生产环境部署指南 |
-| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN 旁路设计（实验性） |
+| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN 旁路维护与部署（实验性、功能冻结） |
 | [AGENTS.md](AGENTS.md) | 代码库指南（面向贡献者与 Coding Agent） |
 
 ## 权限

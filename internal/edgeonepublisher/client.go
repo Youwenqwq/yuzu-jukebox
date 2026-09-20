@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 var (
@@ -225,16 +224,21 @@ func (c *CoreClient) Complete(ctx context.Context, lease Lease, candidate Candid
 	return nil
 }
 
-func (c *CoreClient) Fail(ctx context.Context, lease Lease, publishErr error, retryAfter time.Duration) error {
+func (c *CoreClient) Fail(ctx context.Context, lease Lease, publishErr error) error {
 	message := publishErr.Error()
 	if len(message) > 2000 {
 		message = message[:2000]
 	}
+	errorCode := "publish_failed"
+	var tooLarge objectTooLargeError
+	var coreError coreHTTPError
+	if errors.As(publishErr, &tooLarge) || (errors.As(publishErr, &coreError) && coreError.code == "object_too_large") {
+		errorCode = "object_too_large"
+	}
 	status, err := c.json(ctx, http.MethodPost,
 		"/internal/v1/accelerations/leases/"+url.PathEscape(lease.ID)+"/fail",
 		map[string]any{
-			"owner": lease.Owner, "error": message,
-			"retry_after_seconds": int(retryAfter / time.Second),
+			"owner": lease.Owner, "error": message, "error_code": errorCode,
 		}, nil)
 	if err != nil {
 		return err
@@ -360,12 +364,10 @@ func (c *CoreClient) FailDeletion(
 	ctx context.Context,
 	deletion StorageDeletion,
 	deletionErr error,
-	retryAfter time.Duration,
 ) error {
 	status, err := c.json(ctx, http.MethodPost,
 		"/internal/v1/accelerations/deletions/"+url.PathEscape(deletion.ID)+"/fail",
-		map[string]any{"owner": deletion.Owner, "error": deletionErr.Error(),
-			"retry_after_seconds": int(retryAfter / time.Second)}, nil)
+		map[string]any{"owner": deletion.Owner, "error": deletionErr.Error()}, nil)
 	if err != nil {
 		return err
 	}
@@ -398,9 +400,17 @@ func (c *CoreClient) json(ctx context.Context, method, path string, body, result
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
-		detail, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
-		return response.StatusCode, fmt.Errorf("core %s: status %d: %s", path,
-			response.StatusCode, strings.TrimSpace(string(detail)))
+		var failure struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 8<<10)).Decode(&failure)
+		return response.StatusCode, coreHTTPError{
+			status: response.StatusCode, code: failure.Error.Code,
+			message: failure.Error.Message,
+		}
 	}
 	if result != nil && response.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(result); err != nil {
@@ -408,6 +418,26 @@ func (c *CoreClient) json(ctx context.Context, method, path string, body, result
 		}
 	}
 	return response.StatusCode, nil
+}
+
+type coreHTTPError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e coreHTTPError) Error() string {
+	return fmt.Sprintf("core: status %d: %s: %s", e.status, e.code, e.message)
+}
+
+func (e coreHTTPError) Is(target error) bool {
+	switch target {
+	case ErrLeaseInactive:
+		return e.status == http.StatusNotFound || e.code == "lease_invalid" || e.code == "lease_expired"
+	case ErrCancellationRequested:
+		return e.code == "cancellation_requested"
+	}
+	return false
 }
 
 type BackendClient struct {
@@ -433,23 +463,6 @@ type BlobMetadata struct {
 
 func NewBackendClient(baseURL, token string, client *http.Client) *BackendClient {
 	return &BackendClient{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: client}
-}
-
-func (c *BackendClient) Health(ctx context.Context) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+c.token)
-	response, err := c.client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("backend health: status %d", response.StatusCode)
-	}
-	return nil
 }
 
 func (c *BackendClient) SignPUT(ctx context.Context, locator, contentType string) (SignedPUT, error) {

@@ -31,7 +31,8 @@ type Cache struct {
 	st             *store.Store
 	reg            *provider.Registry
 
-	client *http.Client
+	client      *http.Client
+	readTimeout time.Duration
 
 	mu       sync.Mutex
 	inflight map[provider.TrackRef]*download
@@ -77,7 +78,8 @@ func New(dir string, maxBytes, maxObjectBytes int64, st *store.Store, reg *provi
 		maxObjectBytes: maxObjectBytes,
 		st:             st,
 		reg:            reg,
-		client:         &http.Client{Timeout: 0}, // 流式拉取，不设总超时；由 ctx 控制
+		client:         &http.Client{Timeout: 0},
+		readTimeout:    30 * time.Second,
 		inflight:       map[provider.TrackRef]*download{},
 	}
 }
@@ -284,7 +286,12 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 
 	// 发起上游请求。注意：不用调用方 ctx——下载的生命周期独立于
 	// 首个客户端连接（客户端断开后转后台继续，见 teeReader.drain）。
-	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	upCtx, cancel := context.WithCancelCause(context.Background())
+	timer := time.AfterFunc(c.readTimeout, func() { cancel(context.DeadlineExceeded) })
+	upCancel := func() {
+		timer.Stop()
+		cancel(context.Canceled)
+	}
 	req, err := http.NewRequestWithContext(upCtx, http.MethodGet, loc.URL, nil)
 	if err != nil {
 		upCancel()
@@ -297,6 +304,7 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 		}
 	}
 	resp, err := c.client.Do(req)
+	timer.Stop()
 	if err != nil {
 		upCancel()
 		c.finishInflight(ref, dl, fmt.Errorf("fetch %s: %w", ref, err))
@@ -309,7 +317,10 @@ func (c *Cache) openStreamOnce(ctx context.Context, ref provider.TrackRef) (io.R
 		c.finishInflight(ref, dl, fmt.Errorf("fetch %s: %w", ref, err))
 		return nil, false, err // 上游明确拒绝，重试无意义
 	}
+	resp.Body = &readTimeoutBody{ReadCloser: resp.Body, timer: timer, timeout: c.readTimeout}
+	c.mu.Lock()
 	dl.total = resp.ContentLength // 可能为 -1（未知）
+	c.mu.Unlock()
 	if c.maxObjectBytes > 0 && resp.ContentLength > c.maxObjectBytes {
 		resp.Body.Close()
 		upCancel()
@@ -356,6 +367,27 @@ func (c *Cache) finishInflight(ref provider.TrackRef, dl *download, err error) {
 	delete(c.inflight, ref)
 	c.mu.Unlock()
 	close(dl.done)
+}
+
+// readTimeoutBody limits stalled upstream reads, not the lifetime of a track.
+// Time spent waiting for the player to request more bytes must not expire a
+// healthy download. The same reader is used after handing off to background drain.
+type readTimeoutBody struct {
+	io.ReadCloser
+	timer   *time.Timer
+	timeout time.Duration
+}
+
+func (b *readTimeoutBody) Read(p []byte) (int, error) {
+	b.timer.Reset(b.timeout)
+	n, err := b.ReadCloser.Read(p)
+	b.timer.Stop()
+	return n, err
+}
+
+func (b *readTimeoutBody) Close() error {
+	b.timer.Stop()
+	return b.ReadCloser.Close()
 }
 
 // teeReader 读上游的同时写临时文件。
@@ -410,12 +442,17 @@ func (t *teeReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		wn, writeErr := t.tmp.Write(p[:n])
 		t.dl.fetched.Add(int64(wn))
-		if writeErr != nil && err == nil {
-			err = writeErr
+		if writeErr != nil {
+			t.fail(writeErr)
+			return wn, writeErr
 		}
 	}
 	if err == io.EOF {
-		t.finalize()
+		if finalizeErr := t.finalize(); finalizeErr != nil {
+			return n, finalizeErr
+		}
+	} else if err != nil {
+		t.fail(err)
 	}
 	return n, err
 }
@@ -466,7 +503,9 @@ func (t *teeReader) drain() {
 		log.Printf("[cache] %s: background download failed: %v", t.ref, err)
 		return
 	}
-	t.finalize()
+	if err := t.finalize(); err != nil {
+		log.Printf("[cache] %s: background download failed: %v", t.ref, err)
+	}
 }
 
 func (t *teeReader) fail(err error) {
@@ -485,26 +524,33 @@ func (t *teeReader) fail(err error) {
 	t.c.finishInflight(t.ref, t.dl, err)
 }
 
-func (t *teeReader) finalize() {
+func (t *teeReader) finalize() error {
 	size := t.dl.fetched.Load()
 	if t.c.maxObjectBytes > 0 && size > t.c.maxObjectBytes {
-		t.fail(fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes))
-		return
+		err := fmt.Errorf("%w: limit %d", ErrObjectTooLarge, t.c.maxObjectBytes)
+		t.fail(err)
+		return err
+	}
+	if t.dl.total >= 0 && size != t.dl.total {
+		err := fmt.Errorf("cache download size %d, expected %d: %w", size, t.dl.total, io.ErrUnexpectedEOF)
+		t.fail(err)
+		return err
 	}
 	t.mu.Lock()
 	if t.done {
 		t.mu.Unlock()
-		return
+		return nil
 	}
 	t.done = true
 	t.mu.Unlock()
 	defer t.cancel()
+	defer t.body.Close()
 
 	tmpPath := t.tmp.Name()
 	if err := t.tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		t.c.finishInflight(t.ref, t.dl, err)
-		return
+		return err
 	}
 	ext := ".bin"
 	if t.loc.Format != "" {
@@ -514,7 +560,7 @@ func (t *teeReader) finalize() {
 	if err := os.Rename(tmpPath, final); err != nil {
 		os.Remove(tmpPath)
 		t.c.finishInflight(t.ref, t.dl, err)
-		return
+		return err
 	}
 	now := time.Now().UnixMilli()
 	err := t.c.st.PutCacheRow(context.Background(), store.CacheRow{
@@ -522,12 +568,16 @@ func (t *teeReader) finalize() {
 		BitrateKbps:    t.loc.BitrateKbps,
 		LastAccessedAt: now, CreatedAt: now,
 	})
+	if err != nil {
+		os.Remove(final)
+	}
 	t.c.finishInflight(t.ref, t.dl, err)
 	if err == nil {
 		log.Printf("[cache] %s: cached %d bytes -> %s", t.ref, size, final)
 		t.c.notifyReady(t.ref)
 		go t.c.evict()
 	}
+	return err
 }
 
 // Prefetch 后台预拉取（用于队列预解析）。错误静默——播放时还会重试。

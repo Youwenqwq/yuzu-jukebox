@@ -290,14 +290,20 @@ func (p *Provider) QRLoginStart(ctx context.Context) (key, qrurl string, err err
 // ok 时凭据已被提取、校验并热生效。
 func (p *Provider) QRLoginPoll(ctx context.Context, key string) (string, string, error) {
 	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	// /login/qr/check 的业务 code（800/801/802/803）本身就是轮询状态，
+	// 不能走 get 的顶层 code==200 校验，按 /login/status 同款方式自行解析原始 body。
+	body, err := p.doGet(ctx, p.client, "/login/qr/check",
+		url.Values{"key": {key}, "timestamp": {ts}, "noCookie": {"true"}}, "")
+	if err != nil {
+		return "", "", err
+	}
 	var resp struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Cookie  string `json:"cookie"`
 	}
-	if err := p.get(ctx, "/login/qr/check",
-		url.Values{"key": {key}, "timestamp": {ts}, "noCookie": {"true"}}, "", &resp); err != nil {
-		return "", "", err
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", "", fmt.Errorf("ncm api /login/qr/check: decode: %w", err)
 	}
 	switch resp.Code {
 	case QRStatusExpired:

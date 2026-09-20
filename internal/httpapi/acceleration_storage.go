@@ -26,6 +26,9 @@ func (s *Server) accelerationReserve(w http.ResponseWriter, r *http.Request) {
 	reservation, err := s.st.ReserveAccelerationStorage(r.Context(), r.PathValue("id"),
 		strings.TrimSpace(body.Owner), body.Locator, body.SizeBytes, time.Now().UnixMilli())
 	switch {
+	case errors.Is(err, store.ErrDistributionObjectTooLarge):
+		writeErr(w, http.StatusRequestEntityTooLarge, "object_too_large", "object exceeds acceleration max_object_bytes")
+		return
 	case errors.Is(err, store.ErrAccelerationStorageFull):
 		writeErr(w, http.StatusInsufficientStorage, "acceleration_storage_full", "acceleration storage budget exceeded")
 		return
@@ -195,21 +198,16 @@ func (s *Server) accelerationDeletionFail(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var body struct {
-		Owner             string `json:"owner"`
-		Error             string `json:"error"`
-		RetryAfterSeconds int    `json:"retry_after_seconds"`
+		Owner string `json:"owner"`
+		Error string `json:"error"`
 	}
 	if !decodeDistributionJSON(w, r, &body) {
-		return
-	}
-	if body.RetryAfterSeconds < 0 || body.RetryAfterSeconds > 3600 {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid retry_after_seconds")
 		return
 	}
 	now := time.Now().UnixMilli()
 	if err := s.st.FailAccelerationDeletion(r.Context(), acceleration.ID,
 		r.PathValue("id"), strings.TrimSpace(body.Owner), body.Error,
-		now+int64(body.RetryAfterSeconds)*1000, now); err != nil {
+		now); err != nil {
 		if errors.Is(err, store.ErrStorageDeletionInvalid) {
 			writeErr(w, http.StatusConflict, "deletion_invalid", err.Error())
 		} else {

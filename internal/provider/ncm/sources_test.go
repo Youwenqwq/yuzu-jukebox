@@ -127,6 +127,73 @@ func TestSimilarQueriesOnceAndLimits(t *testing.T) {
 	}
 }
 
+func TestHeartSourceUsesNestedLoginAccount(t *testing.T) {
+	for _, login := range []struct {
+		name string
+		body string
+	}{
+		{"account", `{"data":{"code":200,"account":{"id":123},"profile":null}}`},
+		{"profile", `{"data":{"code":200,"account":null,"profile":{"userId":123}}}`},
+	} {
+		t.Run(login.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/login/status":
+					_, _ = w.Write([]byte(login.body))
+				case "/user/playlist":
+					if r.URL.Query().Get("uid") != "123" {
+						http.Error(w, "unknown account", http.StatusNotFound)
+						return
+					}
+					_, _ = w.Write([]byte(`{"code":200,"playlist":[{"id":456}]}`))
+				case "/playmode/intelligence/list":
+					if r.URL.Query().Get("pid") != "456" || r.URL.Query().Get("id") != "347230" {
+						http.Error(w, "unknown playlist or seed", http.StatusNotFound)
+						return
+					}
+					_, _ = w.Write([]byte(`{"code":200,"data":[{"songInfo":{"id":789,"name":"心动推荐","dt":180000,"ar":[{"name":"歌手"}]}}]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			p := &Provider{base: server.URL, client: server.Client()}
+			p.cookie.Store("MUSIC_U=test")
+
+			source, err := p.NewSource(context.Background(), "heart:347230")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tracks, exhausted, err := source.NextBatch(context.Background(), 1, "")
+			if err != nil || exhausted || len(tracks) != 1 {
+				t.Fatalf("heart batch = %v, exhausted=%v, err=%v", tracks, exhausted, err)
+			}
+			if tracks[0].Ref != "ncm:789" || tracks[0].Title != "心动推荐" {
+				t.Fatalf("heart recommendation = %+v", tracks[0])
+			}
+		})
+	}
+}
+
+func TestHeartSourceRejectsLoggedOutAccount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/login/status" {
+			_, _ = w.Write([]byte(`{"data":{"code":200,"account":null,"profile":null}}`))
+			return
+		}
+		t.Errorf("logged-out heart source requested %s", r.URL.Path)
+		_, _ = w.Write([]byte(`{"code":200,"playlist":[{"id":456}]}`))
+	}))
+	defer server.Close()
+	p := &Provider{base: server.URL, client: server.Client()}
+	p.cookie.Store("MUSIC_U=expired")
+	if _, err := p.NewSource(context.Background(), "heart:347230"); err == nil {
+		t.Fatal("heart source accepted a logged-out account")
+	}
+}
+
 func TestPlaylistSourceMaterializesAndDrains(t *testing.T) {
 	var detailRequests, trackRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

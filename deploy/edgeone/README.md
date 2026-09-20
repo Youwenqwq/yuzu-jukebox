@@ -5,6 +5,16 @@ acceleration. The public media data plane is the site-level Edge Function in
 [`../edgeone-site/stream.js`](../edgeone-site/stream.js); Makers no longer owns
 the public `/stream/v1` route.
 
+This optional integration is maintenance-only: correctness fixes remain in scope,
+but new EdgeOne features, chunked uploads, and dynamic bandwidth scheduling do not.
+The default object limit is 23 MiB; larger files bypass external acceleration and
+continue through the origin. This is independent of the local audio-cache limit.
+Back up the database before migration `0032`, and upgrade `yuzu-server` and
+`yuzu-edgeone` together: retry scheduling now belongs to Core, and the old
+`retry_after_seconds` request field is no longer accepted.
+See [the maintenance record](../../docs/edgeone-distribution.md) for retry budgets
+and operational recovery boundaries.
+
 ## Runtime topology
 
 ```text
@@ -40,11 +50,11 @@ origin to `yuzu-server`. LAN deployments do not need this module.
 ## Create the managed acceleration
 
 Acceleration configuration is persisted by Yuzu Core rather than read from
-`config.json`. Create it with a `media_admin` session:
+`config.json`. Create it with a `sys_admin` session:
 
 ```http
 POST /api/v1/accelerations
-Authorization: Bearer <media-admin-session>
+Authorization: Bearer <sys-admin-session>
 Content-Type: application/json
 
 {
@@ -53,7 +63,7 @@ Content-Type: application/json
   "kind": "edgeone",
   "control_base_url": "https://<makers-host>/yuzu-edge",
   "backend_base_url": "https://<makers-host>/yuzu-blob",
-  "publish_on_cache_ready": true,
+  "cache_mode": "prefetch",
   "lease_ttl_seconds": 600,
   "upload_rate_bytes_per_second": 187500,
   "max_object_bytes": 24117248,
@@ -176,7 +186,7 @@ Operational APIs:
 - `GET /api/v1/accelerations`
 - `GET /api/v1/accelerations/{id}`
 - `GET /api/v1/accelerations/{id}/status`
-- `GET /api/v1/accelerations/{id}/requests?state=queued|leased|retry_wait|cancel_requested|ready|canceled`
+- `GET /api/v1/accelerations/{id}/requests?state=queued|leased|retry_wait|cancel_requested|ready|evicted|canceled|failed|skipped`
 - `GET /api/v1/accelerations/{id}/requests/{track_ref}`
 - `DELETE /api/v1/accelerations/{id}/requests/{track_ref}`
 - `POST /api/v1/accelerations/{id}/inventory/refresh`

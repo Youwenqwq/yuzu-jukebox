@@ -17,6 +17,7 @@ type AccelerationInventoryScan struct {
 	State          string `json:"state"`
 	Attempts       int64  `json:"attempts"`
 	LeaseExpiresAt int64  `json:"lease_expires_at,omitempty"`
+	NextAttemptAt  int64  `json:"next_attempt_at,omitempty"`
 	ObservedAt     int64  `json:"observed_at,omitempty"`
 	LastError      string `json:"last_error,omitempty"`
 	RequestedAt    int64  `json:"requested_at"`
@@ -70,16 +71,22 @@ func (s *Store) ClaimAccelerationInventoryScan(
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `UPDATE acceleration_inventory_scans SET
-		state = 'queued', owner = '', lease_expires_at = 0, observed_at = 0,
+		state = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'queued' END,
+		owner = '', lease_expires_at = 0, observed_at = 0,
+		next_attempt_at = CASE WHEN attempts >= 5 THEN 0 ELSE
+		 ? + MIN(3600000, 60000 * (1 << MIN(MAX(attempts - 1, 0), 6))) END,
 		last_error = 'inventory lease expired', updated_at = ?
 		WHERE acceleration_id = ? AND state = 'leased' AND lease_expires_at <= ?`,
-		now, accelerationID, now); err != nil {
+		now, now, accelerationID, now); err != nil {
 		return AccelerationInventoryScan{}, err
 	}
 	var id string
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM acceleration_inventory_scans
-		WHERE acceleration_id = ? AND state = 'queued'
-		ORDER BY requested_at, id LIMIT 1`, accelerationID).Scan(&id); err != nil {
+		WHERE acceleration_id = ? AND state = 'queued' AND attempts < 5 AND next_attempt_at <= ?
+		ORDER BY requested_at, id LIMIT 1`, accelerationID, now).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AccelerationInventoryScan{}, commitNoDistributionWork(tx)
+		}
 		return AccelerationInventoryScan{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM acceleration_inventory_snapshots
@@ -89,7 +96,7 @@ func (s *Store) ClaimAccelerationInventoryScan(
 	expiresAt := now + ttl.Milliseconds()
 	if _, err := tx.ExecContext(ctx, `UPDATE acceleration_inventory_scans SET
 		state = 'leased', owner = ?, attempts = attempts + 1,
-		lease_expires_at = ?, observed_at = 0, last_error = '',
+		lease_expires_at = ?, next_attempt_at = 0, observed_at = 0, last_error = '',
 		started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END, updated_at = ?
 		WHERE id = ?`, owner, expiresAt, now, now, id); err != nil {
 		return AccelerationInventoryScan{}, err
@@ -133,7 +140,7 @@ func (s *Store) AppendClaimedAccelerationInventory(
 		return nil
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE acceleration_inventory_scans SET
-		state = 'completed', owner = '', lease_expires_at = 0,
+		state = 'completed', owner = '', lease_expires_at = 0, next_attempt_at = 0,
 		completed_at = ?, updated_at = ?, last_error = ''
 		WHERE id = ? AND state = 'leased'`, now, now, scanID)
 	if err != nil {
@@ -164,10 +171,14 @@ func (s *Store) FailAccelerationInventoryScan(
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE acceleration_inventory_scans SET
-		state = 'failed', owner = '', lease_expires_at = 0,
-		last_error = ?, completed_at = ?, updated_at = ?
-		WHERE id = ? AND acceleration_id = ? AND state = 'leased' AND owner = ?`,
-		message, now, now, scanID, accelerationID, owner)
+		state = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'queued' END,
+		owner = '', lease_expires_at = 0,
+		next_attempt_at = CASE WHEN attempts >= 5 THEN 0 ELSE
+		 ? + MIN(3600000, 60000 * (1 << MIN(MAX(attempts - 1, 0), 6))) END,
+		last_error = ?, completed_at = CASE WHEN attempts >= 5 THEN ? ELSE 0 END, updated_at = ?
+		WHERE id = ? AND acceleration_id = ? AND state = 'leased' AND owner = ?
+		AND lease_expires_at > ?`,
+		now, message, now, now, scanID, accelerationID, owner, now)
 	if err != nil {
 		return err
 	}
@@ -197,11 +208,11 @@ func (s *Store) GetAccelerationInventoryScan(
 ) (AccelerationInventoryScan, error) {
 	var scan AccelerationInventoryScan
 	err := s.db.QueryRowContext(ctx, `SELECT id, acceleration_id, owner, state,
-		attempts, lease_expires_at, observed_at, last_error, requested_at,
+		attempts, lease_expires_at, next_attempt_at, observed_at, last_error, requested_at,
 		started_at, completed_at, updated_at FROM acceleration_inventory_scans
 		WHERE acceleration_id = ? AND id = ?`, accelerationID, scanID).Scan(
 		&scan.ID, &scan.AccelerationID, &scan.Owner, &scan.State, &scan.Attempts,
-		&scan.LeaseExpiresAt, &scan.ObservedAt, &scan.LastError, &scan.RequestedAt,
+		&scan.LeaseExpiresAt, &scan.NextAttemptAt, &scan.ObservedAt, &scan.LastError, &scan.RequestedAt,
 		&scan.StartedAt, &scan.CompletedAt, &scan.UpdatedAt,
 	)
 	return scan, err
@@ -213,11 +224,11 @@ func (s *Store) LatestAccelerationInventoryScan(
 ) (AccelerationInventoryScan, error) {
 	var scan AccelerationInventoryScan
 	err := s.db.QueryRowContext(ctx, `SELECT id, acceleration_id, owner, state,
-		attempts, lease_expires_at, observed_at, last_error, requested_at,
+		attempts, lease_expires_at, next_attempt_at, observed_at, last_error, requested_at,
 		started_at, completed_at, updated_at FROM acceleration_inventory_scans
 		WHERE acceleration_id = ? ORDER BY requested_at DESC, id DESC LIMIT 1`,
 		accelerationID).Scan(&scan.ID, &scan.AccelerationID, &scan.Owner, &scan.State,
-		&scan.Attempts, &scan.LeaseExpiresAt, &scan.ObservedAt, &scan.LastError,
+		&scan.Attempts, &scan.LeaseExpiresAt, &scan.NextAttemptAt, &scan.ObservedAt, &scan.LastError,
 		&scan.RequestedAt, &scan.StartedAt, &scan.CompletedAt, &scan.UpdatedAt)
 	return scan, err
 }
@@ -228,11 +239,11 @@ func (s *Store) activeAccelerationInventoryScan(
 ) (AccelerationInventoryScan, error) {
 	var scan AccelerationInventoryScan
 	err := s.db.QueryRowContext(ctx, `SELECT id, acceleration_id, owner, state,
-		attempts, lease_expires_at, observed_at, last_error, requested_at,
+		attempts, lease_expires_at, next_attempt_at, observed_at, last_error, requested_at,
 		started_at, completed_at, updated_at FROM acceleration_inventory_scans
 		WHERE acceleration_id = ? AND state IN ('queued', 'leased') LIMIT 1`,
 		accelerationID).Scan(&scan.ID, &scan.AccelerationID, &scan.Owner, &scan.State,
-		&scan.Attempts, &scan.LeaseExpiresAt, &scan.ObservedAt, &scan.LastError,
+		&scan.Attempts, &scan.LeaseExpiresAt, &scan.NextAttemptAt, &scan.ObservedAt, &scan.LastError,
 		&scan.RequestedAt, &scan.StartedAt, &scan.CompletedAt, &scan.UpdatedAt)
 	return scan, err
 }
@@ -246,6 +257,9 @@ func (s *Store) ScheduleDueAccelerationInventoryScans(
 		LEFT JOIN acceleration_storage_status storage
 		 ON storage.acceleration_id = acceleration.id
 		WHERE acceleration.enabled = 1
+		 AND COALESCE((SELECT history.state FROM acceleration_inventory_scans history
+		  WHERE history.acceleration_id = acceleration.id
+		  ORDER BY history.requested_at DESC, history.id DESC LIMIT 1), '') <> 'failed'
 		 AND NOT EXISTS (SELECT 1 FROM acceleration_inventory_scans active
 		  WHERE active.acceleration_id = acceleration.id
 		  AND active.state IN ('queued', 'leased'))

@@ -3,6 +3,26 @@
 本文描述公网部署时可选的 EdgeOne 媒体分发模块。它不是 `/stream/v1`
 的 v2，也不是所有部署的必选依赖。
 
+## 维护策略与修复记录（2026-09-07）
+
+EdgeOne 外部加速停止新功能开发，仅维护已有完整对象分发与修复 Bug。Yuzu 优先服务内网
+多播放端，少量公网播放优先使用源站直出；新建 acceleration 默认停用，不自动修改已有部署。
+不再开发分块、大文件加速、渐进发布或额外 CDN 优化。
+
+- Publisher 空闲领取任务不再探测云后端。Core 对启用资源每 5 分钟探测 control/backend；
+  连续失败按 10/20/40/60 分钟退避，最多 1 小时，成功恢复正常周期；停用资源不周期探测。
+- 发布失败和 lease 过期共享持久尝试预算：前四次失败后等待 1/2/4/8 分钟，第五次进入
+  `failed`。成功清零连续计数但保留总 attempts；重复预取、introspect 和重启不复活终态。
+- 超过 `max_object_bytes`（默认 23 MiB）的文件进入 `skipped` / `object_too_large`，
+  不上传、不每周重试、不返回旧的超限 candidate；源站播放不受此加速限制影响。
+- 库存扫描与删除任务也最多尝试 5 次。失败库存不再被自动调度器重建，可人工 refresh；
+  删除耗尽后保留失败状态与容量记账，不谎报已释放空间。
+- migration 0032 收敛已有失败循环。Server 与 Publisher 需一同升级：重试时间由 Core
+  决定，内部 fail 请求不再接受 `retry_after_seconds`。当前没有发布终态或删除失败预算的
+  管理端重置接口；修复依赖后需要明确的运维处理，不能依靠重启自动恢复。
+
+以下能力实验是历史记录，不代表所有实验能力均已进入正式支持范围。
+
 ## 目标与边界
 
 - 局域网部署继续由 `yuzu-server` 直接提供 `/stream/v1/{ref}`，行为不变。
@@ -111,45 +131,28 @@ yuzu-edgeone adapter ──backend PUT URL ──presigned PUT──> EdgeOne Bl
 
 ```text
 media/{sha256}/object
-media/{sha256}/manifest.json
-media/{sha256}/chunks/000000
-media/{sha256}/chunks/000001
-...
 ```
 
-manifest 至少包含：
-
-```json
-{
-  "version": 1,
-  "size": 16777216,
-  "content_type": "audio/mpeg",
-  "etag": "content-version",
-  "layout": "object",
-  "chunk_size": 0,
-  "chunk_count": 0
-}
-```
+正式实现仅支持 `layout="object"` 的完整对象。内容版本、字节数、类型和 ETag 由
+Core candidate 记录；不发布 manifest 或分块对象。
 
 使用内容 hash 可以避免 Provider ID 复用、音质配置变化和对象覆盖造成的缓存串流。
 
-## 两种媒体布局
+## 媒体大小策略
 
 ### 完整对象（首选简单路径）
 
-- 已知完整文件不超过约 24 MiB 时，上传一个 Blob 对象，给 25 MB 平台上限留余量。
+- 默认只上传不超过 23 MiB 的完整对象，给 25 MB 平台上限留余量。
 - Edge Function 将客户端 Range 原样传给短期 GET URL，并流式转发响应。
 - Blob/COS 原生完成 Range；不需要 Functions 拼接，内存占用和故障面最小。
-- 若采用 302 直接跳转，效率更高，但后续 Range 会绕过 Yuzu ticket introspection，可能弱化
-  “切歌立即失效”语义。默认应使用 Edge Function 代理；重定向只作为显式实验开关。
+- Edge Function 代理保留每次请求的 Yuzu ticket introspection；不提供绕过这条鉴权路径的
+  302 优化开关。
 
-### 分块对象（大文件与渐进发布）
+### 大文件（源站回退）
 
-- 推荐初始 chunk 大小 1–2 MiB；即使走 Cloud SDK fallback，每次被完整聚合的对象也很小；
-  同时能把 seek 的无效读取控制在小范围。
-- Edge Function 解析单 Range，只请求相交 chunk；首尾切片后按顺序 `pipeTo`。
-- Cloud Function signer 应一次返回所需 chunk 的 URL，避免每块一次函数调用。
-- 第一阶段只在整个 manifest ready 后发布；后续再考虑“连续前缀已就绪”的渐进播放。
+大小超过加速对象上限时持久标记为 `skipped`，继续走现有源站 `/stream/v1`。
+已知本地缓存、上传媒体或 candidate 的大小可提前拒绝；未知大小在 Publisher 检测后
+上报结构化 `object_too_large`，而不是无限重试。不会为绕过 Blob 限制而开发分块。
 
 ## 冷启动与带宽策略
 
@@ -157,7 +160,7 @@ manifest 至少包含：
 
 - 当前曲目没有 ready candidate：立即走现有直出，同时后台发布。
 - 下一曲已由 Room 预取：本地 cache 完成后优先上传，争取在切歌前 ready。
-- adapter 当前默认固定限速 1.5 Mbps；根据当前直出连接数动态降低或暂停留待 P3。
+- adapter 按资源配置固定限速，默认 1.5 Mbps；不再扩展动态带宽调度。
 - 同一内容只允许一个 publish lease；其他任务等待 candidate，避免重复上传。
 - 发布失败不影响播放，只记录状态并继续走源站。
 
@@ -166,15 +169,14 @@ manifest 至少包含：
 
 ## Cache API 的位置
 
-第一阶段不要把 Edge Cache 设为正确性依赖：
+Edge Cache 不是正确性依赖：
 
 - Blob 域名已经提供边缘接入，MISS 也不会消耗 Yuzu 带宽；
 - Cache API 内容只在当前数据节点有效，不会自动复制；
 - `cache.put` 不接受 `206`，而媒体客户端经常从 Range 请求开始；
 - 为填满整轨缓存而额外请求一个完整 `200` 会增加 Blob 流量和复杂度。
 
-可在第二阶段增加稳定 synthetic key 的 chunk cache。只缓存完整 chunk 的 `200`，后续由
-`cache.match(Request{Range})` 自动裁剪；不要使用带临时签名参数的 URL 作为 cache key。
+不再开发额外的 chunk cache 或整轨预填充路径。
 
 ## 安全要求
 
@@ -185,14 +187,14 @@ manifest 至少包含：
 - GET signing 放在独立适配层，启动时做 SDK 兼容检查；失败时自动切回源站。
 - candidate 必须携带不可变内容版本，防止旧 URL/旧缓存映射到新媒体。
 
-## 实现 Todo
+## 历史实施记录与部署验证清单
 
 ### P0：部署级能力门槛
 
 - [x] 部署远端项目，验证 Edge Function 能 fetch 同项目 Cloud Function。
 - [x] 验证 Edge Function fetch 短期 Blob GET URL，并无损传输 16 MiB 完整响应与 Range。
 - [ ] 使用真实 `<audio>`/MPV 验证播放、seek、断线续传和取消请求。
-- [ ] 验证多 Range，并选择拒绝或明确实现 multipart 响应。
+- [ ] 验证多 Range 的现有行为，不增加 multipart 分块实现。
 - [x] 测得 Cloud Function 同步响应上限为 6 MiB。
 - [ ] 确认 Cloud Function 计费，并确认官方是否计划提供 `createDownloadUrl`。
 - [x] 验证预签名 PUT 携带长期 `Cache-Control` 与 Content-Type。
@@ -211,7 +213,7 @@ manifest 至少包含：
 
 ### P1 生产化：托管资源、观测与主域名接入（代码已实现，待主域名部署回归）
 
-- [x] acceleration 改为 `media_admin` 可创建、停用和管理的持久资源，移除 Server JSON 配置。
+- [x] acceleration 为持久资源；`sys_admin` 创建、停用和管理，`media_admin` 可查询；移除 Server JSON 配置。
 - [x] publisher/delivery/backend 使用独立凭据；出站 backend secret 经 `secret_key` AES-GCM 加密。
 - [x] adapter 从 Core 读取 backend URL、token、限速、对象上限和 lease policy。
 - [x] 增加 publisher heartbeat、下载/上传字节、phase、错误、attempt history、有界续租，以及管理端可观测的 queued/retry/cancel 状态。
@@ -230,18 +232,10 @@ manifest 至少包含：
 - [x] readiness 要求容量预算和 `storage.inventory`/`object.delete` capability；管理 status 暴露 `observed_at`、stale 与容量压力。
 - [x] adapter 重启会释放持久化的 live lease；同 locator 预留串行化，失败/中断 inventory 不覆盖上一完整快照。
 
-### P2B：分块与内容变化
+### 已停止的新功能计划
 
-- [ ] 实现 1–2 MiB byte-exact chunks、manifest、批量 GET signing 和顺序 `pipeTo`。
-- [ ] 对缺块、manifest 不一致、对象被回收返回可观测错误并回退源站。
-- [ ] 检测同一 `track_ref` 的内容版本变化，原子切换 candidate 并回收旧内容对象。
-- [ ] 评估渐进发布，只有连续前缀与请求 Range 均已 ready 时才走 Blob。
-
-### P3：可选优化
-
-- [ ] 在真实数据证明有收益后加入节点级 chunk Cache API。
-- [ ] 根据当前直出连接数与 Room 预取窗口动态调整上传限速。
-- [ ] 评估对 ready 的完整对象采用短 TTL 302；默认仍保留代理以维持撤销语义。
+不再推进分块/manifest、渐进发布、内容版本自动切换、节点级 chunk Cache API、
+动态上传限速或 302 分发优化。已有完整对象分发的正确性、安全性与成本控制仍属于维护范围。
 
 ## Go/No-Go
 

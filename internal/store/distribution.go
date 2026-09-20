@@ -14,6 +14,7 @@ var (
 	ErrDistributionProgressStale         = errors.New("distribution progress is stale")
 	ErrDistributionCancellationRequested = errors.New("distribution cancellation requested")
 	ErrDistributionRequestReady          = errors.New("distribution request is ready")
+	ErrDistributionObjectTooLarge        = errors.New("object exceeds acceleration max_object_bytes")
 )
 
 type DistributionLease struct {
@@ -48,25 +49,29 @@ type DistributionStatus struct {
 	Ready           int64 `json:"ready"`
 	Evicted         int64 `json:"evicted"`
 	Canceled        int64 `json:"canceled"`
+	Failed          int64 `json:"failed"`
+	Skipped         int64 `json:"skipped"`
 	OldestQueuedAt  int64 `json:"oldest_queued_at,omitempty"`
 }
 
 type DistributionRequestView struct {
-	AccelerationID    string                 `json:"acceleration_id"`
-	TrackRef          string                 `json:"track_ref"`
-	State             string                 `json:"state"`
-	PendingReason     string                 `json:"pending_reason,omitempty"`
-	RequestedAt       int64                  `json:"requested_at"`
-	UpdatedAt         int64                  `json:"updated_at"`
-	NextAttemptAt     int64                  `json:"next_attempt_at"`
-	Attempts          int64                  `json:"attempts"`
-	LastError         string                 `json:"last_error,omitempty"`
-	CancelRequestedAt int64                  `json:"cancel_requested_at,omitempty"`
-	CanceledAt        int64                  `json:"canceled_at,omitempty"`
-	EvictedAt         int64                  `json:"evicted_at,omitempty"`
-	Lease             *DistributionLease     `json:"lease,omitempty"`
-	Candidate         *DistributionCandidate `json:"candidate,omitempty"`
-	Progress          *DistributionAttempt   `json:"progress,omitempty"`
+	AccelerationID      string                 `json:"acceleration_id"`
+	TrackRef            string                 `json:"track_ref"`
+	State               string                 `json:"state"`
+	PendingReason       string                 `json:"pending_reason,omitempty"`
+	RequestedAt         int64                  `json:"requested_at"`
+	UpdatedAt           int64                  `json:"updated_at"`
+	NextAttemptAt       int64                  `json:"next_attempt_at"`
+	Attempts            int64                  `json:"attempts"`
+	LastError           string                 `json:"last_error,omitempty"`
+	ErrorCode           string                 `json:"error_code,omitempty"`
+	ConsecutiveAttempts int64                  `json:"consecutive_attempts"`
+	CancelRequestedAt   int64                  `json:"cancel_requested_at,omitempty"`
+	CanceledAt          int64                  `json:"canceled_at,omitempty"`
+	EvictedAt           int64                  `json:"evicted_at,omitempty"`
+	Lease               *DistributionLease     `json:"lease,omitempty"`
+	Candidate           *DistributionCandidate `json:"candidate,omitempty"`
+	Progress            *DistributionAttempt   `json:"progress,omitempty"`
 }
 
 // RequestDistribution records demand for a track. Repeated cache notifications
@@ -94,10 +99,17 @@ func (s *Store) RequestDistribution(ctx context.Context, accelerationID, trackRe
 			last_error = CASE WHEN canceled_at > 0 OR evicted_at > 0 THEN '' ELSE last_error END,
 			cancel_requested_at = CASE WHEN canceled_at > 0 THEN 0 ELSE cancel_requested_at END,
 			canceled_at = 0, evicted_at = 0
-			WHERE acceleration_id = ? AND track_ref = ?`, now, accelerationID, trackRef)
-		return err
+			WHERE acceleration_id = ? AND track_ref = ? AND terminal_state = ''`, now, accelerationID, trackRef)
+		if err != nil {
+			return err
+		}
 	}
-	return s.AddDistributionMetric(ctx, accelerationID, "requests", 1, now)
+	if inserted > 0 {
+		if err := s.AddDistributionMetric(ctx, accelerationID, "requests", 1, now); err != nil {
+			return err
+		}
+	}
+	return skipOversizedDistribution(ctx, s.db, accelerationID, trackRef, now)
 }
 
 func (s *Store) GetDistributionCandidate(ctx context.Context, accelerationID, trackRef string) (DistributionCandidate, error) {
@@ -105,7 +117,11 @@ func (s *Store) GetDistributionCandidate(ctx context.Context, accelerationID, tr
 	err := s.db.QueryRowContext(ctx, `SELECT acceleration_id, track_ref,
 		content_version, locator, layout, size_bytes, content_type, etag,
 		created_at, updated_at FROM distribution_candidates
-		WHERE acceleration_id = ? AND track_ref = ?`, accelerationID, trackRef).Scan(
+		WHERE acceleration_id = ? AND track_ref = ?
+		AND size_bytes <= (SELECT max_object_bytes FROM accelerations WHERE id = acceleration_id)
+		AND NOT EXISTS (SELECT 1 FROM distribution_requests r
+		 WHERE r.acceleration_id = distribution_candidates.acceleration_id
+		 AND r.track_ref = distribution_candidates.track_ref AND r.terminal_state <> '')`, accelerationID, trackRef).Scan(
 		&candidate.AccelerationID, &candidate.TrackRef, &candidate.ContentVersion,
 		&candidate.Locator, &candidate.Layout, &candidate.SizeBytes,
 		&candidate.ContentType, &candidate.ETag, &candidate.CreatedAt,
@@ -126,6 +142,9 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 	defer tx.Rollback()
+	if err := skipOversizedDistribution(ctx, tx, accelerationID, "", now); err != nil {
+		return DistributionLease{}, err
+	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_attempts SET
 		status = 'canceled', last_error = 'canceled by administrator',
@@ -150,6 +169,18 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
+		last_error = 'lease expired', error_code = 'lease_expired', updated_at = ?,
+		terminal_state = CASE WHEN consecutive_attempts >= 5 THEN 'failed' ELSE '' END,
+		next_attempt_at = CASE WHEN consecutive_attempts >= 5 THEN 0
+		 ELSE ? + MIN(3600000, 60000 * (1 << MIN(MAX(consecutive_attempts - 1, 0), 6))) END
+		WHERE cancel_requested_at = 0 AND terminal_state = '' AND EXISTS
+		(SELECT 1 FROM distribution_leases lease
+		 WHERE lease.acceleration_id = distribution_requests.acceleration_id
+		 AND lease.track_ref = distribution_requests.track_ref AND lease.expires_at <= ?)`,
+		now, now, now); err != nil {
+		return DistributionLease{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
 		canceled_at = ?, updated_at = ? WHERE cancel_requested_at > 0 AND EXISTS
 		(SELECT 1 FROM distribution_leases lease
 		 WHERE lease.acceleration_id = distribution_requests.acceleration_id
@@ -168,7 +199,7 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 	if blocked {
-		return DistributionLease{}, sql.ErrNoRows
+		return DistributionLease{}, commitNoDistributionWork(tx)
 	}
 
 	var trackRef string
@@ -182,11 +213,14 @@ func (s *Store) ClaimDistribution(
 		 AND lease.track_ref = request.track_ref
 		WHERE request.acceleration_id = ? AND request.next_attempt_at <= ?
 		 AND request.cancel_requested_at = 0 AND request.canceled_at = 0
-		 AND request.evicted_at = 0
+		 AND request.evicted_at = 0 AND request.terminal_state = ''
 		 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		ORDER BY CASE WHEN request.pinned_until > ? THEN 0 ELSE 1 END,
 		 request.requested_at, request.track_ref LIMIT 1`,
 		accelerationID, now, now).Scan(&trackRef)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DistributionLease{}, commitNoDistributionWork(tx)
+	}
 	if err != nil {
 		return DistributionLease{}, err
 	}
@@ -208,7 +242,7 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests
-		SET attempts = attempts + 1, updated_at = ?
+		SET attempts = attempts + 1, consecutive_attempts = consecutive_attempts + 1, updated_at = ?
 		WHERE acceleration_id = ? AND track_ref = ?`, now, accelerationID, trackRef); err != nil {
 		return DistributionLease{}, err
 	}
@@ -219,6 +253,38 @@ func (s *Store) ClaimDistribution(
 		return DistributionLease{}, err
 	}
 	return lease, nil
+}
+
+// Maintenance must survive an idle poll; rolling back here would retry expired
+// leases forever without ever recording their failure or their backoff.
+func commitNoDistributionWork(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return sql.ErrNoRows
+}
+
+type distributionExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func skipOversizedDistribution(ctx context.Context, db distributionExecer, accelerationID, trackRef string, now int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE distribution_requests SET
+		terminal_state = 'skipped', error_code = 'object_too_large',
+		last_error = 'object exceeds acceleration max_object_bytes',
+		next_attempt_at = 0, updated_at = ?
+		WHERE acceleration_id = ? AND terminal_state <> 'skipped' AND canceled_at = 0
+		AND (? = '' OR track_ref = ?)
+		AND NOT EXISTS (SELECT 1 FROM distribution_leases l
+		 WHERE l.acceleration_id = distribution_requests.acceleration_id
+		 AND l.track_ref = distribution_requests.track_ref)
+		AND MAX(
+		 COALESCE((SELECT size_bytes FROM media_cache WHERE track_ref = distribution_requests.track_ref), 0),
+		 COALESCE((SELECT size_bytes FROM media_files WHERE id = substr(distribution_requests.track_ref, 7) AND distribution_requests.track_ref LIKE 'local:%'), 0),
+		 COALESCE((SELECT size_bytes FROM distribution_candidates c WHERE c.acceleration_id = distribution_requests.acceleration_id AND c.track_ref = distribution_requests.track_ref), 0)
+		) > (SELECT max_object_bytes FROM accelerations WHERE id = distribution_requests.acceleration_id)`,
+		now, accelerationID, trackRef, trackRef)
+	return err
 }
 
 // storageBackpressureTx 报告资源是否正处于回收过程中：存在待物理删除的对象，且占用
@@ -442,6 +508,14 @@ func (s *Store) CompleteDistribution(
 	if candidate.Locator == "" || candidate.SizeBytes <= 0 {
 		return fmt.Errorf("%w: invalid candidate object", ErrDistributionLeaseInvalid)
 	}
+	var maxObjectBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT max_object_bytes FROM accelerations WHERE id = ?`,
+		lease.AccelerationID).Scan(&maxObjectBytes); err != nil {
+		return err
+	}
+	if candidate.SizeBytes > maxObjectBytes {
+		return ErrDistributionObjectTooLarge
+	}
 	var reservationSize int64
 	reservationErr := tx.QueryRowContext(ctx, `SELECT size_bytes
 		FROM acceleration_storage_reservations WHERE lease_id = ?
@@ -513,7 +587,8 @@ func (s *Store) CompleteDistribution(
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
-		last_error = '', next_attempt_at = 0, updated_at = ?
+		last_error = '', error_code = '', consecutive_attempts = 0, terminal_state = '',
+		next_attempt_at = 0, updated_at = ?
 		WHERE acceleration_id = ? AND track_ref = ?`, now,
 		lease.AccelerationID, lease.TrackRef); err != nil {
 		return err
@@ -535,8 +610,8 @@ func (s *Store) CompleteDistribution(
 
 func (s *Store) FailDistribution(
 	ctx context.Context,
-	leaseID, owner, message string,
-	now, nextAttemptAt int64,
+	leaseID, owner, message, errorCode string,
+	now int64,
 ) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -547,6 +622,24 @@ func (s *Store) FailDistribution(
 	if err != nil {
 		return err
 	}
+	if errorCode == "" {
+		errorCode = "publish_failed"
+	}
+	var attempts int64
+	if err := tx.QueryRowContext(ctx, `SELECT consecutive_attempts FROM distribution_requests
+		WHERE acceleration_id = ? AND track_ref = ?`, lease.AccelerationID, lease.TrackRef).Scan(&attempts); err != nil {
+		return err
+	}
+	terminal := ""
+	nextAttemptAt := now + distributionRetryDelay(attempts)
+	if errorCode == "object_too_large" {
+		terminal = "skipped"
+	} else if attempts >= 5 {
+		terminal = "failed"
+	}
+	if terminal != "" {
+		nextAttemptAt = 0
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_attempts SET
 		status = 'failed', last_error = ?, updated_at = ?, finished_at = ?
 		WHERE lease_id = ?`, message, now, now, leaseID); err != nil {
@@ -556,8 +649,8 @@ func (s *Store) FailDistribution(
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET
-		last_error = ?, next_attempt_at = ?, updated_at = ?
-		WHERE acceleration_id = ? AND track_ref = ?`, message, nextAttemptAt,
+		last_error = ?, error_code = ?, terminal_state = ?, next_attempt_at = ?, updated_at = ?
+		WHERE acceleration_id = ? AND track_ref = ?`, message, errorCode, terminal, nextAttemptAt,
 		now, lease.AccelerationID, lease.TrackRef); err != nil {
 		return err
 	}
@@ -565,6 +658,10 @@ func (s *Store) FailDistribution(
 		return err
 	}
 	return tx.Commit()
+}
+
+func distributionRetryDelay(attempts int64) int64 {
+	return min(int64(3_600_000), 60_000<<min(max(attempts-1, 0), 6))
 }
 
 func distributionLeaseForUpdate(
@@ -671,24 +768,29 @@ func (s *Store) DistributionMetricsSince(ctx context.Context, accelerationID str
 }
 
 func (s *Store) DistributionStatus(ctx context.Context, accelerationID string, now int64) (DistributionStatus, error) {
+	if err := skipOversizedDistribution(ctx, s.db, accelerationID, "", now); err != nil {
+		return DistributionStatus{}, err
+	}
 	var status DistributionStatus
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
-		COALESCE(SUM(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.canceled_at = 0 AND request.cancel_requested_at = 0
 		 AND request.evicted_at = 0 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at <= ? THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN request.cancel_requested_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.cancel_requested_at = 0
 		 AND request.canceled_at = 0 AND lease.id IS NOT NULL THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.canceled_at = 0 AND request.cancel_requested_at = 0
 		 AND request.evicted_at = 0 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at > ? THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN request.canceled_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.canceled_at = 0
 		 AND request.cancel_requested_at > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN request.canceled_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.canceled_at = 0
 		 AND candidate.track_ref IS NOT NULL THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN request.canceled_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.canceled_at = 0
 		 AND request.evicted_at > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN request.canceled_at > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(MIN(CASE WHEN request.canceled_at = 0 AND request.cancel_requested_at = 0
+		COALESCE(SUM(CASE WHEN request.terminal_state = '' AND request.canceled_at > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.terminal_state = 'failed' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request.terminal_state = 'skipped' THEN 1 ELSE 0 END), 0),
+		COALESCE(MIN(CASE WHEN request.terminal_state = '' AND request.canceled_at = 0 AND request.cancel_requested_at = 0
 		 AND request.evicted_at = 0 AND candidate.track_ref IS NULL AND lease.id IS NULL
 		 AND request.next_attempt_at <= ? THEN request.requested_at END), 0)
 		FROM distribution_requests AS request
@@ -701,7 +803,7 @@ func (s *Store) DistributionStatus(ctx context.Context, accelerationID string, n
 		WHERE request.acceleration_id = ?`, now, now, now, now, accelerationID).Scan(
 		&status.Requested, &status.Queued, &status.Leased, &status.RetryWait,
 		&status.CancelRequested, &status.Ready, &status.Evicted, &status.Canceled,
-		&status.OldestQueuedAt,
+		&status.Failed, &status.Skipped, &status.OldestQueuedAt,
 	)
 	return status, err
 }
@@ -765,9 +867,13 @@ func (s *Store) loadDistributionRequests(
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	if err := skipOversizedDistribution(ctx, s.db, accelerationID, trackRef, now); err != nil {
+		return nil, err
+	}
 	state = strings.TrimSpace(state)
 	query := `SELECT request.track_ref, request.requested_at, request.updated_at,
 		request.next_attempt_at, request.attempts, request.last_error,
+		request.terminal_state, request.error_code, request.consecutive_attempts,
 		request.cancel_requested_at, request.canceled_at, request.evicted_at,
 		lease.id, lease.owner, lease.expires_at, lease.created_at,
 		candidate.content_version, candidate.locator, candidate.layout,
@@ -795,6 +901,9 @@ func (s *Store) loadDistributionRequests(
 	}
 	switch state {
 	case "", "all":
+	case "failed", "skipped":
+		query += ` AND request.terminal_state = ?`
+		args = append(args, state)
 	case "queued":
 		query += ` AND request.canceled_at = 0 AND request.cancel_requested_at = 0
 		 AND request.evicted_at = 0
@@ -818,6 +927,9 @@ func (s *Store) loadDistributionRequests(
 	default:
 		return nil, fmt.Errorf("invalid distribution request state %q", state)
 	}
+	if state != "" && state != "all" && state != "failed" && state != "skipped" {
+		query += ` AND request.terminal_state = ''`
+	}
 	query += ` ORDER BY request.updated_at DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -836,8 +948,10 @@ func (s *Store) loadDistributionRequests(
 		var phase sql.NullString
 		var sourceBytes, uploadBytes, totalBytes, progressUpdated sql.NullInt64
 		var publisherOnline bool
+		var terminal string
 		if err := rows.Scan(&view.TrackRef, &view.RequestedAt, &view.UpdatedAt,
 			&view.NextAttemptAt, &view.Attempts, &view.LastError,
+			&terminal, &view.ErrorCode, &view.ConsecutiveAttempts,
 			&view.CancelRequestedAt, &view.CanceledAt, &view.EvictedAt,
 			&leaseID, &owner, &leaseExpires, &leaseCreated,
 			&contentVersion, &locator, &layout, &sizeBytes, &contentType, &etag,
@@ -846,6 +960,9 @@ func (s *Store) loadDistributionRequests(
 			return nil, err
 		}
 		switch {
+		case terminal != "":
+			view.State = terminal
+			view.PendingReason = view.ErrorCode
 		case view.CanceledAt > 0:
 			view.State = "canceled"
 		case contentVersion.Valid:

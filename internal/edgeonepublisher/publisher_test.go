@@ -122,8 +122,8 @@ func TestPublisherRecoversInterruptedLease(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if fake.failRetrySeconds != 0 {
-		t.Fatalf("retry seconds = %d, want immediate retry", fake.failRetrySeconds)
+	if fake.failErrorCode != "publish_failed" {
+		t.Fatalf("failure code = %q", fake.failErrorCode)
 	}
 }
 
@@ -144,8 +144,8 @@ func TestPublisherRejectsOversizedObject(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if fake.failRetrySeconds != int((7*24*time.Hour)/time.Second) {
-		t.Fatalf("retry seconds = %d", fake.failRetrySeconds)
+	if fake.failErrorCode != "object_too_large" {
+		t.Fatalf("failure code = %q", fake.failErrorCode)
 	}
 	if len(fake.uploaded) != 0 {
 		t.Fatal("oversized object was uploaded")
@@ -216,7 +216,7 @@ type publisherTransport struct {
 	uploadContentType  string
 	uploadCacheControl string
 	completed          Candidate
-	failRetrySeconds   int
+	failErrorCode      string
 	maxObjectBytes     int64
 	managedConfigs     int
 	inventoryObjects   int
@@ -227,9 +227,27 @@ type publisherTransport struct {
 	completedDeletions int
 	cancelRequested    bool
 	cancelConfirmed    bool
+	idle               bool
+	disabled           bool
+	backendCalls       int
+	healthCalls        int
+	backendFailure     bool
+	unknownLength      bool
 }
 
 func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.Host == "backend.test" {
+		f.mu.Lock()
+		f.backendCalls++
+		if strings.HasSuffix(request.URL.Path, "/health") {
+			f.healthCalls++
+		}
+		failure := f.backendFailure
+		f.mu.Unlock()
+		if failure {
+			return jsonHTTPResponse(request, http.StatusServiceUnavailable, map[string]any{"error": "unavailable"})
+		}
+	}
 	switch {
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/publisher/config":
 		f.mu.Lock()
@@ -240,7 +258,7 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 			maxObjectBytes = 1 << 20
 		}
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{
-			"acceleration_id": "edgeone-main", "enabled": true, "kind": "edgeone",
+			"acceleration_id": "edgeone-main", "enabled": !f.disabled, "kind": "edgeone",
 			"backend_base_url": "https://backend.test/yuzu-blob",
 			"backend_token":    "backend-token", "lease_ttl_seconds": 600,
 			"upload_rate_bytes_per_second": 0, "max_object_bytes": maxObjectBytes,
@@ -311,6 +329,9 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 		f.mu.Unlock()
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"ok": true})
 	case request.URL.Host == "core.test" && request.URL.Path == "/internal/v1/accelerations/leases":
+		if f.idle {
+			return jsonHTTPResponse(request, http.StatusNoContent, nil)
+		}
 		return jsonHTTPResponse(request, http.StatusCreated, map[string]any{
 			"lease": map[string]any{
 				"id": "lease-1", "acceleration_id": "edgeone-main", "track_ref": "local:song",
@@ -331,6 +352,10 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 			},
 		})
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/source"):
+		length := int64(len(f.content))
+		if f.unknownLength {
+			length = -1
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header: http.Header{
@@ -338,7 +363,7 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 				"Content-Length": []string{strconv.Itoa(len(f.content))},
 			},
 			Body:          io.NopCloser(bytes.NewReader(f.content)),
-			ContentLength: int64(len(f.content)), Request: request,
+			ContentLength: length, Request: request,
 		}, nil
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/progress"):
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"lease": map[string]any{"id": "lease-1"}})
@@ -416,14 +441,19 @@ func (f *publisherTransport) RoundTrip(request *http.Request) (*http.Response, e
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"ready": true})
 	case request.URL.Host == "core.test" && strings.HasSuffix(request.URL.Path, "/fail"):
 		var body struct {
-			RetryAfterSeconds int `json:"retry_after_seconds"`
+			ErrorCode string `json:"error_code"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			return nil, err
 		}
 		f.mu.Lock()
-		f.failRetrySeconds = body.RetryAfterSeconds
+		f.failErrorCode = body.ErrorCode
+		canceled := f.cancelRequested
 		f.mu.Unlock()
+		if canceled {
+			return jsonHTTPResponse(request, http.StatusConflict,
+				map[string]any{"error": map[string]any{"code": "cancellation_requested", "message": "canceled"}})
+		}
 		return jsonHTTPResponse(request, http.StatusOK, map[string]any{"failed": true})
 	default:
 		return jsonHTTPResponse(request, http.StatusNotFound, map[string]any{"path": request.URL.String()})

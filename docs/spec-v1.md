@@ -1091,8 +1091,9 @@ actor resolve 与绑定码兑换使用 Integration token；绑定码签发使用
 
 ### 6.5 外部加速资源
 
-Acceleration 是由 `media_admin` 管理的持久机器资源，不从 `config.json` 读取。当前唯一
-`kind` 为 `edgeone`，但 Core 的资源、凭据、容量和生命周期合同使用供应商无关命名。
+Acceleration 是持久机器资源，不从 `config.json` 读取。`media_admin` 可查询资源，
+创建、修改、删除及凭据管理要求 `sys_admin`。当前唯一 `kind` 为 `edgeone`，
+已停止新功能开发，仅维护完整对象分发；Core 合同使用供应商无关命名。
 资源创建时保持 disabled，并一次性返回 publisher、delivery 与 backend 三种 plaintext
 credential；后续查询只返回 credential-configured/pending 布尔值。
 
@@ -1104,7 +1105,7 @@ credential；后续查询只返回 credential-configured/pending 布尔值。
 | `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy、水位或 enabled；启用前强制 readiness |
 | `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且不再拥有媒体或进行中工作的资源 |
 | `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、当前 inventory scan、累计与最近 24 小时指标 |
-| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued\|leased\|retry_wait\|cancel_requested\|ready\|evicted\|canceled` 请求；queued 返回 `pending_reason` |
+| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued\|leased\|retry_wait\|cancel_requested\|ready\|evicted\|canceled\|failed\|skipped` 请求；返回 `pending_reason`、`error_code` 与 `consecutive_attempts` |
 | `GET /api/v1/accelerations/{id}/requests/{track_ref...}` | 查询单个请求的 lease、phase、进度、重试和取消状态 |
 | `DELETE /api/v1/accelerations/{id}/requests/{track_ref...}` | 幂等取消；未认领任务立即 canceled，live lease 进入 cancel_requested |
 | `POST /api/v1/accelerations/{id}/inventory/refresh` | HTTP 202；创建或复用当前完整 inventory scan |
@@ -1119,6 +1120,28 @@ credential；后续查询只返回 credential-configured/pending 布尔值。
 `storage_low_watermark_percent`、`inventory_interval_seconds` 与
 `inventory_stale_after_seconds`。默认容量是 850 MiB，高/低水位是 95%/85%；
 inventory 默认每 900 秒调度，超过 1800 秒没有完整观测即标记 stale。
+
+加速 `max_object_bytes` 默认 23 MiB，与本地 `cache.max_object_bytes`（默认 512 MiB）
+独立。已知超限文件直接持久 `skipped`，`error_code="object_too_large"`，
+`next_attempt_at=0`；未知大小由 Publisher 检测后报告同一策略结果。超限 candidate 不再
+返回给播放；完整对象加速不可用时走源站，不开发分块支持。
+
+Publisher 不在每轮领取任务前探测云后端。Core 对 enabled 资源每 5 分钟探测一次两个端点，
+连续失败按 10/20/40/60 分钟退避（最多 1 小时），成功恢复 5 分钟；disabled 不周期探测。
+停用不等于完全没有云调用：站点 Edge Function 的播放 introspect/event 仍会访问控制桥，
+完全退出旁路需同时停用该站点触发规则。
+
+`POST /internal/v1/accelerations/leases/{id}/fail` 接受 `owner`、`error`、`error_code`；
+`error_code` 为 `publish_failed`（省略时同义）或 `object_too_large`，不按错误文案分类。
+fail 接口不再接受 `retry_after_seconds`，重试时间由 Core 决定：
+每次领取递增总 `attempts` 与 `consecutive_attempts`；普通失败及 lease 过期后按
+1/2/4/8 分钟退避，第五次失败进入 `failed` 终态。成功清零连续计数但保留总计数。
+`failed`/`skipped` 不计入 queued/retry_wait/ready，重复需求与进程重启不清除终态。
+当前没有发布终态的管理端重置接口。
+
+migration 0032 依据最近成功之后的 attempt 历史回填连续预算，无成功历史则沿用总
+attempts；不抢占活跃 lease，已有耗尽预算且无 lease 的请求升级为 failed。
+Server/Publisher 必须同步升级到新 fail 协议。
 
 加速资源是一个有自己预算的缓存，不是本地缓存的镜像。`cache_mode` 决定它的需求集合
 从哪里来：
@@ -1168,7 +1191,8 @@ config 可向已认证 adapter 返回解密后的 backend token、lease TTL、�
 未过期 reservation；超过高水位返回 507 `acceleration_storage_full`，同时按 LRU 使旧
 candidate 失效并创建删除 job。adapter 通过
 `POST /internal/v1/accelerations/deletions/claim` 领取 job，调用供应商 API 删除后再
-complete；失败必须调用 fail 并给出有限 retry delay。
+complete；失败调用 fail（`owner`、`error`），由 Core 决定持久退避。每个删除任务最多
+领取 5 次，耗尽后保持失败及占用记账，不再派发；lease 过期同样计入预算。
 
 驱逐是缓存策略的正常结果，不是待重试的失败：GC 使 candidate 失效时，对应请求必须同时
 进入 `evicted`，退出可认领集合与 `queued`/`retry_wait` 统计。只有真实需求——缓存就绪回调、
@@ -1196,6 +1220,11 @@ key。`storage.stale` 表示最后完整 `observed_at` 已超过资源的 freshn
 数据库查询时间冒充外部实时观测。删除到低水位前，GC 可以使被选中的 candidate 立即
 unavailable；播放因此走既有源站 fallback，而不是继续引用待删对象。
 
+同一 inventory scan 的失败或租约过期按 1/2/4/8 分钟退避，最多执行 5 次；
+`next_attempt_at` 和尝试次数持久化。最近一次 scan 耗尽后标记 `failed`，自动调度不再
+创建替代 scan。管理员显式调用 inventory refresh 可以创建新 scan；已有待执行或执行中
+scan 时 refresh 不重置它的重试预算。
+
 ## 7. 错误码
 
 WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；REST 使用 6.1 的 `{"error":{"code","message"}}`。`message` 面向诊断，可变；Client MUST 按 `code` 分支。
@@ -1219,6 +1248,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `acceleration_storage_full` | 507 | 新对象会越过资源高水位；Core 已按 policy 排队回收，publisher 应稍后重试 |
 | `acceleration_storage_unmanaged` | 409 | 资源缺少正数容量预算；启用 readiness 同样会拒绝 |
 | `acceleration_storage_reserved` | 409 | 同一 opaque locator 已由另一个 live lease 预留；publisher 应稍后重试 |
+| `object_too_large` | 413 | 对象超过该加速资源的大小上限；跳过外部发布，不限制源站播放 |
 | `request_ready` | 409 | 已完成的 distribution request 不允许取消 |
 | `cancellation_requested` | 409 | 管理端已请求取消 live lease；publisher 必须停止并确认取消 |
 | `inventory_scan_invalid` | 409 | inventory scan 不存在、租约过期、owner/observed_at 不匹配或状态错误 |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -80,7 +81,13 @@ func (p *Publisher) recoverInterrupted(ctx context.Context) error {
 			ExpiresAt: state.ExpiresAt,
 		}
 		restartErr := fmt.Errorf("adapter restarted during %s", state.Status)
-		err := p.core.Fail(ctx, lease, restartErr, 0)
+		err := p.core.Fail(ctx, lease, restartErr)
+		if errors.Is(err, ErrCancellationRequested) {
+			if err := p.finishCancellation(lease, state); err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil && !errors.Is(err, ErrLeaseInactive) {
 			return fmt.Errorf("release interrupted lease %s: %w", state.LeaseID, err)
 		}
@@ -162,10 +169,6 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		return ErrNoWork
 	}
 	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
-	if err := backend.Health(ctx); err != nil {
-		p.setHeartbeat("degraded", Lease{}, false, err.Error())
-		return err
-	}
 	lease, err := p.core.Claim(ctx, p.cfg.Owner, managed.LeaseTTLSeconds)
 	if err != nil {
 		if errors.Is(err, ErrNoWork) {
@@ -179,7 +182,7 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		ExpiresAt: lease.ExpiresAt, Status: "claimed",
 	}
 	if err := p.state.Put(ctx, state); err != nil {
-		return p.fail(ctx, lease, state, err, time.Minute)
+		return p.fail(ctx, lease, state, err)
 	}
 
 	workCtx, cancelWork := context.WithCancelCause(ctx)
@@ -199,12 +202,11 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		return p.finishCancellation(lease, state)
 	}
 	if publishErr != nil {
-		retry := retryDelay(publishErr)
-		return p.fail(ctx, lease, state, publishErr, retry)
+		return p.fail(ctx, lease, state, publishErr)
 	}
 	current, err := p.core.LeaseStatus(ctx, lease)
 	if err != nil {
-		return p.fail(ctx, lease, state, err, time.Minute)
+		return p.fail(ctx, lease, state, err)
 	}
 	if current.CancelRequested {
 		return p.finishCancellation(lease, state)
@@ -214,7 +216,7 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 		if errors.Is(err, ErrCancellationRequested) {
 			return p.finishCancellation(lease, state)
 		}
-		return p.fail(ctx, lease, state, err, time.Minute)
+		return p.fail(ctx, lease, state, err)
 	}
 	if err := p.state.Delete(ctx, lease.ID); err != nil {
 		return fmt.Errorf("clean local state: %w", err)
@@ -268,6 +270,9 @@ func (p *Publisher) ReconcileStorage(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if !managed.Enabled {
+		return ErrNoWork
+	}
 	scan, err := p.core.ClaimInventory(ctx, p.cfg.Owner, 30*60)
 	if err != nil {
 		return err
@@ -318,6 +323,9 @@ func (p *Publisher) DeleteOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if !managed.Enabled {
+		return ErrNoWork
+	}
 	return p.deleteOnce(ctx, NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client))
 }
 
@@ -329,6 +337,9 @@ func (p *Publisher) drainDeletions(ctx context.Context) error {
 	managed, err := p.core.ManagedConfig(ctx)
 	if err != nil {
 		return err
+	}
+	if !managed.Enabled {
+		return ErrNoWork
 	}
 	backend := NewBackendClient(managed.BackendBaseURL, managed.BackendToken, p.client)
 	for range maxDeletionsPerRound {
@@ -348,7 +359,7 @@ func (p *Publisher) deleteOnce(ctx context.Context, backend *BackendClient) erro
 		return err
 	}
 	if err := backend.Delete(ctx, deletion.Locator); err != nil {
-		reportErr := p.core.FailDeletion(ctx, deletion, err, time.Minute)
+		reportErr := p.core.FailDeletion(ctx, deletion, err)
 		if reportErr != nil {
 			return fmt.Errorf("%v; report deletion failure: %w", err, reportErr)
 		}
@@ -441,6 +452,18 @@ func (p *Publisher) downloadSource(
 		return "", "", 0, "", fmt.Errorf("open source: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusRequestEntityTooLarge {
+		var failure struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.NewDecoder(io.LimitReader(response.Body, 8<<10)).Decode(&failure); err == nil &&
+			failure.Error.Code == "object_too_large" {
+			return "", "", 0, "", objectTooLargeError{max: managed.MaxObjectBytes}
+		}
+		return "", "", 0, "", errors.New("source rejected request")
+	}
 	if response.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
 		return "", "", 0, "", fmt.Errorf("source status %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
@@ -538,13 +561,13 @@ func (p *Publisher) upload(
 	return response.Header.Get("ETag"), nil
 }
 
-func (p *Publisher) fail(ctx context.Context, lease Lease, state UploadState, publishErr error, retry time.Duration) error {
+func (p *Publisher) fail(ctx context.Context, lease Lease, state UploadState, publishErr error) error {
 	state.Status = "failed"
 	state.LastError = publishErr.Error()
 	_ = p.state.Put(context.Background(), state)
 	failCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := p.core.Fail(failCtx, lease, publishErr, retry); err != nil {
+	if err := p.core.Fail(failCtx, lease, publishErr); err != nil {
 		p.setHeartbeat("degraded", Lease{}, false, publishErr.Error())
 		return fmt.Errorf("%v; report failure: %w", publishErr, err)
 	}
@@ -569,15 +592,10 @@ func verifyMetadata(metadata BlobMetadata, locator string, size int64, contentTy
 type objectTooLargeError struct{ size, max int64 }
 
 func (e objectTooLargeError) Error() string {
-	return fmt.Sprintf("object is too large for complete-object layout: %d > %d", e.size, e.max)
-}
-
-func retryDelay(err error) time.Duration {
-	var tooLarge objectTooLargeError
-	if errors.As(err, &tooLarge) {
-		return 7 * 24 * time.Hour
+	if e.size == 0 {
+		return "object exceeds acceleration max_object_bytes"
 	}
-	return time.Minute
+	return fmt.Sprintf("object is too large for complete-object layout: %d > %d", e.size, e.max)
 }
 
 type progressReporter struct {

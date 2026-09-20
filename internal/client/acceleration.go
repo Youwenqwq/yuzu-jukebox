@@ -23,19 +23,21 @@ type AccelerationProgress struct {
 }
 
 type AccelerationRequest struct {
-	AccelerationID    string                `json:"acceleration_id"`
-	TrackRef          string                `json:"track_ref"`
-	State             string                `json:"state"`
-	PendingReason     string                `json:"pending_reason"`
-	RequestedAt       int64                 `json:"requested_at"`
-	UpdatedAt         int64                 `json:"updated_at"`
-	NextAttemptAt     int64                 `json:"next_attempt_at"`
-	Attempts          int64                 `json:"attempts"`
-	LastError         string                `json:"last_error"`
-	CancelRequestedAt int64                 `json:"cancel_requested_at"`
-	CanceledAt        int64                 `json:"canceled_at"`
-	Lease             *AccelerationLease    `json:"lease"`
-	Progress          *AccelerationProgress `json:"progress"`
+	AccelerationID      string                `json:"acceleration_id"`
+	TrackRef            string                `json:"track_ref"`
+	State               string                `json:"state"`
+	PendingReason       string                `json:"pending_reason"`
+	RequestedAt         int64                 `json:"requested_at"`
+	UpdatedAt           int64                 `json:"updated_at"`
+	NextAttemptAt       int64                 `json:"next_attempt_at"`
+	Attempts            int64                 `json:"attempts"`
+	LastError           string                `json:"last_error"`
+	ErrorCode           string                `json:"error_code"`
+	ConsecutiveAttempts int64                 `json:"consecutive_attempts"`
+	CancelRequestedAt   int64                 `json:"cancel_requested_at"`
+	CanceledAt          int64                 `json:"canceled_at"`
+	Lease               *AccelerationLease    `json:"lease"`
+	Progress            *AccelerationProgress `json:"progress"`
 }
 
 type AccelerationStorageStatus struct {
@@ -59,6 +61,7 @@ type AccelerationInventoryScan struct {
 	Owner          string `json:"owner"`
 	Attempts       int64  `json:"attempts"`
 	LeaseExpiresAt int64  `json:"lease_expires_at"`
+	NextAttemptAt  int64  `json:"next_attempt_at"`
 	ObservedAt     int64  `json:"observed_at"`
 	LastError      string `json:"last_error"`
 	RequestedAt    int64  `json:"requested_at"`

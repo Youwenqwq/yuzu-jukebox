@@ -213,8 +213,7 @@ func (s *Service) CompleteCancellation(
 
 func (s *Service) Fail(
 	ctx context.Context,
-	accelerationID, leaseID, owner, message string,
-	retryAfter time.Duration,
+	accelerationID, leaseID, owner, message, errorCode string,
 ) error {
 	lease, err := s.Lease(ctx, accelerationID, leaseID)
 	if err != nil {
@@ -223,12 +222,8 @@ func (s *Service) Fail(
 	if lease.Owner != owner {
 		return ErrInvalidLease
 	}
-	if retryAfter < 0 {
-		retryAfter = 0
-	}
-	now := s.now()
 	return s.st.FailDistribution(ctx, leaseID, owner, strings.TrimSpace(message),
-		now.UnixMilli(), now.Add(retryAfter).UnixMilli())
+		errorCode, s.now().UnixMilli())
 }
 
 func (s *Service) Heartbeat(

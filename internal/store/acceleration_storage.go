@@ -96,12 +96,15 @@ func (s *Store) ReserveAccelerationStorage(
 	if err != nil {
 		return StorageReservation{}, err
 	}
-	var budget int64
+	var budget, maxObjectBytes int64
 	var high, low int
-	if err := tx.QueryRowContext(ctx, `SELECT storage_budget_bytes,
+	if err := tx.QueryRowContext(ctx, `SELECT storage_budget_bytes, max_object_bytes,
 		storage_high_watermark_percent, storage_low_watermark_percent
-		FROM accelerations WHERE id = ?`, lease.AccelerationID).Scan(&budget, &high, &low); err != nil {
+		FROM accelerations WHERE id = ?`, lease.AccelerationID).Scan(&budget, &maxObjectBytes, &high, &low); err != nil {
 		return StorageReservation{}, err
+	}
+	if sizeBytes > maxObjectBytes {
+		return StorageReservation{}, ErrDistributionObjectTooLarge
 	}
 	if budget <= 0 {
 		return StorageReservation{}, ErrAccelerationStorageUnmanaged
@@ -386,13 +389,23 @@ func (s *Store) ClaimAccelerationDeletion(
 		return StorageDeletion{}, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE acceleration_deletion_jobs SET
+		state = 'failed', owner = '', last_error = 'deletion lease expired',
+		lease_expires_at = ? + MIN(3600000, 60000 * (1 << MIN(MAX(attempts - 1, 0), 6))),
+		updated_at = ? WHERE acceleration_id = ? AND state = 'leased' AND lease_expires_at <= ?`,
+		now, now, accelerationID, now); err != nil {
+		return StorageDeletion{}, err
+	}
 	var deletion StorageDeletion
 	err = tx.QueryRowContext(ctx, `SELECT id, locator, attempts FROM acceleration_deletion_jobs
-		WHERE acceleration_id = ? AND (state = 'pending'
-		 OR (state IN ('failed', 'leased') AND lease_expires_at <= ?))
+		WHERE acceleration_id = ? AND attempts < 5
+		 AND (state = 'pending' OR (state = 'failed' AND lease_expires_at <= ?))
 		ORDER BY updated_at, id LIMIT 1`, accelerationID, now).Scan(
 		&deletion.ID, &deletion.Locator, &deletion.Attempts)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StorageDeletion{}, commitNoDistributionWork(tx)
+		}
 		return StorageDeletion{}, err
 	}
 	deletion.AccelerationID = accelerationID
@@ -445,12 +458,15 @@ func (s *Store) CompleteAccelerationDeletion(
 func (s *Store) FailAccelerationDeletion(
 	ctx context.Context,
 	accelerationID, deletionID, owner, message string,
-	retryAt, now int64,
+	now int64,
 ) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE acceleration_deletion_jobs SET
-		state = 'failed', owner = '', lease_expires_at = ?, last_error = ?, updated_at = ?
-		WHERE id = ? AND acceleration_id = ? AND owner = ? AND state = 'leased'`,
-		retryAt, strings.TrimSpace(message), now, deletionID, accelerationID, owner)
+		state = 'failed', owner = '',
+		lease_expires_at = ? + MIN(3600000, 60000 * (1 << MIN(MAX(attempts - 1, 0), 6))),
+		last_error = ?, updated_at = ?
+		WHERE id = ? AND acceleration_id = ? AND owner = ? AND state = 'leased'
+		AND lease_expires_at > ?`,
+		now, strings.TrimSpace(message), now, deletionID, accelerationID, owner, now)
 	if err != nil {
 		return err
 	}
@@ -512,7 +528,7 @@ func (s *Store) PinAccelerationDemand(
 	var pinnedBytes int64
 	for _, ref := range trackRefs {
 		if _, err := tx.ExecContext(ctx, `UPDATE distribution_requests SET pinned_until = ?
-			WHERE acceleration_id = ? AND track_ref = ?`,
+			WHERE acceleration_id = ? AND track_ref = ? AND terminal_state = ''`,
 			pinnedUntil, accelerationID, ref); err != nil {
 			return err
 		}
@@ -523,7 +539,12 @@ func (s *Store) PinAccelerationDemand(
 			JOIN acceleration_objects AS object
 			 ON object.acceleration_id = candidate.acceleration_id
 			 AND object.locator = candidate.locator
-			WHERE candidate.acceleration_id = ? AND candidate.track_ref = ?`,
+			JOIN distribution_requests AS request
+			 ON request.acceleration_id = candidate.acceleration_id
+			 AND request.track_ref = candidate.track_ref AND request.terminal_state = ''
+			WHERE candidate.acceleration_id = ? AND candidate.track_ref = ?
+			 AND candidate.size_bytes <= (SELECT max_object_bytes FROM accelerations
+			  WHERE id = candidate.acceleration_id)`,
 			accelerationID, ref).Scan(&locator, &size)
 		if errors.Is(err, sql.ErrNoRows) {
 			// 还没发布：只有请求侧的紧迫度，没有对象可钉。

@@ -47,11 +47,11 @@ func (p *Provider) ImportPlaylist(ctx context.Context, playlistID string) (strin
 	for offset := 0; ; offset += pageSize {
 		var resp struct {
 			Songs []struct {
-				ID   int64  `json:"id"`
-				Name string `json:"name"`
-				Dt   int64  `json:"dt"`
-				Al   ncmAl  `json:"al"`
-				Ar []ncmArtist `json:"ar"`
+				ID   int64       `json:"id"`
+				Name string      `json:"name"`
+				Dt   int64       `json:"dt"`
+				Al   ncmAl       `json:"al"`
+				Ar   []ncmArtist `json:"ar"`
 			} `json:"songs"`
 		}
 		q := url.Values{"id": {id}, "limit": {strconv.Itoa(pageSize)}, "offset": {strconv.Itoa(offset)}}
@@ -228,11 +228,11 @@ func (s *dailySource) refresh(ctx context.Context) error {
 	var resp struct {
 		Data struct {
 			DailySongs []struct {
-				ID   int64  `json:"id"`
-				Name string `json:"name"`
-				Dt   int64  `json:"dt"`
-				Al   ncmAl  `json:"al"`
-				Ar []ncmArtist `json:"ar"`
+				ID   int64       `json:"id"`
+				Name string      `json:"name"`
+				Dt   int64       `json:"dt"`
+				Al   ncmAl       `json:"al"`
+				Ar   []ncmArtist `json:"ar"`
 			} `json:"dailySongs"`
 		} `json:"data"`
 	}
@@ -280,11 +280,11 @@ func (s *fmSource) NextBatch(ctx context.Context, n int, seed provider.TrackRef)
 	for attempt := 0; len(out) < n && attempt < n*2; attempt++ {
 		var resp struct {
 			Data []struct {
-				ID       int64  `json:"id"`
-				Name     string `json:"name"`
-				Duration int64  `json:"duration"`
-				Album    ncmAl  `json:"album"`
-				Artists []ncmArtist `json:"artists"`
+				ID       int64       `json:"id"`
+				Name     string      `json:"name"`
+				Duration int64       `json:"duration"`
+				Album    ncmAl       `json:"album"`
+				Artists  []ncmArtist `json:"artists"`
 			} `json:"data"`
 		}
 		if err := s.p.get(ctx, "/personal_fm", url.Values{}, cookie, &resp); err != nil {
@@ -334,11 +334,11 @@ func (p *Provider) Similar(ctx context.Context, trackID string, limit int) ([]pr
 func (p *Provider) fetchSimilar(ctx context.Context, trackID, cookie string) ([]provider.Track, error) {
 	var resp struct {
 		Songs []struct {
-			ID       int64  `json:"id"`
-			Name     string `json:"name"`
-			Duration int64  `json:"duration"`
-			Album    ncmAl  `json:"album"`
-			Artists []ncmArtist `json:"artists"`
+			ID       int64       `json:"id"`
+			Name     string      `json:"name"`
+			Duration int64       `json:"duration"`
+			Album    ncmAl       `json:"album"`
+			Artists  []ncmArtist `json:"artists"`
 		} `json:"songs"`
 	}
 	if err := p.get(ctx, "/simi/song", url.Values{"id": {trackID}}, cookie, &resp); err != nil {
@@ -387,14 +387,8 @@ func (s *chainedSource) loadLikedPlaylist(ctx context.Context) error {
 	if cookie == "" {
 		return fmt.Errorf("requires login (configure ncm credential)")
 	}
-	var status struct {
-		Data struct {
-			Account struct {
-				ID int64 `json:"id"`
-			} `json:"account"`
-		} `json:"data"`
-	}
-	if err := s.p.get(ctx, "/login/status", url.Values{}, cookie, &status); err != nil {
+	account, err := s.p.checkLogin(ctx, cookie)
+	if err != nil {
 		return err
 	}
 	var resp struct {
@@ -403,7 +397,7 @@ func (s *chainedSource) loadLikedPlaylist(ctx context.Context) error {
 			Name string `json:"name"`
 		} `json:"playlist"`
 	}
-	q := url.Values{"uid": {strconv.FormatInt(status.Data.Account.ID, 10)}}
+	q := url.Values{"uid": {account.UID}}
 	if err := s.p.get(ctx, "/user/playlist", q, cookie, &resp); err != nil {
 		return err
 	}
@@ -442,17 +436,17 @@ func (s *chainedSource) NextBatch(ctx context.Context, n int, seed provider.Trac
 		// 且嵌套项用 ar/dt 而非 artists/duration。两种都要处理。
 		var resp struct {
 			Data []struct {
-				ID       int64  `json:"id"`
-				Name     string `json:"name"`
-				Duration int64  `json:"duration"`
-				Album    ncmAl  `json:"album"`
-				Artists []ncmArtist `json:"artists"`
+				ID       int64       `json:"id"`
+				Name     string      `json:"name"`
+				Duration int64       `json:"duration"`
+				Album    ncmAl       `json:"album"`
+				Artists  []ncmArtist `json:"artists"`
 				SongInfo *struct {
-					ID   int64  `json:"id"`
-					Name string `json:"name"`
-					Dt   int64  `json:"dt"`
-					Al   ncmAl  `json:"al"`
-					Ar []ncmArtist `json:"ar"`
+					ID   int64       `json:"id"`
+					Name string      `json:"name"`
+					Dt   int64       `json:"dt"`
+					Al   ncmAl       `json:"al"`
+					Ar   []ncmArtist `json:"ar"`
 				} `json:"songInfo"`
 			} `json:"data"`
 		}

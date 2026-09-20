@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -171,5 +173,174 @@ func TestObjectDownloadLimitRejectsDeclaredAndStreamingSizes(t *testing.T) {
 	}
 	if matches, err := filepath.Glob(filepath.Join(dir, "dl-*")); err != nil || len(matches) != 0 {
 		t.Fatalf("temporary downloads after rejection = %v, err %v", matches, err)
+	}
+}
+
+type cacheTestTransport func(*http.Request) (*http.Response, error)
+
+func (f cacheTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestTruncatedStreamDoesNotPoisonCache(t *testing.T) {
+	const complete = "0123456789"
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		if requests.Add(1) == 1 {
+			_, _ = io.WriteString(w, complete[:5])
+			return
+		}
+		_, _ = io.WriteString(w, complete)
+	}))
+	t.Cleanup(upstream.Close)
+	c, _, _ := setupPruneCache(t)
+	c.reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+	// A reader may report an error once and EOF on the next read. Close must
+	// not turn that failure into a successful background-drain finalization.
+	c.client.Transport = cacheTestTransport(func(r *http.Request) (*http.Response, error) {
+		response, err := http.DefaultTransport.RoundTrip(r)
+		if err == nil && requests.Load() == 1 {
+			response.Body = struct {
+				io.Reader
+				io.Closer
+			}{
+				Reader: iotest.TimeoutReader(io.LimitReader(response.Body, 5)),
+				Closer: response.Body,
+			}
+		}
+		return response, err
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ref := provider.TrackRef("limit:truncated")
+	rc, err := c.OpenStream(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	done := c.inflight[ref].done
+	c.mu.Unlock()
+	_, readErr := io.ReadAll(rc)
+	_ = rc.Close()
+	if !errors.Is(readErr, iotest.ErrTimeout) {
+		t.Fatalf("truncated read error = %v", readErr)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	f, err := c.Open(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil || string(data) != complete {
+		t.Fatalf("reopened track = %q, err=%v; incomplete download must not become a cache hit", data, err)
+	}
+}
+
+func TestStreamProbeDisconnectCompletesCache(t *testing.T) {
+	const complete = "0123456789"
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Length", "10")
+		_, _ = io.WriteString(w, complete)
+	}))
+	t.Cleanup(upstream.Close)
+	c, _, _ := setupPruneCache(t)
+	c.reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+	ctx, cancel := context.WithCancel(context.Background())
+	ref := provider.TrackRef("limit:probe")
+	rc, err := c.OpenStream(ctx, ref)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	prefix := make([]byte, 2)
+	if _, err := io.ReadFull(rc, prefix); err != nil {
+		cancel()
+		_ = rc.Close()
+		t.Fatal(err)
+	}
+	cancel()
+	_ = rc.Close()
+	followerCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	f, err := c.Open(followerCtx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil || string(data) != complete {
+		t.Fatalf("reopened probe = %q, err=%v", data, err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("probe disconnect caused another source download: %d", requests.Load())
+	}
+}
+
+func TestStreamTimeoutMeasuresUpstreamReadNotPlayerPause(t *testing.T) {
+	for _, playerPause := range []bool{true, false} {
+		name := "stalled upstream"
+		if playerPause {
+			name = "paused player"
+		}
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			released := false
+			defer func() {
+				if !released {
+					close(release)
+				}
+			}()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", "10")
+				_, _ = io.WriteString(w, "01")
+				w.(http.Flusher).Flush()
+				select {
+				case <-release:
+					_, _ = io.WriteString(w, "23456789")
+				case <-r.Context().Done():
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			c, _, _ := setupPruneCache(t)
+			c.readTimeout = 500 * time.Millisecond
+			c.reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+			ref := provider.TrackRef("limit:slow")
+			rc, err := c.OpenStream(context.Background(), ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rc.Close()
+			prefix := make([]byte, 2)
+			if _, err := io.ReadFull(rc, prefix); err != nil {
+				t.Fatal(err)
+			}
+			if playerPause {
+				// No upstream Read is pending while the player is paused.
+				time.Sleep(2 * c.readTimeout)
+				close(release)
+				released = true
+			}
+			rest, err := io.ReadAll(rc)
+			if playerPause {
+				if err != nil || string(rest) != "23456789" {
+					t.Fatalf("resumed stream = %q, err=%v", rest, err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("stalled upstream was accepted as a complete download")
+				}
+				if path := c.Lookup(context.Background(), ref); path != "" {
+					t.Fatalf("timed-out stream was cached at %s", path)
+				}
+			}
+		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
@@ -174,6 +175,68 @@ func TestDistributionInternalAPI(t *testing.T) {
 	if !resolved.Ready || resolved.Candidate.Locator != "opaque/blob/object" {
 		t.Fatalf("resolved = %#v", resolved)
 	}
+
+	t.Run("oversized existing candidate falls back", func(t *testing.T) {
+		if _, err := st.DB().Exec(`UPDATE accelerations SET max_object_bytes = 8 WHERE id = 'edgeone-main'`); err != nil {
+			t.Fatal(err)
+		}
+		response := distributionRequest(t, handler, http.MethodPost,
+			"/internal/v1/accelerations/introspect", "delivery-secret", introspectBody)
+		var result struct {
+			Ready bool `json:"ready"`
+		}
+		decodeRecorder(t, response, &result)
+		if response.Code != http.StatusOK || result.Ready {
+			t.Fatalf("oversized candidate remained ready: %s", response.Body.String())
+		}
+		claim := distributionRequest(t, handler, http.MethodPost, "/internal/v1/accelerations/leases",
+			"publisher-secret", map[string]any{"owner": "publisher-1"})
+		if claim.Code != http.StatusNoContent {
+			t.Fatalf("known oversized source was re-leased: %s", claim.Body.String())
+		}
+	})
+	t.Run("structured failure policy survives introspection", func(t *testing.T) {
+		for _, tc := range []struct{ ref, code, state string }{
+			{"ncm:policy", "object_too_large", "skipped"},
+			{"ncm:ordinary", "publish_failed", "retry_wait"},
+		} {
+			if err := dist.Request(context.Background(), "edgeone-main", provider.TrackRef(tc.ref)); err != nil {
+				t.Fatal(err)
+			}
+			claim := distributionRequest(t, handler, http.MethodPost, "/internal/v1/accelerations/leases",
+				"publisher-secret", map[string]any{"owner": "publisher-1"})
+			if claim.Code != http.StatusCreated {
+				t.Fatalf("claim: %s", claim.Body.String())
+			}
+			var work struct {
+				Lease distribution.Lease `json:"lease"`
+			}
+			decodeRecorder(t, claim, &work)
+			failed := distributionRequest(t, handler, http.MethodPost,
+				"/internal/v1/accelerations/leases/"+work.Lease.ID+"/fail", "publisher-secret",
+				map[string]any{"owner": "publisher-1", "error": "object is too large", "error_code": tc.code})
+			if failed.Code != http.StatusOK {
+				t.Fatalf("failure protocol: %s", failed.Body.String())
+			}
+			demand := distributionRequest(t, handler, http.MethodPost, "/internal/v1/accelerations/introspect",
+				"delivery-secret", map[string]any{"track_ref": tc.ref, "ticket": authm.IssueTicket("listener-1", tc.ref)})
+			if demand.Code != http.StatusOK {
+				t.Fatalf("repeat introspection: %s", demand.Body.String())
+			}
+			view, err := st.GetDistributionRequest(context.Background(), "edgeone-main", tc.ref, time.Now().UnixMilli())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.State != tc.state || view.ErrorCode != tc.code {
+				t.Fatalf("failure classified from message rather than code: %#v", view)
+			}
+			claim = distributionRequest(t, handler, http.MethodPost, "/internal/v1/accelerations/leases",
+				"publisher-secret", map[string]any{"owner": "publisher-1"})
+			if claim.Code != http.StatusNoContent {
+				t.Fatalf("repeat demand bypassed failure policy: %s", claim.Body.String())
+			}
+		}
+	})
 }
 
 func distributionRequest(t *testing.T, handler http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {

@@ -96,20 +96,23 @@ func TestDistributionExpiredLeaseCanBeReclaimedAndFailed(t *testing.T) {
 	if _, err := st.ClaimDistribution(ctx, "edgeone", "old", "old-lease", 110, 120); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := st.ClaimDistribution(ctx, "edgeone", "new", "new-lease", 121, 500)
+	if _, err := st.ClaimDistribution(ctx, "edgeone", "new", "too-early", 121, 500); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expired lease bypassed backoff: %v", err)
+	}
+	lease, err := st.ClaimDistribution(ctx, "edgeone", "new", "new-lease", 60_121, 200_000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.ID != "new-lease" {
 		t.Fatalf("reclaimed lease = %#v", lease)
 	}
-	if err := st.FailDistribution(ctx, lease.ID, lease.Owner, "temporary", 130, 230); err != nil {
+	if err := st.FailDistribution(ctx, lease.ID, lease.Owner, "temporary", "publish_failed", 60_130); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ClaimDistribution(ctx, "edgeone", "early", "early-lease", 200, 500); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := st.ClaimDistribution(ctx, "edgeone", "early", "early-lease", 180_129, 200_000); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("claim before retry = %v", err)
 	}
-	if _, err := st.ClaimDistribution(ctx, "edgeone", "retry", "retry-lease", 230, 600); err != nil {
+	if _, err := st.ClaimDistribution(ctx, "edgeone", "retry", "retry-lease", 180_130, 300_000); err != nil {
 		t.Fatalf("claim at retry time: %v", err)
 	}
 }

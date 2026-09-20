@@ -197,6 +197,12 @@ func (s *Server) distributionSource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal", "stat distribution source")
 		return
 	}
+	if info.Size() > acceleration.MaxObjectBytes {
+		// The publisher reports the structured policy failure on its lease;
+		// never stream a known oversized source to an external accelerator.
+		writeErr(w, http.StatusRequestEntityTooLarge, "object_too_large", "object exceeds acceleration max_object_bytes")
+		return
+	}
 	if contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(info.Name()))); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	} else {
@@ -264,6 +270,10 @@ func (s *Server) distributionComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.distribution.Complete(r.Context(), acceleration.ID, lease.ID,
 		body.Owner, candidate); err != nil {
+		if errors.Is(err, store.ErrDistributionObjectTooLarge) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "object_too_large", "object exceeds acceleration max_object_bytes")
+			return
+		}
 		if errors.Is(err, distribution.ErrInvalidLease) || errors.Is(err, distribution.ErrExpiredLease) {
 			writeDistributionLeaseError(w, err)
 			return
@@ -280,19 +290,21 @@ func (s *Server) distributionFail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Owner             string `json:"owner"`
-		Error             string `json:"error"`
-		RetryAfterSeconds int    `json:"retry_after_seconds"`
+		Owner     string `json:"owner"`
+		Error     string `json:"error"`
+		ErrorCode string `json:"error_code"`
 	}
 	if !decodeDistributionJSON(w, r, &body) {
 		return
 	}
-	if body.RetryAfterSeconds < 0 || body.RetryAfterSeconds > 7*24*60*60 {
-		writeErr(w, http.StatusBadRequest, "bad_request", "retry_after_seconds out of range")
+	switch body.ErrorCode {
+	case "", "publish_failed", "object_too_large":
+	default:
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid error_code")
 		return
 	}
 	err := s.distribution.Fail(r.Context(), acceleration.ID, r.PathValue("id"),
-		body.Owner, body.Error, time.Duration(body.RetryAfterSeconds)*time.Second)
+		body.Owner, body.Error, body.ErrorCode)
 	if err != nil {
 		writeDistributionLeaseError(w, err)
 		return

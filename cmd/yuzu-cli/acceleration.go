@@ -89,6 +89,9 @@ func cmdAccelerationInventoryStatus(ctx context.Context, accelerationID string) 
 		fmt.Printf("scan: %s %s attempts=%d requested=%s\n",
 			status.Scan.ID, status.Scan.State, status.Scan.Attempts,
 			formatAccelerationTime(status.Scan.RequestedAt))
+		if status.Scan.NextAttemptAt > 0 {
+			fmt.Printf("next scan attempt: %s\n", formatAccelerationTime(status.Scan.NextAttemptAt))
+		}
 		if status.Scan.LastError != "" {
 			fmt.Printf("scan error: %s\n", status.Scan.LastError)
 		}
@@ -116,6 +119,10 @@ func printAccelerationRequest(request client.AccelerationRequest) {
 	}
 	fmt.Printf("attempts: %d\nrequested: %s\nupdated: %s\n", request.Attempts,
 		formatAccelerationTime(request.RequestedAt), formatAccelerationTime(request.UpdatedAt))
+	fmt.Printf("consecutive attempts: %d\n", request.ConsecutiveAttempts)
+	if request.ErrorCode != "" {
+		fmt.Printf("error code: %s\n", request.ErrorCode)
+	}
 	if request.NextAttemptAt > 0 {
 		fmt.Printf("next attempt: %s\n", formatAccelerationTime(request.NextAttemptAt))
 	}
