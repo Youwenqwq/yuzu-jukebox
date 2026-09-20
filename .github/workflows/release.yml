@@ -20,7 +20,7 @@ jobs:
           go-version-file: go.mod
       - name: Build binaries
         run: |
-          for c in yuzu-server yuzu-cli yuzu-agent yuzu-edgeone; do
+          for c in yuzu-server yuzu-cli yuzu-agent; do
             GOOS=linux GOARCH=${{ matrix.arch }} go build -trimpath -o dist/${c}-linux-${{ matrix.arch }} ./cmd/$c
           done
       - name: Upload release assets

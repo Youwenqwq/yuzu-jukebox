@@ -356,31 +356,6 @@ func TestRestartResumesCurrentTrackInsteadOfSkippingIt(t *testing.T) {
 	}
 }
 
-// 正在播放的曲目必须对 SQL 可见：加速层要靠它钉住正在流式传输的对象。
-func TestCurrentTrackStaysQueryableInQueue(t *testing.T) {
-	r, st := newTestRoom(t, "")
-	if err := r.AddFor(guest, mkEntry("local:playing", guest.ID)); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.AddFor(guest, mkEntry("local:next", guest.ID)); err != nil {
-		t.Fatal(err)
-	}
-	rows, currentEntryID, err := st.LoadQueue(context.Background(), "r1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 || rows[0].TrackRef != "local:playing" || rows[1].TrackRef != "local:next" {
-		t.Fatalf("persisted queue = %#v, want current followed by upcoming", rows)
-	}
-	if currentEntryID != rows[0].EntryID {
-		t.Fatalf("cursor = %q, want it to point at the playing entry %q", currentEntryID, rows[0].EntryID)
-	}
-	// 预取视界就是这条查询：游标位置起的前 N 条。
-	if refs := queueRefs(t, st); len(refs) != 1 || refs[0] != "local:next" {
-		t.Fatalf("upcoming refs = %#v, want only local:next", refs)
-	}
-}
-
 func TestSnapshotIsReadOnlyAndDoesNotJoin(t *testing.T) {
 	r, _ := newTestRoom(t, "")
 	id := auth.Identity{

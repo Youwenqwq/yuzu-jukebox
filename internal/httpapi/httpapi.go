@@ -18,7 +18,6 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/coverurl"
-	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/local"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
@@ -51,16 +50,6 @@ type Server struct {
 
 	// playlistCoverDir 保存自建歌单上传的封面文件。
 	playlistCoverDir string
-
-	distribution         *distribution.Service
-	accelerationRegistry *distribution.Registry
-}
-
-// ConfigureDistribution installs the persistent acceleration control plane
-// during app assembly, before Handler is exposed.
-func (s *Server) ConfigureDistribution(service *distribution.Service, registry *distribution.Registry) {
-	s.distribution = service
-	s.accelerationRegistry = registry
 }
 
 // SetCoverSecret 以 secret_key 的字节形式配置实体封面 token 签发器。
@@ -114,19 +103,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/integrations/{id}/subjects", s.listIntegrationSubjects)
 	mux.HandleFunc("PUT /api/v1/integrations/{id}/subjects", s.manageIntegrationSubject)
 	mux.HandleFunc("DELETE /api/v1/integrations/{id}/subjects", s.manageIntegrationSubject)
-	mux.HandleFunc("GET /api/v1/accelerations", s.listAccelerations)
-	mux.HandleFunc("POST /api/v1/accelerations", s.createAcceleration)
-	mux.HandleFunc("GET /api/v1/accelerations/{id}", s.getAcceleration)
-	mux.HandleFunc("PATCH /api/v1/accelerations/{id}", s.updateAcceleration)
-	mux.HandleFunc("DELETE /api/v1/accelerations/{id}", s.deleteAcceleration)
-	mux.HandleFunc("GET /api/v1/accelerations/{id}/status", s.accelerationStatus)
-	mux.HandleFunc("GET /api/v1/accelerations/{id}/requests", s.accelerationRequests)
-	mux.HandleFunc("GET /api/v1/accelerations/{id}/requests/{track_ref...}", s.accelerationRequest)
-	mux.HandleFunc("DELETE /api/v1/accelerations/{id}/requests/{track_ref...}", s.cancelAccelerationRequest)
-	mux.HandleFunc("POST /api/v1/accelerations/{id}/inventory/refresh", s.refreshAccelerationInventory)
-	mux.HandleFunc("GET /api/v1/accelerations/{id}/inventory/status", s.accelerationInventoryStatus)
-	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare", s.prepareAccelerationCredential)
-	mux.HandleFunc("POST /api/v1/accelerations/{id}/credentials/{purpose}/activate", s.activateAccelerationCredential)
 	mux.HandleFunc("GET /api/v1/principals", s.listPrincipals)
 	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	mux.HandleFunc("GET /api/v1/history", s.requesterHistory)
@@ -203,27 +179,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/players/{id}", s.deletePlayer)
 	mux.HandleFunc("POST /api/v1/players/{id}/key", s.rotatePlayerKey)
 	mux.HandleFunc("POST /api/v1/players/{id}/command", s.playerCommand)
-	if s.distribution != nil {
-		mux.HandleFunc("POST /internal/v1/accelerations/introspect", s.distributionIntrospect)
-		mux.HandleFunc("POST /internal/v1/accelerations/leases", s.distributionClaim)
-		mux.HandleFunc("GET /internal/v1/accelerations/leases/{id}", s.distributionLeaseStatus)
-		mux.HandleFunc("GET /internal/v1/accelerations/publisher/config", s.distributionPublisherConfig)
-		mux.HandleFunc("POST /internal/v1/accelerations/publishers/heartbeat", s.distributionHeartbeat)
-		mux.HandleFunc("GET /internal/v1/accelerations/leases/{id}/source", s.distributionSource)
-		mux.HandleFunc("PATCH /internal/v1/accelerations/leases/{id}/progress", s.distributionProgress)
-		mux.HandleFunc("POST /internal/v1/accelerations/leases/{id}/reserve", s.accelerationReserve)
-		mux.HandleFunc("POST /internal/v1/accelerations/leases/{id}/complete", s.distributionComplete)
-		mux.HandleFunc("POST /internal/v1/accelerations/leases/{id}/fail", s.distributionFail)
-		mux.HandleFunc("POST /internal/v1/accelerations/leases/{id}/cancel", s.distributionCancel)
-		mux.HandleFunc("POST /internal/v1/accelerations/inventory/claim", s.accelerationInventoryClaim)
-		mux.HandleFunc("POST /internal/v1/accelerations/inventory", s.accelerationInventory)
-		mux.HandleFunc("POST /internal/v1/accelerations/inventory/{id}/fail", s.accelerationInventoryFail)
-		mux.HandleFunc("POST /internal/v1/accelerations/deletions/claim", s.accelerationDeletionClaim)
-		mux.HandleFunc("POST /internal/v1/accelerations/deletions/{id}/complete", s.accelerationDeletionComplete)
-		mux.HandleFunc("POST /internal/v1/accelerations/deletions/{id}/fail", s.accelerationDeletionFail)
-		mux.HandleFunc("POST /internal/v1/accelerations/events", s.distributionEvent)
-		mux.HandleFunc("GET /internal/v1/accelerations/metrics", s.distributionMetrics)
-	}
 	mux.Handle("/ws/v1", s.ws)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		originalBody := r.Body

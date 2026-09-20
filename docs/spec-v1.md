@@ -128,7 +128,7 @@ should_be = position_ms                                        (paused 时)
   } }
 ```
 
-- `password` 字段是**全局管理员口令**（可选）：不传或错误时签发普通 guest Principal（`g_` + `sha256("guest:"+name)` 前 12 hex，`kind=guest`，roles 为 `listener+requester`）；命中 `admin_password` 时签发独立 password Principal（`p_` + `sha256("password:"+name)` 前 12 hex，`kind=password`），追加 `room_admin+media_admin+sys_admin`。两种 Principal 即使显示名相同也绝不共享身份或角色。
+- `password` 字段是**全局管理员口令**（可选）：不传或错误时签发普通 guest Principal（`g_` + `sha256("guest:"+name)` 前 12 hex，`kind=guest`，roles 为 `listener+requester`）；命中 `admin_password` 时签发独立 password Principal（`p_` + `sha256("password:"+name)` 前 12 hex，`kind=password`），追加 `room_admin+media_admin`。两种 Principal 即使显示名相同也绝不共享身份或角色。
 - **房间访问凭据不在此处传递**——它只作为受保护 Room 的 `room.join.password` 最终 fallback；身份具备免密准入条件时无需提供（见 4.2、6.2）。
 - `session_token` 用于 REST 通道鉴权（见 §6）；WS 通道上 `auth.ok` 之后的操作直接用该连接的身份。
 - 普通 guest 身份 ID 由名字确定性派生，同名重连仍是同一人；管理员口令身份使用上述独立 `password` 命名空间。
@@ -173,7 +173,6 @@ POST /api/v1/auth/oidc { "id_token": "<IdP 签发的 ID token>", "access_token":
 | `requester` | 点歌以及搜索、Provider/歌单读取等 requester 操作 |
 | `room_admin` | 全局 Room 管理员；是所有 Room 的 controller，并可管理 Integration 映射与 Room grant |
 | `media_admin` | Provider 凭据、本地媒体、缓存与歌单写操作 |
-| `sys_admin` | 加速/分发控制面专属：创建/修改/删除 acceleration、control/backend URL、交付凭据与库存刷新。仅口令管理员（§3.1）或 OIDC `role_mapping` 授予；`media_admin` 不可触及（防凭据型 SSRF）。加速 URL 校验：`http` 仅允许 localhost/环回/私网 IP，拒绝链路本地（含云元数据）、组播、未指定与广播地址 |
 | Room grant `controller` | 不是 role；只让指定 Principal 控制指定 Room。**不可授予 `kind=guest` 主身份**（guest ID 由名字确定性派生、可伪造，见 §3.1） |
 
 Room 控制授权的完整判定是：
@@ -570,10 +569,8 @@ Queue []QueueEntry
 由 `is_current` 标记游标。两者的差异只存在于存储层，线上格式不受影响：
 `queue.snapshot` / `queue.patch` 携带的始终是待播条目。
 
-当前曲目落库有两个后果。其一，正在流式传输的曲目对 SQL 可见，加速层可以按
-「游标起的前 N 条」导出预取视界并钉住这些对象，而不必去问房间 actor 要运行时状态。
-其二，重启从当前曲目本身续播，而不是把它当作已出队、跳到下一首。`PositionMs` 仍是
-运行时状态，所以续播从曲目开头开始。
+当前曲目落库后，重启从当前曲目本身续播，而不是把它当作已出队、跳到下一首。
+`PositionMs` 仍是运行时状态，所以续播从曲目开头开始。
 
 ### 5.2 状态迁移
 
@@ -1089,142 +1086,6 @@ actor resolve 与绑定码兑换使用 Integration token；绑定码签发使用
 - DELETE scope/subject 的 body 值必须匹配当前记录；grant 的 `room_id/principal_id` 必须与路径一致。任何不匹配返回 409 `conflict`，不存在的绑定/链接/grant 返回 404 `not_found`。
 - grant 当前唯一支持的 capability 是字面量 `"controller"`；其它值返回 400 `bad_request`。
 
-### 6.5 外部加速资源
-
-Acceleration 是持久机器资源，不从 `config.json` 读取。`media_admin` 可查询资源，
-创建、修改、删除及凭据管理要求 `sys_admin`。当前唯一 `kind` 为 `edgeone`，
-已停止新功能开发，仅维护完整对象分发；Core 合同使用供应商无关命名。
-资源创建时保持 disabled，并一次性返回 publisher、delivery 与 backend 三种 plaintext
-credential；后续查询只返回 credential-configured/pending 布尔值。
-
-| 方法与路径 | 合同 |
-|---|---|
-| `GET /api/v1/accelerations` | 列出资源，不含任何 token/hash |
-| `POST /api/v1/accelerations` | 创建 disabled 资源；HTTP 201 返回资源和三种一次性 token |
-| `GET /api/v1/accelerations/{id}` | 返回持久配置、健康状态与 credential flags |
-| `PATCH /api/v1/accelerations/{id}` | 更新名称、端点、policy、水位或 enabled；启用前强制 readiness |
-| `DELETE /api/v1/accelerations/{id}` | 仅允许删除 disabled 且不再拥有媒体或进行中工作的资源 |
-| `GET /api/v1/accelerations/{id}/status` | summary、publisher、active progress、storage、当前 inventory scan、累计与最近 24 小时指标 |
-| `GET /api/v1/accelerations/{id}/requests?state=&limit=` | 查询 `queued\|leased\|retry_wait\|cancel_requested\|ready\|evicted\|canceled\|failed\|skipped` 请求；返回 `pending_reason`、`error_code` 与 `consecutive_attempts` |
-| `GET /api/v1/accelerations/{id}/requests/{track_ref...}` | 查询单个请求的 lease、phase、进度、重试和取消状态 |
-| `DELETE /api/v1/accelerations/{id}/requests/{track_ref...}` | 幂等取消；未认领任务立即 canceled，live lease 进入 cancel_requested |
-| `POST /api/v1/accelerations/{id}/inventory/refresh` | HTTP 202；创建或复用当前完整 inventory scan |
-| `GET /api/v1/accelerations/{id}/inventory/status` | 返回最后完整 storage 快照及当前/最近 scan |
-| `POST /api/v1/accelerations/{id}/credentials/{purpose}/prepare` | 生成一次性 pending token |
-| `POST /api/v1/accelerations/{id}/credentials/{purpose}/activate` | 验证并切换 pending token |
-
-创建/更新的供应商无关字段为 `control_base_url`、`backend_base_url`、
-`cache_mode`、`prefetch_horizon`、`prefetch_share_percent`、`lease_ttl_seconds`、
-`upload_rate_bytes_per_second`、
-`max_object_bytes`、`storage_budget_bytes`、`storage_high_watermark_percent`、
-`storage_low_watermark_percent`、`inventory_interval_seconds` 与
-`inventory_stale_after_seconds`。默认容量是 850 MiB，高/低水位是 95%/85%；
-inventory 默认每 900 秒调度，超过 1800 秒没有完整观测即标记 stale。
-
-加速 `max_object_bytes` 默认 23 MiB，与本地 `cache.max_object_bytes`（默认 512 MiB）
-独立。已知超限文件直接持久 `skipped`，`error_code="object_too_large"`，
-`next_attempt_at=0`；未知大小由 Publisher 检测后报告同一策略结果。超限 candidate 不再
-返回给播放；完整对象加速不可用时走源站，不开发分块支持。
-
-Publisher 不在每轮领取任务前探测云后端。Core 对 enabled 资源每 5 分钟探测一次两个端点，
-连续失败按 10/20/40/60 分钟退避（最多 1 小时），成功恢复 5 分钟；disabled 不周期探测。
-停用不等于完全没有云调用：站点 Edge Function 的播放 introspect/event 仍会访问控制桥，
-完全退出旁路需同时停用该站点触发规则。
-
-`POST /internal/v1/accelerations/leases/{id}/fail` 接受 `owner`、`error`、`error_code`；
-`error_code` 为 `publish_failed`（省略时同义）或 `object_too_large`，不按错误文案分类。
-fail 接口不再接受 `retry_after_seconds`，重试时间由 Core 决定：
-每次领取递增总 `attempts` 与 `consecutive_attempts`；普通失败及 lease 过期后按
-1/2/4/8 分钟退避，第五次失败进入 `failed` 终态。成功清零连续计数但保留总计数。
-`failed`/`skipped` 不计入 queued/retry_wait/ready，重复需求与进程重启不清除终态。
-当前没有发布终态的管理端重置接口。
-
-migration 0032 依据最近成功之后的 attempt 历史回填连续预算，无成功历史则沿用总
-attempts；不抢占活跃 lease，已有耗尽预算且无 lease 的请求升级为 failed。
-Server/Publisher 必须同步升级到新 fail 协议。
-
-加速资源是一个有自己预算的缓存，不是本地缓存的镜像。`cache_mode` 决定它的需求集合
-从哪里来：
-
-| 模式 | 需求集合 | 工作集 | 份额上限 |
-|---|---|---|---|
-| `prefetch` | 仅房间队列视界 | 房间数 × `prefetch_horizon`，**有上界** | 不生效，可用满预算 |
-| `prefetch_and_heat` | 视界 + 缓存就绪事件 | 无界（播过多少首就有多少） | `prefetch_share_percent` |
-
-`prefetch` 模式下需求有上界，因此不可能抖动；视界之外的曲目走源站 fallback。当预算
-显著小于活跃曲目集时这是正确的模式——`prefetch_and_heat` 只有在预算能装下热集时才有
-额外收益，否则会退化成"驱逐即重排"的重传循环。
-
-`prefetch_horizon` 是从每个房间队列游标起算的曲目数，默认 2（当前曲目 + 下一首），
-0 表示关闭待播钉住。视界内的曲目在请求侧获得认领优先级、在对象侧不可被 GC 驱逐。
-钉住是 deadline 形状的：房间游标停止推进或进程崩溃时自行过期，不会永久占位；曲目
-离开视界后钉住自然到期、落回热度池，而不是一放完就被回收。
-
-`prefetch_share_percent` 是待播能占的预算上限，默认 20%，它同时是热度曲目的保底份额。
-待播优先级高于热度常驻，但必须有上限——一次点满几十首的队列如果全部钉住，整个热集会被
-冲光然后重传一遍，抖动只是换了个方向。**该值必须不大于 `storage_low_watermark_percent`**：
-GC 的回收目标是低水位，而被钉住的部分它动不了，份额一旦越过低水位，GC 永远够不到目标。
-
-`purpose` 仅允许 `publisher|delivery|backend`。pending publisher/delivery token
-在切换窗口内可认证；backend activate 前必须通过受保护的 backend health。启用要求端点、
-三种 current credential、control/backend health、正容量预算，以及 45 秒内带
-`storage.inventory` 和 `object.delete` capability 的 publisher heartbeat；否则返回
-409 `acceleration_not_ready` 并在 error 中给出 `problems`。
-
-内部 `/internal/v1/accelerations/*` 路径仅接受 acceleration-scoped machine token。
-调用方不能在 body 中选择 acceleration ID；Server 必须从 token 解析资源。publisher
-config 可向已认证 adapter 返回解密后的 backend token、lease TTL、限速、对象上限和容量
-水位。进度阶段只允许
-`claimed→downloading→uploading→verifying→completing` 的非逆向转换，字节计数必须单调
-增加；合法进度更新对 lease 做受资源 TTL 上限约束的续租。
-
-取消是协作式 lease 合同。Core 一旦收到管理端 DELETE，后续 progress、reserve、complete
-必须返回 409 `cancellation_requested`；publisher 也可轮询
-`GET /internal/v1/accelerations/leases/{id}`。adapter 必须停止源文件读取/上传、清理临时
-对象，并调用 `POST /internal/v1/accelerations/leases/{id}/cancel` 确认。若 publisher
-失联，lease 到期回收会把 cancel_requested 请求终结为 canceled。取消记录和 attempt
-历史必须保留，不得通过删除请求记录实现取消。
-
-完整对象上传前，publisher 必须对 lease 调
-`POST /internal/v1/accelerations/leases/{id}/reserve`，提交 opaque `locator` 与
-`size_bytes`。Core 对 `(acceleration_id, locator)` 去重，并在同一事务中计算已记账对象与
-未过期 reservation；超过高水位返回 507 `acceleration_storage_full`，同时按 LRU 使旧
-candidate 失效并创建删除 job。adapter 通过
-`POST /internal/v1/accelerations/deletions/claim` 领取 job，调用供应商 API 删除后再
-complete；失败调用 fail（`owner`、`error`），由 Core 决定持久退避。每个删除任务最多
-领取 5 次，耗尽后保持失败及占用记账，不再派发；lease 过期同样计入预算。
-
-驱逐是缓存策略的正常结果，不是待重试的失败：GC 使 candidate 失效时，对应请求必须同时
-进入 `evicted`，退出可认领集合与 `queued`/`retry_wait` 统计。只有真实需求——缓存就绪回调、
-边缘 introspect 或进入预取视界——才会把它复活成 `queued`。若驱逐不写回需求侧，请求会在
-candidate 被删的同一瞬间从 `ready` 翻回 `queued`，publisher 随即重传刚被回收的对象，形成
-与预算无关的无限重传循环。
-
-GC 的受害者集合排除被钉住的对象。凑不够低水位就凑不够——调用方会拿到 507，这比删掉
-马上要放的那一首正确。认领顺序同样按钉住优先，否则马上要放的曲目会排在陈年请求之后。
-
-回收在途期间——存在待删除 job 且占用尚未回落到低水位——Core 不派发新的 lease。否则
-publisher 会先下载完整源再撞 507 或撞上处于 `deleting` 状态的同名 locator（409
-`acceleration_storage_reserved`），每个失败周期浪费一次整源下载。
-
-Core 以持久 inventory scan task 调度外部观测。adapter 先调用
-`POST /internal/v1/accelerations/inventory/claim` 认领 scan，再向
-`POST /internal/v1/accelerations/inventory` 分页提交同一 `scan_id`；所有页面进入独立
-staging generation，只有最后一批 `complete:true` 才在事务中原子更新 observed bytes、
-managed/observed/orphan/missing 对象数和 `observed_at`。快照描述的是 `observed_at` 时刻的
-存储状态，分页扫描本身耗时可观，因此只有在 `observed_at` 之前就已落库的对象才由本次扫描
-判决 missing；扫描窗口内完成的上传不在快照里属于预期，不得据此标记 missing。扫描失败必须调用
-`POST /internal/v1/accelerations/inventory/{id}/fail`；失败或不完整 generation 不得覆盖
-上一份完整快照。unknown locator 只作为 opaque orphan 记账，不会被 Core 解释成供应商
-key。`storage.stale` 表示最后完整 `observed_at` 已超过资源的 freshness window；它不把
-数据库查询时间冒充外部实时观测。删除到低水位前，GC 可以使被选中的 candidate 立即
-unavailable；播放因此走既有源站 fallback，而不是继续引用待删对象。
-
-同一 inventory scan 的失败或租约过期按 1/2/4/8 分钟退避，最多执行 5 次；
-`next_attempt_at` 和尝试次数持久化。最近一次 scan 耗尽后标记 `failed`，自动调度不再
-创建替代 scan。管理员显式调用 inventory refresh 可以创建新 scan；已有待执行或执行中
-scan 时 refresh 不重置它的重试预算。
-
 ## 7. 错误码
 
 WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；REST 使用 6.1 的 `{"error":{"code","message"}}`。`message` 面向诊断，可变；Client MUST 按 `code` 分支。
@@ -1242,17 +1103,6 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 | `conflict` | 409 | REST 当前状态冲突、重复资源、请求与已有绑定不匹配 |
 | `idempotency_conflict` | 409 | 同一幂等 key 与操作被用于不同请求 body |
 | `request_in_progress` | 409 | 同一幂等请求尚未完成；Client 可稍后重试 |
-| `acceleration_not_ready` | 409 | 资源启用前的 endpoint/credential/health/publisher readiness 未满足 |
-| `credential_not_pending` | 409 | activation 没有可切换的 pending credential，或 backend health 验证失败 |
-| `acceleration_not_empty` | 409 | disabled acceleration 仍拥有媒体对象、lease、reservation 或删除工作 |
-| `acceleration_storage_full` | 507 | 新对象会越过资源高水位；Core 已按 policy 排队回收，publisher 应稍后重试 |
-| `acceleration_storage_unmanaged` | 409 | 资源缺少正数容量预算；启用 readiness 同样会拒绝 |
-| `acceleration_storage_reserved` | 409 | 同一 opaque locator 已由另一个 live lease 预留；publisher 应稍后重试 |
-| `object_too_large` | 413 | 对象超过该加速资源的大小上限；跳过外部发布，不限制源站播放 |
-| `request_ready` | 409 | 已完成的 distribution request 不允许取消 |
-| `cancellation_requested` | 409 | 管理端已请求取消 live lease；publisher 必须停止并确认取消 |
-| `inventory_scan_invalid` | 409 | inventory scan 不存在、租约过期、owner/observed_at 不匹配或状态错误 |
-| `deletion_invalid` | 409 | 删除 job 不存在、已过期、状态错误或不属于提交 owner |
 | `provider_error` | 502 | Provider 调用失败（附诊断 message） |
 | `not_supported` | 501 | Provider 未实现可选能力（当前用于歌词） |
 | `internal` | 500 | 服务端内部错误 |

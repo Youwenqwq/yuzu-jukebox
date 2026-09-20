@@ -2,7 +2,6 @@ data/
 bin/
 .venv/
 /config.json
-/edgeone.json
 temp/
 TODO.md
 .claude/

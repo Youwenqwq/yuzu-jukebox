@@ -24,10 +24,6 @@ const (
 	RoleRequester  = "requester"
 	RoleRoomAdmin  = "room_admin"
 	RoleMediaAdmin = "media_admin"
-	// RoleSysAdmin 是加速/分发控制面的专属角色：只有它能创建、修改或停用
-	// 外部加速（control/backend URL 与凭据）。口令管理员与 OIDC role_mapping
-	// 均可授予；media_admin 不可触及，避免凭据型 SSRF 面（H1）。
-	RoleSysAdmin = "sys_admin"
 )
 
 const (
@@ -230,7 +226,7 @@ func (m *Manager) GuestAuth(name, adminPassword, remoteAddr string) (Identity, s
 	idPrefix := "g_"
 	hashInput := "guest:" + name
 	if adminMatched {
-		roles = append(roles, RoleRoomAdmin, RoleMediaAdmin, RoleSysAdmin)
+		roles = append(roles, RoleRoomAdmin, RoleMediaAdmin)
 		// A shared display name is not authentication. Password-authenticated
 		// administrators therefore use a distinct principal namespace so a
 		// pre-existing ordinary guest session can never inherit the grant.

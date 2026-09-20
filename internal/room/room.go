@@ -565,8 +565,8 @@ func (r *Room) Run(ctx context.Context) {
 	}
 
 	// persistQueue 把「当前曲目 + 待播队列」整体落库。当前曲目保留在 room_queue 中
-	// 并由 current_entry_id 标记游标，这样它对 SQL 可见（加速层可以钉住正在流式
-	// 传输的对象），重启也能从它本身续播。线上的 queue 表示不变，仍只含待播条目。
+	// 并由 current_entry_id 标记游标，重启能从它本身续播。
+	// 线上的 queue 表示不变，仍只含待播条目。
 	persistQueue := func(current *QueueEntry, next []QueueEntry) error {
 		entries, currentEntryID := next, ""
 		if current != nil {

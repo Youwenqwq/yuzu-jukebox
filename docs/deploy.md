@@ -69,29 +69,6 @@ server {
 仅在受控的私域（LAN）部署中，才可按需要保留强 `admin_password`；即使如此，
 OIDC 仍是多人管理与角色审计的推荐方式。
 
-## 可选 EdgeOne 媒体旁路
-
-本模块已停止新功能开发，仅维护现有功能与修复 Bug；内网与少量公网播放优先直出。
-新建资源默认停用。大于加速 `max_object_bytes`（默认 23 MiB）的文件标记为 `skipped`，
-继续由 Yuzu 源站服务，不做分块或周期性重传；本地缓存仍使用独立的大小限制。
-升级本次重试协议时需同时更新 `yuzu-server` 与 `yuzu-edgeone`；数据库自动执行 migration
-0032，保留历史 attempts，并使已耗尽预算的旧任务停止自动重试。先备份数据库。
-
-公网实例若受源站上行带宽限制，可选择部署 `yuzu-edgeone`、Makers 控制面与
-[`deploy/edgeone-site/stream.js`](../deploy/edgeone-site/stream.js)。该模块只接管已经由
-Yuzu 拉取并缓存的媒体文件分发；Provider 拉流、现有 `/stream/v1` 协议和局域网部署行为
-都不改变。
-
-在主域名所属 EdgeOne 加速站点中创建站点级 Edge Function，粘贴该文件代码，并为
-`/stream/v1/*` 配置 URL path 触发规则。REST、WebSocket、管理接口和 SPA 仍按站点原有
-规则回源。Makers 仅保留 control/backend Cloud Functions。Core 使用 850 MiB 默认预算及
-95%/85% 水位；adapter 负责 Blob inventory、orphan/missing reconciliation 和删除 job。
-外部加速存储能力较小时应调低低水位（`storage_low_watermark_percent`），按可用空间留足
-余量：低水位是 GC 的回收目标，被钉住的预取对象不可被驱逐，钉住份额一旦越过低水位，
-GC 永远收不到目标，容量压力会反复出现。
-具体资源创建、凭据、容量字段、触发规则与健康检查见
-[EdgeOne 旁路分发设计与部署](edgeone-distribution.md)。
-
 ## config.json 生产注意
 
 ```jsonc

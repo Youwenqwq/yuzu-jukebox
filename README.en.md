@@ -162,15 +162,12 @@ See [docs/deploy.md](docs/deploy.md) for production setup:
 
 **Where it runs:** Linux server (x86/ARM). The agent runs on any Linux machine with MPV — Raspberry Pi, old laptop, etc.
 
-Prefer origin streaming through a reliable ingress path for public access. [EdgeOne CDN offload](docs/edgeone-distribution.md) is an **optional experimental module in maintenance-only mode: no new features, existing functionality and bug fixes only**. New accelerations are disabled by default; files above the acceleration object limit fall back to the origin without chunked offload.
-
 ## Documentation
 
 | Doc | Content |
 |-----|---------|
 | [docs/spec-v1.md](docs/spec-v1.md) | Wire protocol, room state machine, auth flow, integration contract |
 | [docs/deploy.md](docs/deploy.md) | Production deployment guide |
-| [docs/edgeone-distribution.md](docs/edgeone-distribution.md) | EdgeOne CDN offload maintenance and deployment (experimental, feature-frozen) |
 | [AGENTS.md](AGENTS.md) | Codebase guide for contributors and coding agents |
 
 ## Permissions

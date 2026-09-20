@@ -1,8 +1,0 @@
-{
-  "core_url": "http://127.0.0.1:8080",
-  "publisher_token": "replace-with-distribution-publisher-token",
-  "state_path": "data/yuzu-edgeone.db",
-  "owner": "publisher-1",
-  "poll_interval_seconds": 2,
-  "http_timeout_seconds": 600
-}

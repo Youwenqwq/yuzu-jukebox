@@ -18,7 +18,6 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/control"
 	"github.com/youwenqwq/yuzu-jukebox/internal/coverurl"
 	"github.com/youwenqwq/yuzu-jukebox/internal/credmon"
-	"github.com/youwenqwq/yuzu-jukebox/internal/distribution"
 	"github.com/youwenqwq/yuzu-jukebox/internal/httpapi"
 	"github.com/youwenqwq/yuzu-jukebox/internal/plsync"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -75,18 +74,6 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	c := cache.New(cfg.CacheDir, cfg.CacheMaxBytes, cfg.Cache.MaxObjectBytes, st, reg)
 
-	distributionService := distribution.New(st)
-	accelerationRegistry := distribution.NewRegistry(st)
-	healthMonitor := distribution.NewHealthMonitor(st)
-	go healthMonitor.Run(ctx)
-	go runAccelerationInventoryScheduler(ctx, st)
-	go runAccelerationPinSweeper(ctx, distributionService)
-	c.SetReadyHook(func(ref provider.TrackRef) {
-		if err := distributionService.RequestCacheReady(context.Background(), ref); err != nil {
-			log.Printf("[distribution] request %s failed: %v", ref, err)
-		}
-	})
-
 	rooms := room.NewManager(ctx, st, authm, c, reg, key)
 	if err := rooms.Load(); err != nil {
 		return nil, err
@@ -112,7 +99,6 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	api := httpapi.NewServer(st, authm, integrations, bindings, rooms, reg, lp, c, controls, ws, oidcValidator, cfg.OIDC.RoleMapping, cfg.NCM.CoverDirect, cfg.Media.MaxUploadBytes)
 	api.SetCoverSecret(key)
 	api.SetPlaylistCoverDir(filepath.Join(cfg.MediaDir, "playlist_covers"))
-	api.ConfigureDistribution(distributionService, accelerationRegistry)
 
 	if cfg.CacheAutoPruneDays > 0 {
 		go runCacheJanitor(ctx, c, cfg.CacheAutoPruneDays)
@@ -142,56 +128,6 @@ func runSessionJanitor(ctx context.Context, manager *auth.Manager, st *store.Sto
 			if err := st.PruneExternalBindingCodes(ctx, now.UnixMilli()); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("[auth] binding code prune failed: %v", err)
 			}
-		}
-	}
-}
-
-func runAccelerationInventoryScheduler(ctx context.Context, st *store.Store) {
-	schedule := func(now time.Time) {
-		scans, err := st.ScheduleDueAccelerationInventoryScans(ctx, now.UnixMilli())
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("[distribution] schedule inventory scans: %v", err)
-			}
-			return
-		}
-		for _, scan := range scans {
-			log.Printf("[distribution] scheduled inventory scan %s for %s", scan.ID, scan.AccelerationID)
-		}
-	}
-	schedule(time.Now())
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			schedule(now)
-		}
-	}
-}
-
-// runAccelerationPinSweeper 周期性地把房间预取视界登记为加速需求并钉住。
-//
-// 用轮询而不是让房间 actor 推送：钉住是 deadline 形状的，房间崩溃或通知丢失时会自行
-// 过期，所以定期重刷是最省事也最不会泄漏的形态，而且分发层不必反向依赖房间层。
-// 扫描周期必须显著短于 distribution.PinTTL，单次失败不能让正在播放的对象失去保护。
-func runAccelerationPinSweeper(ctx context.Context, service *distribution.Service) {
-	sweep := func() {
-		if err := service.PinPrefetchHorizon(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[distribution] pin prefetch horizon: %v", err)
-		}
-	}
-	sweep()
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			sweep()
 		}
 	}
 }

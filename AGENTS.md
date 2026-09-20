@@ -4,11 +4,10 @@
 
 Music jukebox server: multi-room, multi-provider, queue-based playback with real-time WebSocket push. Written in Go, standard library `net/http`, SQLite backend.
 
-Four binaries:
+Three binaries:
 - `yuzu-server` — the HTTP+WS server
 - `yuzu-cli` — CLI control and administration client
 - `yuzu-agent` — MPV-based headless playback renderer (player plane)
-- `yuzu-edgeone` — optional EdgeOne publisher adapter (media CDN offload)
 
 ## Directory Layout
 
@@ -17,7 +16,6 @@ cmd/
   yuzu-server/      — main() entry, loads config, assembles deps via app.New()
   yuzu-cli/         — CLI client
   yuzu-agent/       — headless player (MPV)
-  yuzu-edgeone/     — EdgeOne publisher adapter (optional, CDN offload)
 internal/
   app/              — dependency assembly (app.New), returns http.Handler + store
   auth/             — session management, guest/OIDC auth, ticket auth, roles
@@ -26,8 +24,6 @@ internal/
   control/           — shared room command/query service and room-scoped authorization
   config/           — Config struct, JSON deserialization, defaults
   credmon/          — hot-reload credential monitor for providers
-  distribution/     — acceleration service: leases, candidates, capacity & GC governance
-  edgeonepublisher/ — EdgeOne adapter: upload, inventory, deletion client
   httpapi/          — REST handlers: /api/v1/*, /stream/v1/*, /api/v1/cover/*
   shortcode/        — Crockford Base32 short-code helpers
   wsapi/            — WebSocket handler: /ws/v1
@@ -151,7 +147,6 @@ All fields optional if not needed. `secret_key` auto-generated on first run.
   - Playlists: `playlists`, `playlist_items`
   - Integrations/grants: `integrations`, `external_scope_rooms`, `external_identity_links`, `external_binding_codes`, `room_principal_grants`, `idempotency_records`
   - Players: `players`, `room_player_bindings`, `room_output_state`
-  - Acceleration: `accelerations`, `distribution_*`, `acceleration_*`
 - **Secrets**: provider credentials use AES-GCM with `secret_key`; Integration tokens are high-entropy bearer credentials stored only as hashes and shown once.
 
 ## Build & Run
@@ -160,7 +155,6 @@ All fields optional if not needed. `secret_key` auto-generated on first run.
 go build -o bin/yuzu-server  ./cmd/yuzu-server
 go build -o bin/yuzu-cli     ./cmd/yuzu-cli
 go build -o bin/yuzu-agent   ./cmd/yuzu-agent
-go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone   # optional: EdgeOne media offload
 ./bin/yuzu-server -config config.json
 ```
 
@@ -179,7 +173,6 @@ go build -o bin/yuzu-edgeone ./cmd/yuzu-edgeone   # optional: EdgeOne media offl
 | `requester` | Add to queue, remove own entries |
 | `room_admin` | Manage rooms, integrations and grants; controller in every Room |
 | `media_admin` | Manage media, upload, provider credentials |
-| `sys_admin` | Manage the acceleration/distribution control plane: create/modify/delete accelerations, control/backend URLs, delivery credentials, inventory refresh. Granted to password-authenticated admins and via OIDC `role_mapping`; deliberately NOT granted to `media_admin` (credentialed-SSRF surface) |
 | Room grant `controller` | Control playback, radio and queue ordering in one Room; not a global role |
 
 ## Identity Follow-ups
@@ -205,7 +198,7 @@ Still planned:
 - **`position_ms` can be negative**: on track switch the room schedules position 0 at `updated_at + start_lead_ms` (room policy `start_lead_ms`, default 600ms) so clients can load and all start on time without losing the head of the track. A negative computed `should_be` means "starts in |x| ms" — clients load-and-pause, skip drift correction, and clamp to 0 when rendering. See `docs/spec-v1.md` §2.2
 - **Room actor**: per-room goroutine. Queue entries persisted in SQLite. Radio mode state is runtime-only (lost on restart)
 - **Unplayable tracks auto-skip**: when a track becomes the current, the room asynchronously preflights it (cache hit → pass; otherwise `provider.Resolve`). Resolve failure — e.g. QQ Music's 104003 without a credential, or a missing local file — reports back to the actor, which advances with `end_reason="unplayable"` instead of stalling until the duration timer fires. The report carries the ref and is ignored if the user already skipped away (race guard). A queue of uniformly unplayable tracks drains quickly; radio keeps refilling, so a broken radio source spins without deadlock. `Cache.Prefetch` (next-track warm-up) stays silent-by-design — the preflight is the failure detector for the *current* track
-- **Current track stays in the queue**: `room_queue` holds the playing entry plus everything upcoming; `is_current` marks the cursor. The wire format is unchanged — `queue.snapshot`/`queue.patch` still carry upcoming entries only, and the playing entry is delivered via `playback.changed`. Persisting it means the playing track is queryable in SQL (acceleration pins the object being streamed) and a restart resumes that track instead of skipping to the next one. `position_ms` is still runtime-only, so resume starts from the head
+- **Current track stays in the queue**: `room_queue` holds the playing entry plus everything upcoming; `is_current` marks the cursor. The wire format is unchanged — `queue.snapshot`/`queue.patch` still carry upcoming entries only, and the playing entry is delivered via `playback.changed`. Persisting it means a restart resumes that track instead of skipping to the next one. `position_ms` is still runtime-only, so resume starts from the head
 - **TrackRef format**: `provider:id` — opaque string below the API layer (e.g. `ncm:347230`, `bili:BV1xx`, `qq:<song mid>`, `local:<uuid>`)
 - **All timestamps**: Unix milliseconds (UTC)
 
