@@ -1332,7 +1332,7 @@ func (s *Server) evictCache(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"evicted": ref})
 }
 
-// stream 统一出流。票据鉴权；支持 Range（完整缓存）与首拉流式 tee。
+// stream 统一出流。票据鉴权；支持 Range 与首拉流式 tee。
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	ref := provider.TrackRef(r.PathValue("ref"))
 	ticket := r.URL.Query().Get("ticket")
@@ -1351,16 +1351,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if r.Header.Get("Range") != "" {
-		// Range 请求需要完整文件（可能触发同步拉取）
-		f, err := s.cache.Open(r.Context(), ref)
-		if err != nil {
-			s.providerError(w, r, "open local stream", err)
-			return
-		}
-		defer f.Close()
-		fi, _ := f.Stat()
-		http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		s.serveStreamRange(w, r, ref, rangeHeader)
 		return
 	}
 
@@ -1372,6 +1364,89 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, rc)
+}
+
+// serveStreamRange 处理 Range 请求。缓存命中走 ServeContent；
+// 在途/冷曲目用 OpenLive 从增长中的临时文件按偏移供给——中途进房
+// 或 seek 不再阻塞等整曲下载。总量未知、后缀区间、多区间等冷门
+// 形态回退到整曲路径（ServeContent 会自行正确处理或忽略）。
+func (s *Server) serveStreamRange(w http.ResponseWriter, r *http.Request, ref provider.TrackRef, rangeHeader string) {
+	// 完整缓存：ServeContent 原生处理（含多区间与校验）。
+	if path := s.cache.Lookup(r.Context(), ref); path != "" {
+		f, err := s.cache.Open(r.Context(), ref)
+		if err != nil {
+			s.providerError(w, r, "open cached stream", err)
+			return
+		}
+		defer f.Close()
+		fi, _ := f.Stat()
+		http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+		return
+	}
+
+	start, end, hasEnd, ok := parseByteRange(rangeHeader)
+	if ok {
+		rc, total, err := s.cache.OpenLive(r.Context(), ref, start)
+		if err != nil {
+			s.providerError(w, r, "open live stream", err)
+			return
+		}
+		if total >= 0 {
+			defer rc.Close()
+			if start >= total {
+				w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(total, 10))
+				writeErr(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable", "range start beyond end of stream")
+				return
+			}
+			if !hasEnd || end > total-1 {
+				end = total - 1
+			}
+			h := w.Header()
+			h.Set("Content-Range", "bytes "+strconv.FormatInt(start, 10)+"-"+strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(total, 10))
+			h.Set("Accept-Ranges", "bytes")
+			h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+			w.WriteHeader(http.StatusPartialContent)
+			// LimitReader 封顶；增长读在前沿阻塞等待，下载完成自然 EOF。
+			io.Copy(w, io.LimitReader(rc, end-start+1))
+			return
+		}
+		rc.Close()
+	}
+
+	// 回退：整曲落盘后 ServeContent（后缀区间/多区间/总量未知/解析失败）。
+	f, err := s.cache.Open(r.Context(), ref)
+	if err != nil {
+		s.providerError(w, r, "open local stream", err)
+		return
+	}
+	defer f.Close()
+	fi, _ := f.Stat()
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+}
+
+// parseByteRange 只接受最简单的 `bytes=<start>-[<end>]` 前缀区间；
+// 其余一切形态（后缀、多区间、语法错误）返回 ok=false 由调用方回退。
+func parseByteRange(h string) (start, end int64, hasEnd, ok bool) {
+	rest, found := strings.CutPrefix(h, "bytes=")
+	if !found || strings.Contains(rest, ",") {
+		return 0, 0, false, false
+	}
+	dash := strings.IndexByte(rest, '-')
+	if dash <= 0 { // 无横线或后缀区间（需要已知总量，走回退）
+		return 0, 0, false, false
+	}
+	start, err := strconv.ParseInt(rest[:dash], 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, false, false
+	}
+	if tail := rest[dash+1:]; tail != "" {
+		end, err = strconv.ParseInt(tail, 10, 64)
+		if err != nil || end < start {
+			return 0, 0, false, false
+		}
+		hasEnd = true
+	}
+	return start, end, hasEnd, true
 }
 
 // ---------- 工具 ----------

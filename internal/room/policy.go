@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 )
@@ -30,9 +31,9 @@ type Policy struct {
 	// "requester" 允许任何具全局 requester 角色的 Principal 操作。
 	RadioControl string `json:"radio_control,omitempty"`
 	// StartLeadMs 切歌起播提前量（毫秒）：新曲目的 position 0 被排在
-	// 「切歌时刻 + 提前量」，客户端拿到这段窗口装载解码，到点同时开声，
+	// 「音频就绪时刻 + 提前量」，客户端拿到这段窗口装载解码，到点同时开声，
 	// 头部不再被装载延迟吃掉（spec-v1 §2.2 起播提前量）。
-	// nil = 用 DefaultStartLeadMs；0 = 关闭（切歌即 position 0，旧行为）。
+	// nil = 按播放器装载遥测自适应，无新鲜样本用 DefaultStartLeadMs；0 = 关闭。
 	// 房间内客户端装载普遍慢（公网/蓝牙输出）时调大。
 	StartLeadMs *int `json:"start_lead_ms,omitempty"`
 }
@@ -74,12 +75,26 @@ func ParsePolicy(raw string) (Policy, error) {
 	return p, nil
 }
 
-// startLeadMs 本房间生效的起播提前量。
-func (p Policy) startLeadMs() int64 {
+type playerLoadSample struct {
+	emaMs float64
+	at    time.Time
+}
+
+// effectiveLeadMs 显式策略优先；否则给最慢的新鲜装载样本额外留出 150ms。
+func (p Policy) effectiveLeadMs(samples map[string]playerLoadSample, now time.Time) int64 {
 	if p.StartLeadMs != nil {
 		return int64(*p.StartLeadMs)
 	}
-	return DefaultStartLeadMs
+	slowest := float64(-1)
+	for _, sample := range samples {
+		if now.Sub(sample.at) <= 10*time.Minute {
+			slowest = max(slowest, sample.emaMs)
+		}
+	}
+	if slowest < 0 {
+		return DefaultStartLeadMs
+	}
+	return int64(min(max(slowest+150, 300), 3000))
 }
 
 // queueLimit 该身份的待播上限：0 = 不限。

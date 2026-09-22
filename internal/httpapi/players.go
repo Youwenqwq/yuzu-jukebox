@@ -31,6 +31,9 @@ type playerResourceView struct {
 	UpdatedAt     int64    `json:"updated_at"`
 	LastSeenAt    *int64   `json:"last_seen_at,omitempty"`
 	ConnectedAt   int64    `json:"connected_at,omitempty"`
+	DriftMs       int64    `json:"drift_ms,omitempty"`
+	BaselineMs    int64    `json:"baseline_ms,omitempty"`
+	LoadMs        int64    `json:"load_ms,omitempty"`
 }
 
 func (s *Server) playerResourceView(ctx context.Context, player store.Player, online *wsapi.PlayerInfo) (playerResourceView, error) {
@@ -53,6 +56,10 @@ func (s *Server) playerResourceView(ctx context.Context, player store.Player, on
 		view.Volume = online.Volume
 		view.Muted = online.Muted
 		view.ConnectedAt = online.ConnectedAt
+		// 同步遥测仅在 Agent 上报过时出现（omitempty 隐藏未上报状态）。
+		view.DriftMs = online.DriftMs
+		view.BaselineMs = online.BaselineMs
+		view.LoadMs = online.LoadMs
 		if online.RoomID != "" {
 			view.RoomID = online.RoomID
 		}

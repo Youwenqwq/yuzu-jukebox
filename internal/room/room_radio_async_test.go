@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
-	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
@@ -98,8 +97,7 @@ func newAsyncRadioRoom(t *testing.T, radioProvider provider.Provider, policyRaw 
 	registry.Register(&playableTestProvider{})
 	registry.Register(radioProvider)
 	authm := auth.NewManager("", st)
-	trackCache := cache.New(filepath.Join(root, "cache"), 1<<20, 0, st, registry)
-	r := New("r1", "room", "", policyRaw, st, authm, trackCache, registry)
+	r := New("r1", "room", "", policyRaw, st, authm, nil, registry)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	t.Cleanup(func() {

@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -73,7 +74,7 @@ func (rooms testRoomSource) Get(id string) (*room.Room, error) {
 	return r, nil
 }
 
-type staticProvider struct{}
+type staticProvider struct{ mediaPath string }
 
 func (*staticProvider) ID() string { return "test" }
 func (*staticProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
@@ -84,9 +85,9 @@ func (*staticProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provi
 		Ref: ref, Title: ref.String(), DurationMs: int64(10 * time.Minute / time.Millisecond),
 	}, nil
 }
-func (*staticProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
-	// 预检要求当前曲目可播；control 测试不真正拉流。
-	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
+func (p *staticProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	// 就绪门控会实际打开媒体文件；control 测试用真实临时文件，不真正拉流。
+	return provider.StreamLocator{URL: "file://" + p.mediaPath}, nil
 }
 
 type staticTrackSource struct{}
@@ -109,7 +110,11 @@ func newServiceFixture(t *testing.T) (*Service, *fakeGrantStore) {
 		t.Fatal(err)
 	}
 	reg := provider.NewRegistry()
-	reg.Register(&staticProvider{})
+	mediaPath := filepath.Join(root, "fixture.mp3")
+	if err := os.WriteFile(mediaPath, []byte("fake-audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg.Register(&staticProvider{mediaPath: mediaPath})
 	authm := auth.NewManager("", st)
 	trackCache := cache.New(filepath.Join(root, "cache"), 1<<20, 0, st, reg)
 	r := room.New("room-a", "Room A", "", "", st, authm, trackCache, reg)

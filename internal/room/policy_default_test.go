@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
-	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
@@ -102,12 +101,12 @@ func TestRadioRefillHonorsMaxQueue(t *testing.T) {
 	registry := provider.NewRegistry()
 	registry.Register(&cappedRadioProvider{source: source})
 	authm := auth.NewManager("", st)
-	trackCache := cache.New(filepath.Join(root, "cache"), 1<<20, 0, st, registry)
-	r := New("r1", "room", "", `{"max_queue":2}`, st, authm, trackCache, registry)
+	r := New("r1", "room", "", `{"max_queue":2}`, st, authm, nil, registry)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	t.Cleanup(func() {
 		cancel()
+		<-r.done
 		st.Close()
 	})
 
@@ -139,5 +138,29 @@ func TestRadioRefillHonorsMaxQueue(t *testing.T) {
 	}
 	if want := []int{2, 1}; gotLimits[0] != want[0] || gotLimits[1] != want[1] {
 		t.Fatalf("radio source batch limits = %v, want %v", gotLimits, want)
+	}
+}
+
+func TestAdaptiveLeadFreshnessAndBounds(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	for _, tc := range []struct {
+		name    string
+		samples map[string]playerLoadSample
+		want    int64
+	}{
+		{"expired", map[string]playerLoadSample{"p": {emaMs: 2000, at: now.Add(-10*time.Minute - time.Millisecond)}}, DefaultStartLeadMs},
+		{"fresh-boundary", map[string]playerLoadSample{"p": {emaMs: 1000, at: now.Add(-10 * time.Minute)}}, 1150},
+		{"lower-bound", map[string]playerLoadSample{"p": {emaMs: 0, at: now}}, 300},
+		{"upper-bound", map[string]playerLoadSample{"p": {emaMs: 10000, at: now}}, 3000},
+		{"stale-slow-player", map[string]playerLoadSample{
+			"slow": {emaMs: 2500, at: now.Add(-11 * time.Minute)},
+			"fast": {emaMs: 500, at: now},
+		}, 650},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Policy{}).effectiveLeadMs(tc.samples, now); got != tc.want {
+				t.Fatalf("effectiveLeadMs = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

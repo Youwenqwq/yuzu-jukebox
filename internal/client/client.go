@@ -54,8 +54,9 @@ type Client struct {
 	queueResyncing bool
 
 	events   chan Message
-	offsetMs int64 // server_now = local_now + offsetMs
-	synced   bool
+	offsetMs atomic.Int64 // server_now = local_now + offsetMs + manualMs
+	manualMs atomic.Int64 // 人工听感微调,见 SetManualOffset
+	synced   atomic.Bool
 }
 
 // Dial 建立 WS 连接并启动读泵。server 为 HTTP 基址，如 "http://127.0.0.1:8080"。
@@ -156,6 +157,7 @@ func (c *Client) call(ctx context.Context, typ string, data any) (Message, error
 // ---------- 校时 ----------
 
 // ClockSync 进行 rounds 轮 ping/pong，取最小 RTT 样本估算时钟偏移。
+// pong 由唯一读泵按 ref 分流到 pending，可与 Events 消费及 ServerNow 并发调用。
 func (c *Client) ClockSync(ctx context.Context, rounds int) error {
 	var bestOffset int64
 	bestRTT := int64(1 << 62)
@@ -181,14 +183,21 @@ func (c *Client) ClockSync(ctx context.Context, rounds int) error {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	c.offsetMs = bestOffset
-	c.synced = true
+	c.offsetMs.Store(bestOffset)
+	c.synced.Store(true)
 	return nil
 }
 
-// ServerNow 推算当前服务器时钟（毫秒）。未校时返回本地时间。
+// SetManualOffset 叠加一个人工时钟微调(毫秒),用于和同空间其他设备
+// 听感对齐:链路 RTT 不对称导致的固定偏差无法从单侧测量消除,
+// 只能按耳朵校准。正值 = 推算的服务器时间更晚 = 本机相对提前出声。
+func (c *Client) SetManualOffset(ms int64) {
+	c.manualMs.Store(ms)
+}
+
+// ServerNow 推算当前服务器时钟(毫秒)。未校时返回本地时间。
 func (c *Client) ServerNow() int64 {
-	return time.Now().UnixMilli() + c.offsetMs
+	return time.Now().UnixMilli() + c.offsetMs.Load() + c.manualMs.Load()
 }
 
 // ---------- 会话 ----------

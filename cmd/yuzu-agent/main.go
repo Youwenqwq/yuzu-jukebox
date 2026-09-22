@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -34,6 +35,7 @@ func main() {
 		mpvPath = flag.String("mpv", "mpv", "mpv binary path")
 		socket  = flag.String("socket", filepath.Join(os.TempDir(), "yuzu-agent.sock"), "mpv IPC socket path")
 		ao      = flag.String("ao", "", "mpv audio output (e.g. null for headless testing)")
+		syncOff = flag.Int64("sync-offset", envOrInt64("YUZU_SYNC_OFFSET_MS", 0), "manual sync trim in ms: positive = play earlier (align with co-located devices)")
 	)
 	flag.Parse()
 	if *key == "" {
@@ -43,12 +45,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *server, *key, *mpvPath, *socket, *ao); err != nil {
+	if err := run(ctx, *server, *key, *mpvPath, *socket, *ao, *syncOff); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, server, playerKey, mpvPath, socket, ao string) error {
+func run(ctx context.Context, server, playerKey, mpvPath, socket, ao string, syncOffsetMs int64) error {
 	// MPV 只启动一次，跨重连存活。重连成功后服务器会推送播放快照，
 	// 代理把快照重新渲染进去（loadedRef 每会话重置，强制刷新）。
 	os.Remove(socket)
@@ -65,7 +67,7 @@ func run(ctx context.Context, server, playerKey, mpvPath, socket, ao string) err
 	const maxBackoff = 30 * time.Second
 	for {
 		start := time.Now()
-		err := session(ctx, server, playerKey, mpv)
+		err := session(ctx, server, playerKey, mpv, syncOffsetMs)
 		mpv.Stop()
 		if ctx.Err() != nil {
 			return nil // 主动退出
@@ -88,12 +90,15 @@ func run(ctx context.Context, server, playerKey, mpvPath, socket, ao string) err
 
 // session 一次连接的完整生命周期：连接 → 校时 → Player 认证 → 服务端分配 → 渲染。
 // 任何环节失败都返回错误，由 run 决定重连。
-func session(ctx context.Context, server, playerKey string, mpv *mpvClient) error {
+func session(ctx context.Context, server, playerKey string, mpv *mpvClient, syncOffsetMs int64) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	// 1. 协议连接：校时 → Player Key 认证 → 上报设备能力
 	cli, err := client.Dial(ctx, server)
 	if err != nil {
 		return err
 	}
+	cli.SetManualOffset(syncOffsetMs)
 	defer cli.Close()
 	if err := cli.ClockSync(ctx, 5); err != nil {
 		return err
@@ -111,11 +116,32 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 		return err
 	}
 	log.Printf("registered as player %s (%s); waiting for server Room assignment", playerID, identity.Name)
+	// 播放期间独立重校时，pong 不占用主循环的事件流。
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := cli.ClockSync(ctx, 3); err != nil {
+					log.Printf("periodic clock sync: %v", err)
+				}
+			}
+		}
+	}()
+
+	syncer := &driftSyncer{}
 	reportState := func() {
 		vol, verr := mpv.Volume()
 		muted, merr := mpv.Muted()
 		if verr == nil && merr == nil {
-			_ = cli.SendPlayerState(int(vol+0.5), muted)
+			_ = cli.SendPlayerState(client.PlayerStateReport{
+				Volume: int(vol + 0.5), Muted: muted,
+				DriftMs: syncer.lastDrift, BaselineMs: syncer.baseline,
+				LoadMs: syncer.loadMs, HasMetrics: true,
+			})
 		}
 	}
 	reportState()
@@ -127,6 +153,11 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 	)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	// 装载期间短轮询 time-pos，暂停待命时也能及时测出装载耗时。
+	loadTimer := time.NewTimer(0)
+	loadTimer.Stop()
+	defer loadTimer.Stop()
+	var loadCh <-chan time.Time
 
 	// 防抖：快速连续的 playback.changed（如管理员连切）塌缩成最后一次 apply。
 	// 否则每次 skip 都会触发一次完整的 loadfile + 探测下载 + 校偏，
@@ -141,7 +172,6 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 	var debounce *time.Timer
 	var startTimer *time.Timer
 	var lastApply time.Time
-	syncer := &driftSyncer{}
 
 	// cancelStart 撤销待命中的预定起播，防止旧定时器在新状态上开声。
 	cancelStart := func() {
@@ -162,6 +192,9 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 		if pb.Current == nil {
 			loadedRef = ""
 			syncer.reset()
+			syncer.loadStart = time.Time{}
+			loadTimer.Stop()
+			loadCh = nil
 			mpv.Stop()
 			return
 		}
@@ -179,32 +212,44 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 			if startSec < 0 {
 				startSec = 0
 			}
+			syncer.loadStart = time.Now()
 			if err := mpv.LoadFile(server+pb.Current.StreamURL, startSec); err != nil {
 				log.Printf("loadfile: %v", err)
+				syncer.loadStart = time.Time{}
+				loadTimer.Stop()
+				loadCh = nil
 				return
 			}
 			loadedRef = pb.Current.TrackRef
 			syncer.reset()
+			loadTimer.Reset(0)
+			loadCh = loadTimer.C
 			mpv.SetSpeed(1.0) // 上一首可能残留变速
 			log.Printf("playing %s (%s)", pb.Current.Title, pb.Current.TrackRef)
 		}
 		if leadIn {
 			// 起播提前量（spec-v1 §2.2）：装载完成后保持暂停占住这段窗口，
-			// 到 position 0 时刻解除暂停——头部不再被装载延迟吃掉。
+			// 已学到输出延迟时提前解暂停，使声音而非指令落在 position 0。
 			// playing=false 时不排定，等服务端 resume 推新状态重新计时。
 			if pb.Playing {
-				startTimer = time.AfterFunc(time.Duration(-shouldMs)*time.Millisecond, func() {
+				early := syncer.earlyStartMs()
+				waitMs := max(0, -pb.ShouldBeMs(cli.ServerNow())-early)
+				if early > 0 {
+					log.Printf("lead-in: advancing unpause by %dms (device bias %dms)", early, syncer.deviceBias)
+				}
+				startTimer = time.AfterFunc(time.Duration(waitMs)*time.Millisecond, func() {
 					select {
 					case startCh <- struct{}{}:
 					default:
 					}
 				})
-				log.Printf("lead-in: starting in %dms", -shouldMs)
+				log.Printf("lead-in: starting in %dms", waitMs)
 			}
 			return
 		}
 		mpv.SetPause(!pb.Playing)
 		correct(mpv, cli, pb, syncer)
+		reportState()
 	}
 
 	// scheduleApply 前沿触发 + 尾部合并，见 debounceWindow 说明。
@@ -248,6 +293,9 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 				cur = client.Playback{}
 				loadedRef = ""
 				syncer.reset()
+				syncer.loadStart = time.Time{}
+				loadTimer.Stop()
+				loadCh = nil
 				mpv.Stop()
 				log.Printf("Room assignment removed")
 			case "player.command":
@@ -281,11 +329,22 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 			}
 			mpv.SetPause(false)
 			syncer.reset()
+		case <-loadCh:
+			if !syncer.loadStart.IsZero() {
+				_, _ = syncer.timePos(mpv)
+			}
+			if syncer.loadStart.IsZero() {
+				loadCh = nil
+				reportState()
+			} else {
+				loadTimer.Reset(50 * time.Millisecond)
+			}
 		case <-ticker.C:
 			// 提前量窗口内曲目还没开声，不参与校偏（应播位置为负）。
 			if cur.Current != nil && cur.Playing && cur.ShouldBeMs(cli.ServerNow()) >= 0 {
 				correct(mpv, cli, cur, syncer)
 			}
+			reportState()
 		}
 	}
 }
@@ -297,12 +356,43 @@ func session(ctx context.Context, server, playerKey string, mpv *mpvClient) erro
 // 漂移样本就是这个偏差本身——直接学为基线，后续只纠正超出基线的
 // 变化，而不是反复拽一个恒定的读数差。
 type driftSyncer struct {
-	baseline    int64 // 已学习的测量偏差
-	hasBaseline bool  // 基线是否已建立
-	awaitSample bool  // 刚执行过 seek，下一个样本用于学习基线
+	baseline      int64 // 已学习的测量偏差
+	hasBaseline   bool  // 基线是否已建立
+	awaitSample   bool  // 刚执行过 seek，下一个样本用于学习基线
+	deviceBias    int64 // 跨曲目的输出延迟估计，reset 不清除
+	hasDeviceBias bool
+	lastDrift     int64
+	loadStart     time.Time
+	loadMs        int64
 }
 
-func (s *driftSyncer) reset() { s.hasBaseline, s.awaitSample = false, false }
+func (s *driftSyncer) reset() {
+	s.baseline = 0
+	s.hasBaseline, s.awaitSample = false, false
+}
+
+func (s *driftSyncer) learnBaseline(drift int64) {
+	s.baseline, s.deviceBias = drift, drift
+	s.hasBaseline, s.hasDeviceBias = true, true
+	s.awaitSample = false
+}
+
+func (s *driftSyncer) earlyStartMs() int64 {
+	if !s.hasDeviceBias || s.deviceBias >= 0 {
+		return 0
+	}
+	return -max(s.deviceBias, -400)
+}
+
+// timePos 在首个有效读数到达时完成本次装载计时；校偏和装载探测共用。
+func (s *driftSyncer) timePos(mpv *mpvClient) (int64, error) {
+	pos, err := mpv.TimePos()
+	if err == nil && !s.loadStart.IsZero() {
+		s.loadMs = time.Since(s.loadStart).Milliseconds()
+		s.loadStart = time.Time{}
+	}
+	return pos, err
+}
 
 const (
 	seekThreshold = 150 // 超过即 seek（校准后同样适用）
@@ -319,19 +409,18 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *dri
 	if shouldMs < 0 {
 		return // 起播提前量窗口内，曲目还没开始，无从校偏
 	}
-	actualMs, err := mpv.TimePos()
+	actualMs, err := syncer.timePos(mpv)
 	if err != nil {
 		return // 文件刚加载，time-pos 暂不可用
 	}
 	drift := actualMs - shouldMs
+	syncer.lastDrift = drift
 
 	// 校准阶段：一次绝对对齐（或小漂移直接以当前值为基线），收敛于
 	// 一两个样本，不再像稳定性判定那样连 seek 三四秒。
 	if !syncer.hasBaseline {
 		if syncer.awaitSample {
-			syncer.baseline = drift
-			syncer.hasBaseline = true
-			syncer.awaitSample = false
+			syncer.learnBaseline(drift)
 			log.Printf("calibrated: output latency bias %dms", drift)
 			return
 		}
@@ -341,8 +430,7 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *dri
 			mpv.SetSpeed(1.0)
 			syncer.awaitSample = true
 		} else {
-			syncer.baseline = drift
-			syncer.hasBaseline = true
+			syncer.learnBaseline(drift)
 		}
 		return
 	}
@@ -367,6 +455,15 @@ func correct(mpv *mpvClient, cli *client.Client, pb client.Playback, syncer *dri
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envOrInt64(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
 	}
 	return def
 }

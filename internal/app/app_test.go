@@ -476,13 +476,18 @@ func TestSmokeEndToEnd(t *testing.T) {
 	// 8. 点歌 → 自动开播，playback.changed 带 stream_url
 	c.send("queue.add", "q1", map[string]any{"room_id": "lobby", "track_ref": upOut.Track.Ref})
 	c.waitFor("ack")
-	play, ok := c.lastSeen("playback.changed")
-	if !ok {
-		play = c.waitFor("playback.changed")
-	}
-	json.Unmarshal(play.Data, &pb)
-	if pb.Current == nil || pb.Current.TrackRef != upOut.Track.Ref {
-		e.t.Fatalf("want playing %s, got %+v", upOut.Track.Ref, pb)
+	// 就绪门控：queue.add 到开播之间隔着一次异步就绪等待，
+	// 忽略旧快照/中间态，等到目标曲目开播。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		play := c.waitFor("playback.changed")
+		json.Unmarshal(play.Data, &pb)
+		if pb.Current != nil && pb.Current.TrackRef == upOut.Track.Ref {
+			break
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("want playing %s, got %+v", upOut.Track.Ref, pb)
+		}
 	}
 	if !pb.Playing || pb.Rate != 1.0 {
 		e.t.Fatalf("bad playback state: %+v", pb)

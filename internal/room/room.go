@@ -160,7 +160,8 @@ const (
 	actSeek
 	actSkip
 	actTimerEnd
-	actUnplayable // 预检失败：当前曲目无可播地址，自动跳过
+	actStartReady // 音频就绪结果：验证代次与条目后才开播
+	actPlayerMetrics
 	actRadioPlay
 	actRadioStop
 	actSetPolicy
@@ -169,17 +170,21 @@ const (
 )
 
 type action struct {
-	kind      actKind
-	client    ClientConn
-	actor     auth.Identity
-	entry     QueueEntry
-	entries   []QueueEntry // 批量入队（actAdd；非空时优先于 entry）
-	entryID   string
-	removeAny bool
-	toIndex   int
-	posMs     int64
-	timerID   uint64
-	ref       string // actUnplayable：预检失败的 track_ref
+	kind       actKind
+	client     ClientConn
+	actor      auth.Identity
+	entry      QueueEntry
+	entries    []QueueEntry // 批量入队（actAdd；非空时优先于 entry）
+	entryID    string
+	removeAny  bool
+	toIndex    int
+	posMs      int64
+	timerID    uint64
+	ref        string
+	generation uint64
+	err        error
+	clientID   string
+	metrics    PlayerMetrics
 	// radio
 	source           string
 	shuffle          bool
@@ -338,6 +343,27 @@ func (r *Room) Leave(c ClientConn) {
 	}
 }
 
+// PlayerMetrics 播放端上报的同步遥测。
+type PlayerMetrics struct {
+	DriftMs    int64 // 最近一次实测漂移（mpv 读数 - should_be）
+	BaselineMs int64 // 已学习的输出延迟基线
+	LoadMs     int64 // 最近一次装载耗时（收到 playback.changed → 读数可用）
+}
+
+// ReportPlayerMetrics 播放端遥测入口；通道满或房间关闭时丢弃。
+func (r *Room) ReportPlayerMetrics(clientID string, m PlayerMetrics) {
+	select {
+	case <-r.done:
+		return
+	default:
+	}
+	select {
+	case r.inbound <- action{kind: actPlayerMetrics, clientID: clientID, metrics: m}:
+	case <-r.done:
+	default:
+	}
+}
+
 // AddFor 带策略校验的点歌：队列总上限与按身份（kind/role）的待播上限
 // 在 actor 内检查，与队列状态读取天然串行。电台补充不经过此路径。
 func (r *Room) AddFor(id auth.Identity, e QueueEntry) error {
@@ -439,6 +465,17 @@ func (r *Room) Run(ctx context.Context) {
 	queue, resumed := r.loadQueue()
 	var queueRevision uint64
 	var playback *Playback
+	var startPending *QueueEntry
+	var startGeneration uint64
+	var startCancel context.CancelFunc
+	cancelStart := func() {
+		startGeneration++
+		if startCancel != nil {
+			startCancel()
+			startCancel = nil
+		}
+	}
+	defer cancelStart()
 	var radio *radioState
 	sourceResults := make(chan radioSourceResult, 1)
 	refillResults := make(chan radioRefillResult, 1)
@@ -454,6 +491,10 @@ func (r *Room) Run(ctx context.Context) {
 	policy, err := ParsePolicy(r.policyRaw)
 	if err != nil {
 		log.Printf("room %s: invalid stored policy, using empty: %v", r.ID, err)
+	}
+	loadSamples := make(map[string]playerLoadSample)
+	effectiveLeadMs := func() int64 {
+		return policy.effectiveLeadMs(loadSamples, time.Now())
 	}
 
 	var timer *time.Timer
@@ -606,6 +647,9 @@ func (r *Room) Run(ctx context.Context) {
 		if playback != nil {
 			current = playback.Current
 		}
+		if startPending != nil {
+			current = startPending
+		}
 		return commitQueueWithCurrent(current, next, ops)
 	}
 
@@ -714,6 +758,8 @@ func (r *Room) Run(ctx context.Context) {
 		seed := provider.TrackRef("")
 		if playback != nil && playback.Current != nil {
 			seed = provider.TrackRef(playback.Current.TrackRef)
+		} else if startPending != nil {
+			seed = provider.TrackRef(startPending.TrackRef)
 		}
 		active := radio
 		refillInFlight = true
@@ -748,19 +794,28 @@ func (r *Room) Run(ctx context.Context) {
 		timerSeq++
 		seq := timerSeq
 		timer = time.AfterFunc(time.Duration(remaining)*time.Millisecond, func() {
-			r.inbound <- action{kind: actTimerEnd, timerID: seq}
+			select {
+			case r.inbound <- action{kind: actTimerEnd, timerID: seq}:
+			case <-ctx.Done():
+			}
 		})
 	}
 
-	// finishCurrent 记录历史并清空当前曲目，返回是否有当前曲目
+	// finishCurrent 记录当前或等待就绪条目的历史；未开播条目不触发 scrobble。
 	finishCurrent := func(reason string, now int64) {
-		if playback == nil || playback.Current == nil {
+		cur := startPending
+		if cur == nil && playback != nil {
+			cur = playback.Current
+		}
+		if cur == nil {
 			return
 		}
-		cur := playback.Current
 		_ = r.st.AddPlayHistory(ctx, r.ID, cur.TrackRef, cur.Title, cur.Artist, cur.RequestedBy,
 			cur.AddedAt, now, reason)
 		r.authm.RevokeTrack(cur.TrackRef)
+		if startPending != nil {
+			return
+		}
 		pid, id, err := provider.TrackRef(cur.TrackRef).Split()
 		if err != nil {
 			return
@@ -825,6 +880,50 @@ func (r *Room) Run(ctx context.Context) {
 		}(rep, id, playedMs, totalMs, principalID, target, roomID)
 	}
 
+	// startPlayback 只在音频就绪后建立时间线，提前量从此刻开始计算。
+	startPlayback := func(next QueueEntry) {
+		startPending = nil
+		cancelStart()
+		if row, err := r.st.GetCacheRow(ctx, next.TrackRef); err == nil {
+			next.SizeBytes = row.SizeBytes
+			next.BitrateKbps = row.BitrateKbps
+		}
+		playback = &Playback{
+			Current: &next, PositionMs: -effectiveLeadMs(), UpdatedAt: nowMs(), Playing: true, Rate: 1.0,
+		}
+		scheduleEnd()
+		broadcast(InterestPlayback, playbackMsg)
+		if r.cache != nil && len(queue) > 0 {
+			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
+		}
+		if radio != nil && len(queue) < 3 {
+			refill(false, "")
+		}
+	}
+
+	startTrack := func(next QueueEntry) {
+		ref := provider.TrackRef(next.TrackRef)
+		if r.cache == nil || r.cache.Lookup(ctx, ref) != "" {
+			startPlayback(next)
+			return
+		}
+		startPending = &next
+		startGeneration++
+		generation := startGeneration
+		waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		startCancel = cancel
+		go func() {
+			defer cancel()
+			err := r.cache.WaitReady(waitCtx, ref)
+			select {
+			case r.inbound <- action{
+				kind: actStartReady, generation: generation, entryID: next.EntryID, ref: next.TrackRef, err: err,
+			}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	// advance 切到队首（或进入空闲）；电台模式下队列见底自动补充。
 	// 毒化条目（时长未知，如元数据缺失的历史遗留）直接丢弃——
 	// 它们会让 scheduleEnd 永不触发，队列永久停滞。
@@ -841,6 +940,9 @@ func (r *Room) Run(ctx context.Context) {
 				return err
 			}
 			finishCurrent(reason, now)
+			cancelStart()
+			startPending = nil
+			timerSeq++
 			playback = &Playback{Rate: 1.0}
 			if timer != nil {
 				timer.Stop()
@@ -873,6 +975,14 @@ func (r *Room) Run(ctx context.Context) {
 		}
 
 		finishCurrent(reason, now)
+		cancelStart()
+		startPending = nil
+		playback = &Playback{Rate: 1.0}
+		timerSeq++
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+		}
 		for _, entry := range removed {
 			if entry.DurationMs <= 0 {
 				log.Printf("room %s: dropping entry %s (%s): zero/unknown duration", r.ID, entry.EntryID, entry.TrackRef)
@@ -889,31 +999,12 @@ func (r *Room) Run(ctx context.Context) {
 			return nil
 		}
 
-		playback = &Playback{
-			Current: &next, PositionMs: -policy.startLeadMs(), UpdatedAt: now, Playing: true, Rate: 1.0,
-		}
-		// 物理层质量信息：已缓存则立即可知（Resolve 已发生）
-		if row, err := r.st.GetCacheRow(ctx, next.TrackRef); err == nil {
-			next.SizeBytes = row.SizeBytes
-			next.BitrateKbps = row.BitrateKbps
-			playback.Current = &next
-		}
-		if radio != nil && len(queue) < 3 {
-			refill(false, "")
-		}
-		// 当前曲目就位：异步预检可播性（已缓存直接放行；Resolve 失败——
-		// 如 qq 无凭据的 104003——回报 actor 自动跳过，不卡到时长耗尽）。
-		go r.preflightCurrent(provider.TrackRef(next.TrackRef))
-		// queue 此刻已不含当前曲目，队首就是下一首：提前把它拉进本地缓存。
-		if len(queue) > 0 {
-			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
-		}
-		scheduleEnd()
-		broadcast(InterestPlayback, playbackMsg)
+		startTrack(next)
 		return nil
 	}
 
 	advance := func(reason string) error {
+		cancelStart()
 		if refillPendingStart {
 			return nil
 		}
@@ -941,17 +1032,7 @@ func (r *Room) Run(ctx context.Context) {
 	// 时长未知的条目会让 scheduleEnd 永不触发，交给 advance 按毒化条目丢弃。
 	switch {
 	case resumed != nil && resumed.DurationMs > 0:
-		now := nowMs()
-		playback = &Playback{
-			Current: resumed, PositionMs: -policy.startLeadMs(), UpdatedAt: now, Playing: true, Rate: 1.0,
-		}
-		go r.preflightCurrent(provider.TrackRef(resumed.TrackRef))
-		go r.cache.Prefetch(provider.TrackRef(resumed.TrackRef))
-		if len(queue) > 0 {
-			go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
-		}
-		scheduleEnd()
-		broadcast(InterestPlayback, playbackMsg)
+		startTrack(*resumed)
 	case resumed != nil || len(queue) > 0:
 		if err := advance("resume-after-restart"); err != nil {
 			log.Printf("room %s: resume queue: %v", r.ID, err)
@@ -988,7 +1069,7 @@ func (r *Room) Run(ctx context.Context) {
 					shuffle: request.shuffle, once: request.once,
 				}
 				broadcast(InterestRadio, func(ClientConn) any { return radioMsg() })
-				if playback == nil || playback.Current == nil {
+				if startPending == nil && (playback == nil || playback.Current == nil) {
 					refill(true, "")
 				} else if len(queue) < 3 {
 					refill(false, "")
@@ -1091,9 +1172,21 @@ func (r *Room) Run(ctx context.Context) {
 			case actLeave:
 				wasListener := a.client.Interests().Has(InterestListeners)
 				delete(clients, a.client.ID())
+				delete(loadSamples, a.client.ID())
 				if wasListener {
 					broadcast(InterestListeners, func(ClientConn) any { return listenersMsg() })
 				}
+
+			case actPlayerMetrics:
+				if _, joined := clients[a.clientID]; !joined || a.metrics.LoadMs < 0 {
+					break
+				}
+				sample, ok := loadSamples[a.clientID]
+				loadMs := float64(a.metrics.LoadMs)
+				if ok && time.Since(sample.at) <= 10*time.Minute {
+					loadMs = (sample.emaMs + loadMs) / 2
+				}
+				loadSamples[a.clientID] = playerLoadSample{emaMs: loadMs, at: time.Now()}
 
 			case actAdd:
 				entries := a.entries
@@ -1132,13 +1225,13 @@ func (r *Room) Run(ctx context.Context) {
 					a.result <- err
 					break
 				}
-				if playback == nil || playback.Current == nil {
+				if startPending == nil && (playback == nil || playback.Current == nil) {
 					// 自动开播是独立的内部队列变化；失败时保留已成功提交的点歌。
 					if err := advance(""); err != nil {
 						log.Printf("room %s: auto-advance after add: %v", r.ID, err)
 					}
-				} else if wasEmpty {
-					// 追加前队列为空：新条目即队首候补，预热缓存
+				} else if wasEmpty && r.cache != nil {
+					// 追加前队列为空：新条目即队首候补，预热缓存。
 					go r.cache.Prefetch(provider.TrackRef(queue[0].TrackRef))
 				}
 				a.result <- nil
@@ -1200,7 +1293,7 @@ func (r *Room) Run(ctx context.Context) {
 				a.result <- err
 
 			case actPause:
-				if playback == nil || playback.Current == nil || !playback.Playing {
+				if startPending != nil || playback == nil || playback.Current == nil || !playback.Playing {
 					a.result <- ErrNoPlayback
 					break
 				}
@@ -1215,7 +1308,7 @@ func (r *Room) Run(ctx context.Context) {
 				a.result <- nil
 
 			case actResume:
-				if playback == nil || playback.Current == nil || playback.Playing {
+				if startPending != nil || playback == nil || playback.Current == nil || playback.Playing {
 					a.result <- ErrNoPlayback
 					break
 				}
@@ -1226,7 +1319,7 @@ func (r *Room) Run(ctx context.Context) {
 				a.result <- nil
 
 			case actSeek:
-				if playback == nil || playback.Current == nil {
+				if startPending != nil || playback == nil || playback.Current == nil {
 					a.result <- ErrNoPlayback
 					break
 				}
@@ -1247,25 +1340,25 @@ func (r *Room) Run(ctx context.Context) {
 				a.result <- advance("skipped")
 
 			case actTimerEnd:
-				if a.timerID != timerSeq {
-					break // 过期 timer，忽略
+				if startPending != nil || a.timerID != timerSeq {
+					break // 等待就绪或过期 timer，忽略
 				}
 				if err := advance("finished"); err != nil {
 					log.Printf("room %s: timer advance: %v", r.ID, err)
 				}
 
-			case actUnplayable:
-				// 预检失败：仅当该 ref 仍是当前曲目时跳过（竞态防护）。
-				// a.result 可空（preflight goroutine 投递路径），nil 检查防阻塞。
-				var skipErr error
-				if playback != nil && playback.Current != nil && playback.Current.TrackRef == a.ref {
-					skipErr = advance("unplayable")
-					if skipErr != nil {
-						log.Printf("room %s: unplayable advance: %v", r.ID, skipErr)
-					}
+			case actStartReady:
+				if startPending == nil || a.generation != startGeneration ||
+					a.entryID != startPending.EntryID || a.ref != startPending.TrackRef {
+					break
 				}
-				if a.result != nil {
-					a.result <- skipErr
+				if a.err != nil {
+					log.Printf("room %s: current %s unplayable: %v", r.ID, a.ref, a.err)
+					if err := advance("unplayable"); err != nil {
+						log.Printf("room %s: unplayable advance: %v", r.ID, err)
+					}
+				} else {
+					startPlayback(*startPending)
 				}
 
 			case actRadioPlay:
@@ -1343,44 +1436,6 @@ func (r *Room) Run(ctx context.Context) {
 func (r *Room) streamURL(id auth.Identity, trackRef string) string {
 	ticket := r.authm.IssueTicket(id.ID, trackRef)
 	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + ticket
-}
-
-// preflightCurrent 对刚就位的当前曲目做可播性预检：已缓存直接放行；
-// provider Resolve 失败（源无效，如 qq 无凭据的 104003、local 文件缺失）
-// 时回报 actor 自动跳过——否则房间会卡在无效曲目上直到时长耗尽。
-// 竞态防护：回报携带 ref，actor 只跳过仍匹配当前曲目的情况
-// （用户预检期间手动切走则不误伤新曲目）。
-func (r *Room) preflightCurrent(ref provider.TrackRef) {
-	if r.cache == nil {
-		return
-	}
-	if r.cache.Lookup(context.Background(), ref) != "" {
-		return // 已缓存，直接可播
-	}
-	pid, _, err := ref.Split()
-	if err != nil {
-		r.reportUnplayable(ref)
-		return
-	}
-	p, ok := r.reg.Get(pid)
-	if !ok {
-		r.reportUnplayable(ref)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if _, err := p.Resolve(ctx, ref); err != nil {
-		log.Printf("room %s: current %s unplayable: %v", r.ID, ref, err)
-		r.reportUnplayable(ref)
-	}
-}
-
-// reportUnplayable 把预检失败送回 actor（房间关闭时不阻塞）。
-func (r *Room) reportUnplayable(ref provider.TrackRef) {
-	select {
-	case r.inbound <- action{kind: actUnplayable, ref: ref.String()}:
-	case <-r.done:
-	}
 }
 
 // loadQueue 读取持久队列，并按 current_entry_id 把当前曲目从待播队列中切分出来。

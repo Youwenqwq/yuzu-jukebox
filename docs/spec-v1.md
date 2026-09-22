@@ -65,7 +65,7 @@ server_now() = local_now() + offset
 
 ### 2.2 约束
 
-- 客户端 MUST 在加入房间前完成校时；播放期间 MAY 每 60s 重新校时一次修正漂移。
+- 客户端 MUST 在加入房间前完成校时；播放期间 SHOULD 每 60s 重新校时一次修正漂移（yuzu-agent 已按此实现）。
 - 播放位置推算：
 
 ```
@@ -73,11 +73,20 @@ should_be = position_ms + (server_now() - updated_at) * rate   (playing 时)
 should_be = position_ms                                        (paused 时)
 ```
 
-- **起播提前量（`should_be < 0`）**：切歌时服务端把新曲目的 position 0 排在
-  「切歌时刻 + 提前量」，因此 `position_ms` MAY 为负，推算出的 `should_be`
-  在这段窗口内同样为负，语义是「距本曲开播还有 `|should_be|` 毫秒」，预定
+- **就绪门控（服务端 MUST）**：服务端不得把一首音频未就绪的曲目广播为
+  当前播放。切到未缓存曲目时，房间先异步等待服务端缓存攒够首段
+  （`ReadyMinBytes` = 128KiB，小于该值的短曲目以下完为准；local provider
+  的 file:// 按文件可打开即就绪），就绪时刻才把 position 0 排在
+  「就绪时刻 + 提前量」并广播 `playback.changed`。等待预算 15s，超时或
+  拉流失败视为不可播，立即自动跳过（`end_reason="unplayable"`），
+  该曲目不会以 playing 状态出现。等待期间控制语义：skip 立即切走，
+  pause/resume/seek 返回 `no_playback`，队列操作不受影响。
+  已缓存曲目不引入任何等待（与旧行为一致）。
+- **起播提前量（`should_be < 0`）**：开播时服务端把新曲目的 position 0 排在
+  「就绪（或切歌）时刻 + 提前量」，因此 `position_ms` MAY 为负，推算出的
+  `should_be` 在这段窗口内同样为负，语义是「距本曲开播还有 `|should_be|` 毫秒」，预定
   开播的服务端时刻为 `updated_at + (-position_ms)`。提前量由房间策略
-  `start_lead_ms` 控制（缺省 600ms，0 = 关闭）。
+  `start_lead_ms` 控制（缺省自适应，见 §4.7；显式 0 = 关闭）。
   - 存在这段窗口的原因：客户端从收到 `playback.changed` 到第一个采样出声要经过
     投递、HTTP 首字节、demux、音频设备灌注，累计数百毫秒。若房间时钟在切歌
     瞬间就从 0 起跑，客户端装载完成时只能 seek 到已经走过的位置——**曲目头部
@@ -92,8 +101,9 @@ should_be = position_ms                                        (paused 时)
     `position_ms + updated_at` 字段）。
   - 中途进房/重连时 `should_be` 通常已 ≥ 0，此时按常规定位——那段头部在房间
     时间线上确实已经播过去了。
-  - 客户端 MAY 用已学到的设备输出延迟基线把开声动作提前同等毫秒，让声音而非
-    指令落在预定时刻上（见下方输出延迟区分）。
+  - 客户端 SHOULD 用已学到的设备输出延迟基线把开声动作提前同等毫秒，让声音而非
+    指令落在预定时刻上（yuzu-agent 已实现：跨曲目保留设备偏差估计，提前量
+    clamp 在 [0, 400]ms；见下方输出延迟区分）。
 - 对齐策略（客户端尽力而为，协议不强制）：
   - |偏差| > 150ms → seek
   - ≤ 150ms → 不动
@@ -104,6 +114,12 @@ should_be = position_ms                                        (paused 时)
       - 学习样本须在 seek 落定且缓冲健康时采集（Web：`!seeking && readyState >= HAVE_FUTURE_DATA`；MPV：seek 完成且未 buffering），否则暂缓学习——缓冲冻结期的读数不是延迟偏差；
       - 待学习期间 |样本| > 1s 视为初始定位未生效而非输出延迟：先按无基线对齐一次，保持待学习；
       - 纠正性 seek 目标为 `should_be + drift_baseline`（补偿读数差，听觉位置一次到位）；该 seek 生效后重新学习基线，残余抖动被基线吸收而非触发新 seek。
+
+  - **手动同步微调**：链路 RTT 不对称（如隧道/代理）造成的固定时钟偏差从单侧
+    原理上不可观测（测量只能假设往返对称），基线学习也无法吸收它——所有样本
+    共用同一错误时钟。需要与同空间其他设备严格对齐时，客户端 MAY 提供人工微调
+    （毫秒，叠加在 server_now 推算上；正值 = 本机提前出声），按听感校准。
+    yuzu-agent：`-sync-offset` / `YUZU_SYNC_OFFSET_MS`；WebUI：设置中的同步微调。
 
 ### 2.3 TrackRef 扩展（provider 自定义 id 段）
 
@@ -500,7 +516,7 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 - `stream_url` 中的 `ticket` 为短时效（5 分钟）、绑定身份与 track 的令牌。
 - 票据在 TTL 内**可复用**：客户端的 Range 请求与断线重试都依赖同一 URL。曲目播完（切歌/自然结束）时该曲目所有票据立即失效。
 - 目的：凭据永不下发；`/stream` 端点无 cookie 会话也可鉴权（`<audio>` 标签、MPV 均适用）。
-- 仅**当前播放曲目**附带 `stream_url`；队列条目只给元数据。下一首的可播放性由服务端缓存预取保证（进入 PLAYING 时对队首做 Resolve + 预拉取），待其成为当前曲目时才下发 URL。
+- 仅**当前播放曲目**附带 `stream_url`；队列条目只给元数据。当前曲目在广播前已通过就绪门控（§2.2：缓存命中或首 128KiB 已缓冲），下一首在其成为当前曲目时同样过门控；进入 PLAYING 时还会预拉取队首为下一首做准备。
 
 ### 4.7 房间治理策略
 
@@ -519,7 +535,7 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 - `max_queue`：待播队列总上限，0/缺省的有效值为 50；显式正数覆盖默认值。超限拒绝 `queue.add`，错误码 `queue_full`。
 - `queue_limits`：按身份的待播数上限。key 匹配身份的 **kind**（`guest`/`password`/`oidc`）或其任一 **role**；任一命中值为 0 → 显式不限（覆盖其他命中），否则取命中最大值，无命中 = 不限。超限拒绝，错误码 `quota_exceeded`。
 - `member_player_volume`：缺省 `false`。为 `true` 时，只允许由可信 Integration 签发、且来源 scope 当前默认 Room 正是该 Room 的 actor session 读取和设置 Room headless output desired volume；不授权普通 listener，不授权其他 Room，不授权单设备 mute、换房或绑定管理。
-- `start_lead_ms`：切歌起播提前量（毫秒），取值 `[0, 5000]`，缺省 600，0 = 关闭（切歌即 position 0）。房间内客户端装载普遍慢（公网带宽小、蓝牙输出）时调大；纯本地局域网可调小。语义与客户端处理见 §2.2。
+- `start_lead_ms`：切歌起播提前量（毫秒），取值 `[0, 5000]`，0 = 关闭（开播即 position 0）。**缺省（null/不写）为自适应**：房间按在线 headless Player 上报的装载耗时遥测（`player.state.load_ms`，EMA）取最慢者加 150ms 余量，clamp 在 `[300, 3000]`；无新鲜样本（10 分钟）时用 600。显式设置后固定生效、覆盖自适应。语义与客户端处理见 §2.2。
 - `radio_control`：电台启停授权，取值 `"controller"`（缺省，现状）或 `"requester"`。为 `"requester"` 时，任何具全局 `requester` 角色的 Principal 可调用 `radio.play`/`radio.stop`（REST 与 WS 同一条授权路径）；其他取值一律拒绝写入（`invalid_policy`）。controller 授权不受影响。客户端应以 `GET /api/v1/rooms/{id}/capabilities` 的 `radio` 字段决定电台按钮可用性，而非自行推导。
 - 普通 guest 身份 ID 由名字确定性派生（`g_` + `sha256("guest:"+name)` 前 12 hex），同名重连仍是同一人；Integration synthetic guest 使用 3.6 的完整 external subject key——两者的限额与“移除自己点的歌”均可跨会话成立。
 - 电台补充不经过按身份的 `queue_limits`，但始终受 `max_queue` 的有效上限约束。
@@ -543,6 +559,7 @@ server: ← {"type":"player.command","data":{"op":"set_volume","value":37}}
 - Room output volume 独立持久化。未设置时 `GET /api/v1/rooms/{id}/output` 返回 `"volume":null`，服务端不会覆盖设备本地音量；首次 PATCH 后成为 Room desired state。
 - `PATCH /api/v1/rooms/{id}/output {"volume":0..100}` 先持久化 desired volume，再向当前 Room 内所有已 `player.hello` 且声明 `volume` capability 的连接下发 `player.command`。没有在线 Agent 仍成功；离线 Agent、重连 Agent 或之后迁入该 Room 的 Agent 会在注册/加入时自动收敛。
 - `player.state.volume` 只表示单设备实际状态，不反向修改 Room desired volume。管理员的单设备命令属于临时偏离，下一次 Room output 更新或 Agent 重连会覆盖它。
+- `player.state` 可携带可选同步遥测（int64，毫秒）：`drift_ms`（最近一次实测漂移）、`baseline_ms`（已学习的输出延迟基线）、`load_ms`（最近一次装载耗时，收到 `playback.changed` 到读数可用）。服务端在 `GET /api/v1/players` 快照中透传这三个字段（`omitempty`），`load_ms` 同时驱动房间 `start_lead_ms` 的自适应（§4.7）。旧 Agent 不上报时按未上报处理，行为与此前一致。
 - `player.command` 仅有 `set_volume` 与 `set_mute`。换房不是设备命令：Player 没有 Room 密码，也不能自行加入或离开；持久分配是唯一权威。
 - Room controller 可读写 output。普通 Integration actor 仅在 `policy.member_player_volume=true` 且 actor session 的签发 scope 当前映射到该 Room 时可读写；写请求必须带平台事件的 `Idempotency-Key`。Integration actor 不能管理 Player 资源、Room 分配或指定 `player_id`。
 - 普通 WebUI 不持有 Player key、不进入 player registry，也不会收到 `player.command`；浏览器本地音量完全不受 Room output 影响。
@@ -580,9 +597,9 @@ Queue []QueueEntry
         ▼                    │
      [空闲 IDLE]          有 current
         │                    │
-        │ 取队首, Resolve,   │
-        │ 缓存命中检查        │
-        ▼                    │
+        │ 取队首, 就绪门控   │
+        │ (§2.2：缓存攒够   │
+        │  首段才进 PLAYING) │
    [播放中 PLAYING] ◄────────┘
      │  ▲   │
 pause│  │resume
@@ -601,10 +618,10 @@ pause│  │resume
 1. **pause**：`PositionMs = position(now)`；`Playing = false`；`UpdatedAt = now`。
 2. **resume**：`PositionMs` 不变；`Playing = true`；`UpdatedAt = now`。
 3. **seek(p)**：`PositionMs = p`；`UpdatedAt = now`；`Playing` 不变。越界 clamp 到 `[0, duration]`。
-4. **skip / 自然结束**：当前条目写入 `play_history`（`end_reason = skipped|finished`），取队首。队首条目的 `stream_url` 在此刻生成票据并随广播下发。
+4. **skip / 自然结束**：当前条目写入 `play_history`（`end_reason = skipped|finished`），取队首。队首条目先过就绪门控（§2.2），就绪时才生成 `stream_url` 票据并随广播下发；门控失败按 `unplayable` 记入历史并继续取下一首。
 5. **自然结束检测**：房间 actor 在每次进入 PLAYING 时按 `剩余时长/rate` 设一次性 timer；期间任何 pause/seek/skip 重置该 timer。不依赖客户端上报。
 6. **毒化条目丢弃**：`duration_ms <= 0` 的队列条目在 advance 时直接丢弃（记日志，不写历史）——时长未知会导致结束 timer 永不触发，队列永久停滞。单次 advance 最多连续丢弃 100 条，防病态电台源死循环。
-7. **预解析**：进入 PLAYING 时若队列非空，立即对新队首 Resolve 并后台预拉取缓存（整文件），使切歌时 `/stream` 首字节无源站延迟。
+7. **预解析**：进入 PLAYING 时若队列非空，立即对新队首 Resolve 并后台预拉取缓存（整文件），使切歌时 `/stream` 首字节无源站延迟；就绪门控只等待首段（128KiB），并发的客户端（含 Range 与跟随者）从增长中的缓存文件随下载滚动读取，不等整曲落盘。
 
 **账号播放上报（scrobble）**：房间结算当前曲目时，若其 Provider 实现 `provider.PlayReporter`，服务端自动、异步尝试上报。只有凭据 owner 本人点的曲目（`requested_by == owner Principal ID`）有资格上报，并且实际播放时长必须满足
 
@@ -1169,7 +1186,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 3. auth：{"player_key":"yzp_…"}
 4. player.hello：只上报 device/version/caps，不上报 Player ID
 5. 已分配 Room → 等 `room.joined` 与 `playback.changed`；未分配 → 保持在线等待。Player 不收 queue/radio/listeners 快照
-6. player.state 上报设备实际 volume/muted；按 playback.changed 驱动渲染
+6. player.state 上报设备实际 volume/muted 与同步遥测（drift_ms/baseline_ms/load_ms，见 §4.8）；按 playback.changed 驱动渲染；播放期间每 60s 重新校时（§2.2）
 ```
 
 Agent 不调用 `room.join`。管理员可以在 Agent 离线前先创建 Player 并绑定 Room；Agent 首次上线即自动进入目标 Room。

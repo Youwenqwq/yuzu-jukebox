@@ -1,14 +1,17 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
@@ -20,6 +23,7 @@ import (
 
 type objectLimitProvider struct {
 	baseURL string
+	resolve func(context.Context, provider.TrackRef) (provider.StreamLocator, error)
 }
 
 func (p *objectLimitProvider) ID() string { return "limit" }
@@ -32,7 +36,10 @@ func (p *objectLimitProvider) GetTrack(context.Context, provider.TrackRef) (prov
 	return provider.Track{}, nil
 }
 
-func (p *objectLimitProvider) Resolve(_ context.Context, ref provider.TrackRef) (provider.StreamLocator, error) {
+func (p *objectLimitProvider) Resolve(ctx context.Context, ref provider.TrackRef) (provider.StreamLocator, error) {
+	if p.resolve != nil {
+		return p.resolve(ctx, ref)
+	}
 	_, id, _ := ref.Split()
 	return provider.StreamLocator{URL: p.baseURL + "/" + id, Format: "mp3"}, nil
 }
@@ -342,5 +349,375 @@ func TestStreamTimeoutMeasuresUpstreamReadNotPlayerPause(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func awaitCacheResult(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache operation did not finish")
+		return nil
+	}
+}
+
+func assertCacheBlocked(t *testing.T, result <-chan error) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("operation finished before upstream advanced: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestWaitReadyThresholdSharesDownloadAndKeepsDraining(t *testing.T) {
+	first := make(chan struct{})
+	threshold := make(chan struct{})
+	finish := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(finish) }) }
+	defer release()
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Length", fmt.Sprint(ReadyMinBytes+1))
+		_, _ = w.Write(bytes.Repeat([]byte("x"), ReadyMinBytes-1))
+		w.(http.Flusher).Flush()
+		close(first)
+		select {
+		case <-threshold:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte("y"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-finish:
+			_, _ = w.Write([]byte("z"))
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	c, _, _ := setupPruneCache(t)
+	c.maxBytes = 1 << 20
+	c.reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ref := provider.TrackRef("limit:ready")
+	result := make(chan error, 2)
+	go func() { result <- c.WaitReady(ctx, ref) }()
+	select {
+	case <-first:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	go func() { result <- c.WaitReady(ctx, ref) }()
+	assertCacheBlocked(t, result)
+	close(threshold)
+	for range 2 {
+		if err := awaitCacheResult(t, result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if path := c.Lookup(ctx, ref); path != "" {
+		t.Fatal("readiness waited for the complete file")
+	}
+	release()
+	f, err := c.Open(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil || len(data) != ReadyMinBytes+1 || string(data[len(data)-2:]) != "yz" {
+		t.Fatalf("completed data size=%d, err=%v", len(data), err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("shared readiness caused %d downloads", requests.Load())
+	}
+}
+
+func TestWaitReadyTimeoutDoesNotCancelResolveOrDownload(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "small")
+	}))
+	t.Cleanup(upstream.Close)
+	c, _, _ := setupPruneCache(t)
+	c.reg.Register(&objectLimitProvider{resolve: func(ctx context.Context, _ provider.TrackRef) (provider.StreamLocator, error) {
+		select {
+		case <-release:
+			return provider.StreamLocator{URL: upstream.URL}, nil
+		case <-ctx.Done():
+			return provider.StreamLocator{}, ctx.Err()
+		}
+	}})
+	ref := provider.TrackRef("limit:timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := c.WaitReady(ctx, ref); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitReady timeout = %v", err)
+	}
+	unblock()
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := c.WaitReady(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+	f, total, err := c.OpenLive(ctx, ref, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil || total != 5 || string(data) != "mall" {
+		t.Fatalf("short completed object = %q, total=%d, err=%v", data, total, err)
+	}
+}
+
+func TestWaitReadyFailures(t *testing.T) {
+	resolveErr := errors.New("resolve failed")
+	for _, mode := range []string{"resolve", "status", "truncated"} {
+		t.Run(mode, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if mode == "status" {
+					w.WriteHeader(http.StatusBadGateway)
+					return
+				}
+				w.Header().Set("Content-Length", "10")
+				_, _ = io.WriteString(w, "short")
+			}))
+			t.Cleanup(upstream.Close)
+			c, _, _ := setupPruneCache(t)
+			p := &objectLimitProvider{baseURL: upstream.URL}
+			if mode == "resolve" {
+				p.resolve = func(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+					return provider.StreamLocator{}, resolveErr
+				}
+			}
+			c.reg.Register(p)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ref := provider.TrackRef("limit:failed")
+			err := c.WaitReady(ctx, ref)
+			if err == nil || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("failure not propagated: %v", err)
+			}
+			if mode == "resolve" && !errors.Is(err, resolveErr) {
+				t.Fatalf("resolve failure = %v", err)
+			}
+			if mode == "truncated" && !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("read failure = %v", err)
+			}
+			if c.Lookup(ctx, ref) != "" {
+				t.Fatal("failed download was cached")
+			}
+		})
+	}
+}
+
+func TestOpenLiveGrowthAndStreamFollowers(t *testing.T) {
+	for _, leaderMode := range []string{"live", "stream", "prefetch"} {
+		t.Run(leaderMode, func(t *testing.T) {
+			chunks := make(chan string)
+			defer close(chunks)
+			var requests atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Length", "6")
+				w.(http.Flusher).Flush()
+				for {
+					select {
+					case data, ok := <-chunks:
+						if !ok {
+							return
+						}
+						_, _ = io.WriteString(w, data)
+						w.(http.Flusher).Flush()
+						if data == "def" {
+							return
+						}
+					case <-r.Context().Done():
+						return
+					}
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			c, _, _ := setupPruneCache(t)
+			c.reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ref := provider.TrackRef("limit:growing")
+			var leader io.ReadCloser
+			if leaderMode == "stream" {
+				var err error
+				leader, err = c.OpenStream(ctx, ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer leader.Close()
+			} else if leaderMode == "prefetch" {
+				c.Prefetch(ref)
+			}
+			live, total, err := c.OpenLive(ctx, ref, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer live.Close()
+			if total != 6 {
+				t.Fatalf("total=%d, want 6", total)
+			}
+			follower, err := c.OpenStream(ctx, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer follower.Close()
+			prefix := make(chan error, 1)
+			go func() {
+				buf := make([]byte, 2)
+				_, err := io.ReadFull(live, buf)
+				if err == nil && string(buf) != "bc" {
+					err = fmt.Errorf("offset prefix=%q", buf)
+				}
+				prefix <- err
+			}()
+			assertCacheBlocked(t, prefix)
+			leaderDone := make(chan error, 1)
+			if leader != nil {
+				go func() {
+					data, err := io.ReadAll(leader)
+					if err == nil && string(data) != "abcdef" {
+						err = fmt.Errorf("leader data=%q", data)
+					}
+					leaderDone <- err
+				}()
+			}
+			chunks <- "abc"
+			if err := awaitCacheResult(t, prefix); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 3)
+			if _, err := io.ReadFull(follower, buf); err != nil || string(buf) != "abc" {
+				t.Fatalf("follower prefix=%q, err=%v", buf, err)
+			}
+			if c.Lookup(ctx, ref) != "" {
+				t.Fatal("follower waited for full download")
+			}
+			rest := make(chan error, 1)
+			go func() {
+				data, err := io.ReadAll(live)
+				if err == nil && string(data) != "def" {
+					err = fmt.Errorf("live tail=%q", data)
+				}
+				rest <- err
+			}()
+			assertCacheBlocked(t, rest)
+			chunks <- "def"
+			if err := awaitCacheResult(t, rest); err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(follower)
+			if err != nil || string(data) != "def" {
+				t.Fatalf("follower tail=%q, err=%v", data, err)
+			}
+			if leader != nil {
+				if err := awaitCacheResult(t, leaderDone); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("followers opened %d upstream requests", requests.Load())
+			}
+		})
+	}
+}
+
+func TestOpenLiveFailureAndCancellation(t *testing.T) {
+	for _, mode := range []string{"failure", "cancel", "close"} {
+		t.Run(mode, func(t *testing.T) {
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", "10")
+				w.(http.Flusher).Flush()
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			c, _, _ := setupPruneCache(t)
+			c.reg.Register(&objectLimitProvider{baseURL: upstream.URL})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ref := provider.TrackRef("limit:blocked")
+			rc, _, err := c.OpenLive(ctx, ref, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rc.Close()
+			result := make(chan error, 1)
+			go func() {
+				_, err := rc.Read(make([]byte, 1))
+				result <- err
+			}()
+			assertCacheBlocked(t, result)
+			switch mode {
+			case "failure":
+				unblock()
+			case "cancel":
+				cancel()
+			case "close":
+				_ = rc.Close()
+			}
+			err = awaitCacheResult(t, result)
+			want := error(context.Canceled)
+			if mode == "failure" {
+				want = io.ErrUnexpectedEOF
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("blocked read error=%v, want %v", err, want)
+			}
+			unblock()
+			waitCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			// 后台仍会收尾；调用方取消不能把失败对象落盘。
+			if err := c.WaitReady(waitCtx, ref); err == nil {
+				t.Fatal("truncated object became ready")
+			}
+		})
+	}
+}
+
+func TestWaitReadyAndOpenLiveLocalFile(t *testing.T) {
+	c, _, dir := setupPruneCache(t)
+	path := filepath.Join(dir, "local.mp3")
+	if err := os.WriteFile(path, []byte("local"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.reg.Register(&objectLimitProvider{resolve: func(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+		return provider.StreamLocator{URL: "file://" + path}, nil
+	}})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ref := provider.TrackRef("limit:local")
+	if err := c.WaitReady(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+	rc, total, err := c.OpenLive(ctx, ref, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil || total != 5 || string(data) != "cal" {
+		t.Fatalf("local data=%q total=%d err=%v", data, total, err)
 	}
 }

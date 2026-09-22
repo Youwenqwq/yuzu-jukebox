@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
+	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 )
 
 // ---------- 播放端管理平面（player plane） ----------
@@ -31,6 +32,9 @@ type PlayerInfo struct {
 	RoomID      string   `json:"room_id,omitempty"`
 	Volume      int      `json:"volume"`
 	Muted       bool     `json:"muted"`
+	DriftMs     int64    `json:"drift_ms,omitempty"`
+	BaselineMs  int64    `json:"baseline_ms,omitempty"`
+	LoadMs      int64    `json:"load_ms,omitempty"`
 	ConnectedAt int64    `json:"connected_at"`
 }
 
@@ -41,6 +45,10 @@ type playerState struct {
 	caps        []string
 	volume      int
 	muted       bool
+	driftMs     int64
+	baselineMs  int64
+	loadMs      int64
+	hasMetrics  bool
 	connectedAt int64
 }
 
@@ -92,6 +100,11 @@ func playerInfo(c *client) PlayerInfo {
 		Caps:   append([]string(nil), c.player.caps...),
 		Volume: c.player.volume, Muted: c.player.muted,
 		ConnectedAt: c.player.connectedAt,
+	}
+	if c.player.hasMetrics {
+		info.DriftMs = c.player.driftMs
+		info.BaselineMs = c.player.baselineMs
+		info.LoadMs = c.player.loadMs
 	}
 	if c.identity != nil {
 		info.IdentityID = c.identity.ID
@@ -322,8 +335,11 @@ func (c *client) handlePlayerState(data json.RawMessage) {
 		return
 	}
 	var d struct {
-		Volume *int  `json:"volume"`
-		Muted  *bool `json:"muted"`
+		Volume     *int   `json:"volume"`
+		Muted      *bool  `json:"muted"`
+		DriftMs    *int64 `json:"drift_ms"`
+		BaselineMs *int64 `json:"baseline_ms"`
+		LoadMs     *int64 `json:"load_ms"`
 	}
 	if json.Unmarshal(data, &d) != nil {
 		return
@@ -335,5 +351,25 @@ func (c *client) handlePlayerState(data json.RawMessage) {
 	if d.Muted != nil {
 		c.player.muted = *d.Muted
 	}
+	hasMetrics := d.DriftMs != nil || d.BaselineMs != nil || d.LoadMs != nil
+	if d.DriftMs != nil {
+		c.player.driftMs = *d.DriftMs
+	}
+	if d.BaselineMs != nil {
+		c.player.baselineMs = *d.BaselineMs
+	}
+	if d.LoadMs != nil {
+		c.player.loadMs = *d.LoadMs
+	}
+	if hasMetrics {
+		c.player.hasMetrics = true
+	}
+	metrics := room.PlayerMetrics{
+		DriftMs: c.player.driftMs, BaselineMs: c.player.baselineMs, LoadMs: c.player.loadMs,
+	}
+	r := c.room
 	c.server.playersMu.Unlock()
+	if hasMetrics && r != nil {
+		r.ReportPlayerMetrics(c.id, metrics)
+	}
 }

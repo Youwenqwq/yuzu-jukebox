@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,8 +27,9 @@ func (c *directoryClient) Interests() room.RoomInterest {
 	return room.InterestAll
 }
 
-// playableRoomTestProvider 让房间测试的虚构 ref 通过可播性预检。
-type playableRoomTestProvider struct{}
+// playableRoomTestProvider 让房间测试的虚构 ref 通过就绪门控：
+// Resolve 指向一个真实存在的临时文件（local provider 的 file:// 短路）。
+type playableRoomTestProvider struct{ filePath string }
 
 func (*playableRoomTestProvider) ID() string { return "local" }
 func (*playableRoomTestProvider) Search(context.Context, string, int, int) ([]provider.Track, error) {
@@ -36,8 +38,8 @@ func (*playableRoomTestProvider) Search(context.Context, string, int, int) ([]pr
 func (*playableRoomTestProvider) GetTrack(_ context.Context, ref provider.TrackRef) (provider.Track, error) {
 	return provider.Track{Ref: ref, Title: ref.String()}, nil
 }
-func (*playableRoomTestProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
-	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
+func (p *playableRoomTestProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
+	return provider.StreamLocator{URL: "file://" + p.filePath}, nil
 }
 
 type roomsResponse struct {
@@ -73,8 +75,13 @@ func TestListRoomsIncludesLiveDirectorySummary(t *testing.T) {
 
 	authm := auth.NewManager("test", st)
 	reg := provider.NewRegistry()
-	// 预检会对当前曲目调 Resolve；注册可播 fake 防虚构 ref 被自动跳过。
-	reg.Register(&playableRoomTestProvider{})
+	// 就绪门控会实际打开媒体文件；注册指向真实临时文件的可播 fake，
+	// 防虚构 ref 被自动跳过。
+	mediaPath := filepath.Join(dir, "fixture.mp3")
+	if err := os.WriteFile(mediaPath, []byte("fake-audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg.Register(&playableRoomTestProvider{filePath: mediaPath})
 	roomCache := cache.New(filepath.Join(dir, "cache"), 1<<30, 0, st, reg)
 	rooms := room.NewManager(ctx, st, authm, roomCache, reg, nil)
 	for i, row := range []store.Room{

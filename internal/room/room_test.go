@@ -12,12 +12,11 @@ import (
 	"time"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
-	"github.com/youwenqwq/yuzu-jukebox/internal/cache"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
 )
 
-// newTestRoom 启动一个带真实 store/cache 的房间 actor（无客户端连接）。
+// newTestRoom 启动真实 store、无缓存门控的房间 actor。
 func newTestRoom(t *testing.T, policyRaw string) (*Room, *store.Store) {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,23 +25,20 @@ func newTestRoom(t *testing.T, policyRaw string) (*Room, *store.Store) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	reg := provider.NewRegistry()
-	// 预检会对当前曲目调 Resolve；注册一个始终可播的 fake，
-	// 否则队列里的虚构 ref 会被自动跳过。
 	reg.Register(&playableTestProvider{})
 	authm := auth.NewManager("pw", st)
-	c := cache.New(filepath.Join(dir, "cache"), 1<<30, 0, st, reg)
-	r := New("r1", "room", "", policyRaw, st, authm, c, reg)
+	r := New("r1", "room", "", policyRaw, st, authm, nil, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	t.Cleanup(func() {
 		cancel()
+		<-r.done
 		st.Close()
 	})
 	return r, st
 }
 
-// playableTestProvider 是 newTestRoom 的通用可播 fake（ID "local"，
-// 匹配 mkEntry 的 "local:tN" ref）。Resolve 恒成功，预检不会跳过曲目。
+// playableTestProvider 是房间测试的通用 local 元数据 fake。
 type playableTestProvider struct{}
 
 func (*playableTestProvider) ID() string { return "local" }
@@ -53,7 +49,7 @@ func (*playableTestProvider) GetTrack(_ context.Context, ref provider.TrackRef) 
 	return provider.Track{Ref: ref, Title: ref.String()}, nil
 }
 func (*playableTestProvider) Resolve(context.Context, provider.TrackRef) (provider.StreamLocator, error) {
-	// 测试不真正拉流；file:// 短路路径在 cache 里失败也静默。
+	// 这些测试不真正拉流。
 	return provider.StreamLocator{URL: "file:///nonexistent-in-test"}, nil
 }
 
@@ -801,14 +797,14 @@ func TestParsePolicyStartLeadBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.startLeadMs(); got != DefaultStartLeadMs {
+	if got := p.effectiveLeadMs(nil, time.Now()); got != DefaultStartLeadMs {
 		t.Fatalf("unset start_lead_ms = %d, want default %d", got, DefaultStartLeadMs)
 	}
 	p, err = ParsePolicy(`{"start_lead_ms":0}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.startLeadMs(); got != 0 {
+	if got := p.effectiveLeadMs(nil, time.Now()); got != 0 {
 		t.Fatalf("explicit 0 start_lead_ms = %d, want 0 (disabled)", got)
 	}
 }
@@ -951,5 +947,89 @@ func TestFinishCurrentScrobble(t *testing.T) {
 			case <-time.After(100 * time.Millisecond):
 			}
 		})
+	}
+}
+
+func TestPlayerMetricsAdaptStartLeadAndLeaveClearsSample(t *testing.T) {
+	r, _ := newTestRoom(t, "")
+	first := playbackClient(t, r)
+	second := &recordingClient{
+		id: auth.Identity{ID: "second-player"}, messages: make(chan any, 32), interests: InterestPlayback,
+	}
+	r.Join(second)
+	r.ReportPlayerMetrics(first.ID(), PlayerMetrics{LoadMs: 1000})
+	r.ReportPlayerMetrics(first.ID(), PlayerMetrics{LoadMs: 200})
+	r.ReportPlayerMetrics(second.ID(), PlayerMetrics{LoadMs: 900})
+	// 第一端 EMA=600，第二端=900；取最慢端加 150ms。
+	if err := r.AddFor(guest, mkEntry("local:metrics-first", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := r.Snapshot(guest)
+	if err != nil || snapshot.Playback.PositionMs != -1050 {
+		t.Fatalf("多端自适应提前量 = %+v, %v", snapshot.Playback, err)
+	}
+	r.Leave(second)
+	// 离房后的迟到报告不能重新污染样本。
+	r.ReportPlayerMetrics(second.ID(), PlayerMetrics{LoadMs: 5000})
+	if err := r.AddFor(guest, mkEntry("local:metrics-second", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Skip(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = r.Snapshot(guest)
+	if err != nil || snapshot.Playback.PositionMs != -750 {
+		t.Fatalf("移除慢端后提前量 = %+v, %v", snapshot.Playback, err)
+	}
+	r.Leave(first)
+	if err := r.AddFor(guest, mkEntry("local:metrics-third", guest.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Skip(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = r.Snapshot(guest)
+	if err != nil || snapshot.Playback.PositionMs != -DefaultStartLeadMs {
+		t.Fatalf("所有端离房后提前量 = %+v, %v", snapshot.Playback, err)
+	}
+}
+
+func TestExplicitStartLeadOverridesPlayerMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		policy string
+		want   int64
+	}{
+		{`{"start_lead_ms":0}`, 0},
+		{`{"start_lead_ms":1500}`, -1500},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			r, _ := newTestRoom(t, tc.policy)
+			c := playbackClient(t, r)
+			r.ReportPlayerMetrics(c.ID(), PlayerMetrics{LoadMs: 2500})
+			if err := r.AddFor(guest, mkEntry("local:explicit", guest.ID)); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := r.Snapshot(guest)
+			if err != nil || snapshot.Playback.PositionMs != tc.want {
+				t.Fatalf("显式策略未优先: %+v, %v", snapshot.Playback, err)
+			}
+		})
+	}
+}
+
+func TestPlayerMetricsNeverBlockFullOrClosedRoom(t *testing.T) {
+	r := &Room{inbound: make(chan action, 1), done: make(chan struct{})}
+	r.inbound <- action{}
+	finished := make(chan struct{})
+	go func() {
+		r.ReportPlayerMetrics("player", PlayerMetrics{LoadMs: 100})
+		close(r.done)
+		r.ReportPlayerMetrics("player", PlayerMetrics{LoadMs: 200})
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("遥测投递阻塞")
 	}
 }

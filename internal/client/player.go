@@ -32,11 +32,27 @@ func (c *Client) PlayerHello(
 	return out.PlayerID, nil
 }
 
+// PlayerStateReport 包含播放端状态及可选的同步遥测。
+type PlayerStateReport struct {
+	Volume     int
+	Muted      bool
+	DriftMs    int64
+	BaselineMs int64
+	LoadMs     int64
+	HasMetrics bool // false 时只发送 volume/muted，兼容旧线格式
+}
+
 // SendPlayerState 上报播放端状态（fire-and-forget，无 ref）。
-func (c *Client) SendPlayerState(volume int, muted bool) error {
+func (c *Client) SendPlayerState(r PlayerStateReport) error {
+	data := map[string]any{"volume": r.Volume, "muted": r.Muted}
+	if r.HasMetrics {
+		data["drift_ms"] = r.DriftMs
+		data["baseline_ms"] = r.BaselineMs
+		data["load_ms"] = r.LoadMs
+	}
 	payload, err := json.Marshal(map[string]any{
 		"type": "player.state",
-		"data": map[string]any{"volume": volume, "muted": muted},
+		"data": data,
 	})
 	if err != nil {
 		return err

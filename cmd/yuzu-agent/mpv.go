@@ -14,11 +14,11 @@ import (
 
 // mpvClient 通过 MPV 的 JSON IPC（unix socket）控制播放器。
 type mpvClient struct {
-	cmd  *exec.Cmd
-	conn net.Conn
-	enc  *json.Encoder
-	wmu  sync.Mutex
-	pmu  sync.Mutex
+	cmd     *exec.Cmd
+	conn    net.Conn
+	enc     *json.Encoder
+	wmu     sync.Mutex
+	pmu     sync.Mutex
 	pending map[int]chan mpvResponse
 	reqSeq  int
 
@@ -125,6 +125,7 @@ func (m *mpvClient) command(args ...any) (mpvResponse, error) {
 // loadfile 参数布局在 mpv 版本间不兼容：
 //   - 旧版（如 Debian/RPi 0.35）：loadfile <url> <flags> <options>
 //   - 新版（如 0.38+）：loadfile <url> <flags> <index> <options>
+//
 // 首次失败时自动切换布局并缓存偏好。
 func (m *mpvClient) LoadFile(url string, startSec float64) error {
 	if startSec <= 0 {
@@ -243,6 +244,9 @@ func (m *mpvClient) TimePos() (int64, error) {
 	}
 	if resp.Error != "success" {
 		return 0, fmt.Errorf("time-pos: %s", resp.Error)
+	}
+	if string(resp.Data) == "null" {
+		return 0, fmt.Errorf("time-pos: unavailable")
 	}
 	var sec float64
 	if err := json.Unmarshal(resp.Data, &sec); err != nil {
