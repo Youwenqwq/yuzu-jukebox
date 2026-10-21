@@ -26,6 +26,7 @@ internal/
   credmon/          — hot-reload credential monitor for providers
   httpapi/          — REST handlers: /api/v1/*, /stream/v1/*, /api/v1/cover/*
   shortcode/        — Crockford Base32 short-code helpers
+  webui/            — 内嵌 WebUI（go:embed dist）+ 动态 /config.js + SPA 兜底
   wsapi/            — WebSocket handler: /ws/v1
   provider/         — Track provider abstraction + registry
     local/          — local media file provider

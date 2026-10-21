@@ -28,6 +28,21 @@ type CacheConfig struct {
 	MaxObjectBytes int64 `json:"max_object_bytes"`
 }
 
+// WebConfig 是内嵌 WebUI 的运行期品牌配置，由服务端渲染成 /config.js。
+// 各字段留空表示沿用前端内置默认值（config.ts 的回退链）。
+type WebConfig struct {
+	// 浏览器标题；空 = "Yuzu Jukebox"。
+	Title string `json:"title"`
+	// 图标路径（相对站点根或绝对 URL）；空 = 内置 favicon.svg。
+	Favicon string `json:"favicon"`
+	// 新访客的默认主题色（#rrggbb）；空 = 前端内置默认。
+	Accent string `json:"accent"`
+	// 新访客的默认深浅色："dark" | "light" | ""（空 = 前端内置深色）。
+	Scheme string `json:"scheme"`
+	// OIDC PKCE 应用的 client_id 覆盖；空 = 跟随服务器 oidc 主 client_id。
+	OIDCClientID string `json:"oidc_client_id"`
+}
+
 type Config struct {
 	// 监听地址，如 ":8080"
 	Addr string `json:"addr"`
@@ -66,6 +81,8 @@ type Config struct {
 	Bili BiliConfig `json:"bili"`
 	// QQ Provider（QQMusicApi sidecar 实例）
 	QQ QQConfig `json:"qq"`
+	// 内嵌 WebUI 的运行期品牌配置（渲染为 /config.js）
+	Web WebConfig `json:"web"`
 }
 
 type OIDCConfig struct {
@@ -81,9 +98,9 @@ type OIDCConfig struct {
 }
 
 type NCMConfig struct {
-	Enabled     bool   `json:"enabled"`
-	BaseURL     string `json:"base_url"` // 如 http://127.0.0.1:3000
-	Level       string `json:"level"`    // 音质等级，默认 exhigh
+	Enabled bool   `json:"enabled"`
+	BaseURL string `json:"base_url"` // 如 http://127.0.0.1:3000
+	Level   string `json:"level"`    // 音质等级，默认 exhigh
 	// CoverDirect 封面取图默认模式：true=302 客户端直连（省服务器带宽），
 	// false=服务器代理。仅作用于未显式声明 CoverMode 的 provider；
 	// ncm/qq 已声明 Redirect，bili 已声明 Proxy（需 Referer，恒代理）。
@@ -143,6 +160,16 @@ func Default() Config {
 	}
 }
 
+// ValidateWebScheme 校验 web.scheme 只接受深/浅色或留空。
+func (c Config) ValidateWebScheme() error {
+	switch c.Web.Scheme {
+	case "", "dark", "light":
+		return nil
+	default:
+		return fmt.Errorf("web.scheme = %q, want \"dark\", \"light\" or empty", c.Web.Scheme)
+	}
+}
+
 // SessionTTL returns the configured normal-session TTL. A non-positive value
 // falls back to the default so programmatic Config literals retain safe
 // production behavior.
@@ -164,6 +191,9 @@ func Load(path string) (Config, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.ValidateWebScheme(); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
 }

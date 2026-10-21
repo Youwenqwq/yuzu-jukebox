@@ -13,3 +13,7 @@ TODO.md
 *.exe
 *.test
 *.out
+
+# WebUI 构建产物（占位 index.html 之外都忽略）
+internal/webui/dist/*
+!internal/webui/dist/index.html

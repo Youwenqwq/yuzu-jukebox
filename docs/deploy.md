@@ -1,7 +1,41 @@
 # 部署指南
 
-yuzu-server 本身是纯 HTTP 服务。**生产环境请放在反向代理之后终结 TLS**，
-不要在公网裸跑（session token 与出流 ticket 都是明文传输的凭证）。
+yuzu-server 是纯 HTTP 服务，并**内嵌 WebUI**：`/`、`/assets/*` 等静态资源由同一
+进程提供，`/config.js` 由服务端按 `web` 段现场生成。生产环境仍需放在反向代理之后
+终结 TLS，不要在公网裸跑（session token 与出流 ticket 都是明文传输的凭证）。
+
+## WebUI
+
+前端产物不随源码仓库分发，而是在构建镜像时经 BuildKit 命名上下文注入：
+
+```sh
+--build-context web=/path/to/yuzu-jukebox-web/dist
+```
+
+源码仓库只保留 `internal/webui/dist/index.html` 占位页，因此没有前端产物时
+`go build` / `go test` 依然可用；此时访问 `/` 只会看到提示页。
+
+品牌与运行期行为由 `config.json` 的 `web` 段控制，改完**只需重启服务**，
+不必重新构建前端：
+
+```jsonc
+{
+  "web": {
+    "title": "客厅点歌台",     // 浏览器标题；空 = Yuzu Jukebox
+    "favicon": "",            // 相对站点根或绝对 URL；空 = 内置 favicon.svg
+    "accent": "#6A8FD8",      // 新访客默认主题色；空 = 前端内置默认
+    "scheme": "dark",         // "dark" | "light" | ""（空 = 内置深色）
+    "oidc_client_id": ""      // OIDC PKCE 覆盖；空 = 跟随 oidc.client_id
+  }
+}
+```
+
+`config.js` 的 `admin_password_enabled` 由服务端 `admin_password` 是否非空自动
+推导，无需手工同步；留空时前端不显示口令输入框。
+
+路由约定：`/api/`、`/stream/`、`/ws/` 前缀永远交给后端；其余 GET/HEAD 走静态
+托管，未知的无扩展名路径回退到 `index.html`，带扩展名的缺失资源返回 404
+（不会把 HTML 当脚本返回）。
 
 ## 反向代理
 
@@ -9,11 +43,13 @@ yuzu-server 本身是纯 HTTP 服务。**生产环境请放在反向代理之后
 
 ```
 jukebox.example.org {
+    encode zstd gzip
     reverse_proxy 127.0.0.1:8080
 }
 ```
 
 Caddy 自动签发/续期证书，且默认正确处理 WebSocket 升级（无需额外配置）。
+WebUI 已内嵌，**不需要** `root` / `try_files` / `file_server`。
 
 ### nginx
 

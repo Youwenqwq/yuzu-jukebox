@@ -50,3 +50,36 @@ func TestDefaultSessionTTL(t *testing.T) {
 		t.Fatalf("configured SessionTTL() = %v, want 12h", cfg.SessionTTL())
 	}
 }
+
+func TestLoadWebSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+		"web": {"title": "客厅点歌台", "scheme": "light", "accent": "#6A8FD8", "oidc_client_id": "web-client"}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Web.Title != "客厅点歌台" || cfg.Web.Scheme != "light" ||
+		cfg.Web.Accent != "#6A8FD8" || cfg.Web.OIDCClientID != "web-client" {
+		t.Fatalf("web = %+v", cfg.Web)
+	}
+
+	// 未配置 web 段时保持空值，前端回退到内置默认品牌。
+	if got := Default().Web; got != (WebConfig{}) {
+		t.Fatalf("default web = %+v, want zero", got)
+	}
+}
+
+func TestLoadRejectsInvalidWebScheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"web": {"scheme": "auto"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "web.scheme") {
+		t.Fatalf("Load error = %v, want web.scheme rejection", err)
+	}
+}

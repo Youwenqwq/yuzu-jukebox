@@ -1,0 +1,11 @@
+data/
+bin/
+temp/
+.venv/
+.claude/
+.vscode/
+.idea/
+.git/
+config.json
+TODO.md
+*.test

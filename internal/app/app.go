@@ -27,6 +27,7 @@ import (
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider/qq"
 	"github.com/youwenqwq/yuzu-jukebox/internal/room"
 	"github.com/youwenqwq/yuzu-jukebox/internal/store"
+	"github.com/youwenqwq/yuzu-jukebox/internal/webui"
 	"github.com/youwenqwq/yuzu-jukebox/internal/wsapi"
 )
 
@@ -104,8 +105,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		go runCacheJanitor(ctx, c, cfg.CacheAutoPruneDays)
 	}
 
+	// WebUI 同源托管：CORS 只包后端，静态资源无需跨域头；
+	// API/流/WS 前缀在 webui 内部直接放行到后端。
+	apiHandler := httpapi.CORSMiddleware(cfg.CORS, api.Handler())
 	return &App{
-		Handler: httpapi.CORSMiddleware(cfg.CORS, api.Handler()),
+		Handler: webui.Wrap(apiHandler, cfg.Web, cfg.AdminPassword != ""),
 		Store:   st,
 		Control: controls,
 	}, nil
