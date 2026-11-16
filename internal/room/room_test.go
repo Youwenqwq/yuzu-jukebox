@@ -1033,3 +1033,46 @@ func TestPlayerMetricsNeverBlockFullOrClosedRoom(t *testing.T) {
 		t.Fatal("遥测投递阻塞")
 	}
 }
+
+func TestEntryTicketForOwnedCurrentAndPendingEntries(t *testing.T) {
+	r, _ := newTestRoom(t, "")
+	current := mkEntry("local:ticket-current", guest.ID)
+	if err := r.AddFor(guest, current); err != nil {
+		t.Fatalf("add current: %v", err)
+	}
+	pending := mkEntry("local:ticket-pending", guest.ID)
+	if err := r.AddFor(guest, pending); err != nil {
+		t.Fatalf("add pending: %v", err)
+	}
+
+	check := func(entry QueueEntry) {
+		t.Helper()
+		ticket, err := r.EntryTicketFor(guest, entry.EntryID)
+		if err != nil {
+			t.Fatalf("ticket for %s: %v", entry.EntryID, err)
+		}
+		if ticket.EntryID != entry.EntryID || ticket.TrackRef != entry.TrackRef || ticket.DurationMs != entry.DurationMs {
+			t.Fatalf("ticket = %+v, want entry %+v", ticket, entry)
+		}
+		if !strings.HasPrefix(ticket.StreamURL, "/stream/v1/"+entry.TrackRef+"?ticket=") {
+			t.Fatalf("stream URL = %q", ticket.StreamURL)
+		}
+		parts := strings.SplitN(ticket.StreamURL, "?ticket=", 2)
+		if len(parts) != 2 || r.authm.ValidateTicket(parts[1], entry.TrackRef) != nil {
+			t.Fatalf("issued ticket did not validate: %q", ticket.StreamURL)
+		}
+		if remaining := time.Until(ticket.ExpiresAt); remaining <= 0 || remaining > 5*time.Minute+time.Second {
+			t.Fatalf("ticket expiry = %v", ticket.ExpiresAt)
+		}
+	}
+	check(current)
+	check(pending)
+
+	other := auth.Identity{ID: "u2", Name: "u2", Kind: "guest", Roles: []string{"requester"}}
+	if _, err := r.EntryTicketFor(other, pending.EntryID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("foreign entry ticket error = %v, want forbidden", err)
+	}
+	if _, err := r.EntryTicketFor(guest, "missing"); !errors.Is(err, ErrEntryNotFound) {
+		t.Fatalf("unknown entry ticket error = %v, want not found", err)
+	}
+}

@@ -145,6 +145,16 @@ type Snapshot struct {
 	Listeners []ListenerSnapshot `json:"listeners"`
 }
 
+// EntryTicket 是某个队列条目所有者的短期取流凭证。条目可以是当前播放、
+// 起播就绪窗口中或待播队列中的任意一条；StreamURL 为服务端相对路径。
+type EntryTicket struct {
+	EntryID    string
+	TrackRef   string
+	DurationMs int64
+	StreamURL  string
+	ExpiresAt  time.Time
+}
+
 type actKind int
 
 const (
@@ -167,6 +177,7 @@ const (
 	actSetPolicy
 	actDirectorySnapshot
 	actSnapshot
+	actEntryTicket
 )
 
 type action struct {
@@ -194,6 +205,12 @@ type action struct {
 	snapshot         chan DirectorySnapshot
 	stateSnapshot    chan Snapshot
 	includeStreamURL bool
+	ticket           chan entryTicketResult
+}
+
+type entryTicketResult struct {
+	ticket EntryTicket
+	err    error
 }
 
 var (
@@ -440,6 +457,23 @@ func (r *Room) Snapshot(id auth.Identity) (Snapshot, error) {
 // ticket. The control boundary uses it for callers not admitted to protected rooms.
 func (r *Room) SnapshotWithoutStreamURL(id auth.Identity) (Snapshot, error) {
 	return r.snapshot(id, false)
+}
+
+// EntryTicketFor issues a short-lived stream ticket for one entry owned by id.
+// The entry may be current, pending, or inside the start readiness window.
+func (r *Room) EntryTicketFor(id auth.Identity, entryID string) (EntryTicket, error) {
+	ch := make(chan entryTicketResult, 1)
+	select {
+	case r.inbound <- action{kind: actEntryTicket, actor: id, entryID: entryID, ticket: ch}:
+	case <-r.done:
+		return EntryTicket{}, ErrRoomClosed
+	}
+	select {
+	case result := <-ch:
+		return result.ticket, result.err
+	case <-r.done:
+		return EntryTicket{}, ErrRoomClosed
+	}
 }
 
 func (r *Room) snapshot(id auth.Identity, includeStreamURL bool) (Snapshot, error) {
@@ -1039,6 +1073,21 @@ func (r *Room) Run(ctx context.Context) {
 		}
 	}
 
+	entryByID := func(entryID string) (QueueEntry, bool) {
+		if playback != nil && playback.Current != nil && playback.Current.EntryID == entryID {
+			return *playback.Current, true
+		}
+		if startPending != nil && startPending.EntryID == entryID {
+			return *startPending, true
+		}
+		for _, entry := range queue {
+			if entry.EntryID == entryID {
+				return entry, true
+			}
+		}
+		return QueueEntry{}, false
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1414,6 +1463,24 @@ func (r *Room) Run(ctx context.Context) {
 			case actSnapshot:
 				a.stateSnapshot <- snapshotFor(a.actor, a.includeStreamURL)
 
+			case actEntryTicket:
+				entry, ok := entryByID(a.entryID)
+				if !ok {
+					a.ticket <- entryTicketResult{err: ErrEntryNotFound}
+					break
+				}
+				if entry.RequestedBy != a.actor.ID {
+					a.ticket <- entryTicketResult{err: ErrForbidden}
+					break
+				}
+				issued := r.authm.IssueTicket(a.actor.ID, entry.TrackRef)
+				a.ticket <- entryTicketResult{ticket: EntryTicket{
+					EntryID: entry.EntryID, TrackRef: entry.TrackRef,
+					DurationMs: entry.DurationMs,
+					StreamURL:  streamURL(issued.Token, entry.TrackRef),
+					ExpiresAt:  issued.ExpiresAt,
+				}}
+
 			case actSetPolicy:
 				p, err := ParsePolicy(a.policyRaw)
 				if err != nil {
@@ -1434,8 +1501,12 @@ func (r *Room) Run(ctx context.Context) {
 
 // streamURL 为当前观察者签发绑定身份与曲目的短期票据。
 func (r *Room) streamURL(id auth.Identity, trackRef string) string {
-	ticket := r.authm.IssueTicket(id.ID, trackRef)
-	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + ticket
+	issued := r.authm.IssueTicket(id.ID, trackRef)
+	return streamURL(issued.Token, trackRef)
+}
+
+func streamURL(token, trackRef string) string {
+	return "/stream/v1/" + url.PathEscape(trackRef) + "?ticket=" + token
 }
 
 // loadQueue 读取持久队列，并按 current_entry_id 把当前曲目从待播队列中切分出来。

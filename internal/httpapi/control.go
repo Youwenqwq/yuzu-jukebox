@@ -51,6 +51,42 @@ func (s *Server) roomState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snapshot)
 }
 
+func (s *Server) entryStreamTicket(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.controlIdentity(w, r)
+	if !ok {
+		return
+	}
+	roomID, ok := controlPathValue(w, r, "id")
+	if !ok {
+		return
+	}
+	var body struct {
+		EntryID string `json:"entry_id"`
+	}
+	if err := decodeControlJSON(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid stream ticket payload")
+		return
+	}
+
+	ticket, err := s.controls.EntryStreamTicket(r.Context(), roomID, identity, body.EntryID)
+	if err != nil {
+		s.writeControlErr(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, struct {
+		EntryID    string `json:"entry_id"`
+		TrackRef   string `json:"track_ref"`
+		DurationMs int64  `json:"duration_ms"`
+		StreamURL  string `json:"stream_url"`
+		ExpiresAt  int64  `json:"expires_at"`
+	}{
+		EntryID: ticket.EntryID, TrackRef: ticket.TrackRef,
+		DurationMs: ticket.DurationMs, StreamURL: ticket.StreamURL,
+		ExpiresAt: ticket.ExpiresAt.UnixMilli(),
+	})
+}
+
 func (s *Server) queueAdd(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.controlIdentity(w, r)
 	if !ok {

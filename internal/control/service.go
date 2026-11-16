@@ -4,6 +4,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/youwenqwq/yuzu-jukebox/internal/auth"
 	"github.com/youwenqwq/yuzu-jukebox/internal/provider"
@@ -164,6 +165,33 @@ func (s *Service) RoomSnapshot(ctx context.Context, roomID string, principal aut
 		snapshot.Playback.Current.StreamURL = ""
 	}
 	return snapshot, nil
+}
+
+// EntryStreamTicket issues a short-lived stream ticket for one queue entry
+// owned by a same-room Integration actor. Ordinary sessions and other rooms are
+// rejected: pending-entry tickets are an Integration transport affordance, not
+// a general media-download API.
+func (s *Service) EntryStreamTicket(
+	ctx context.Context,
+	roomID string,
+	principal auth.Identity,
+	entryID string,
+) (room.EntryTicket, error) {
+	if err := ctx.Err(); err != nil {
+		return room.EntryTicket{}, err
+	}
+	if principal.IntegrationID == "" || principal.IntegrationRoomID != roomID {
+		return room.EntryTicket{}, forbidden("same-room Integration actor required")
+	}
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return room.EntryTicket{}, classify(ErrInvalidArgument, errors.New("entry_id required"))
+	}
+	r, err := s.GetRoom(roomID)
+	if err != nil {
+		return room.EntryTicket{}, err
+	}
+	return r.EntryTicketFor(principal, entryID)
 }
 
 // QueueAdd atomically materializes and appends all requested tracks.

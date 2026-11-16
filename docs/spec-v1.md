@@ -516,7 +516,8 @@ NCM 的 `MUSIC_U` 凭据是服务端级单例，不是每个 Principal 各持一
 - `stream_url` 中的 `ticket` 为短时效（5 分钟）、绑定身份与 track 的令牌。
 - 票据在 TTL 内**可复用**：客户端的 Range 请求与断线重试都依赖同一 URL。曲目播完（切歌/自然结束）时该曲目所有票据立即失效。
 - 目的：凭据永不下发；`/stream` 端点无 cookie 会话也可鉴权（`<audio>` 标签、MPV 均适用）。
-- 仅**当前播放曲目**附带 `stream_url`；队列条目只给元数据。当前曲目在广播前已通过就绪门控（§2.2：缓存命中或首 128KiB 已缓冲），下一首在其成为当前曲目时同样过门控；进入 PLAYING 时还会预拉取队首为下一首做准备。
+- 状态快照中仅**当前播放曲目**附带 `stream_url`；队列条目只给元数据。当前曲目在广播前已通过就绪门控（§2.2：缓存命中或首 128KiB 已缓冲），下一首在其成为当前曲目时同样过门控；进入 PLAYING 时还会预拉取队首为下一首做准备。
+- 唯一例外是 6.3 的 `POST /api/v1/rooms/{id}/stream-tickets`：同 Room Integration actor 可为**自己点入**的当前、起播就绪窗口中或待播条目单独申请票据，用于把点歌结果转发为语音/附件。该端点不改变状态快照的上述投影；票据仍为 5 分钟、绑定 track，曲目播完即失效。
 
 ### 4.7 房间治理策略
 
@@ -1017,6 +1018,7 @@ Provider 作用域端点 `GET /api/v1/providers/{id}/radio-catalog` 继续提供
 | 方法与路径 | JSON body | 权限 | HTTP 200 body |
 |---|---|---|---|
 | `POST /api/v1/rooms/{id}/queue` | `{"track_ref":"ncm:..."}` 或 `{"track_refs":["...", ...]}`，严格二选一；数组 1–100 | `requester` | `{"entry_ids":["e_...", ...]}`，顺序与请求一致 |
+| `POST /api/v1/rooms/{id}/stream-tickets` | `{"entry_id":"e_..."}` | 当前 scope 映射到该 Room 的 Integration actor，且条目 `requested_by` 为本人 | `{"entry_id","track_ref","duration_ms","stream_url","expires_at"}`，`Cache-Control: no-store` |
 | `DELETE /api/v1/rooms/{id}/queue` | 无 | controller | `{}` |
 | `DELETE /api/v1/rooms/{id}/queue/{entry_id}` | 无 | 条目所有者 / controller | `{}` |
 | `PATCH /api/v1/rooms/{id}/queue/{entry_id}` | `{"to_index":0}`；零基、非负且须落在当前待播队列范围 | controller | `{}` |
@@ -1030,6 +1032,7 @@ Provider 作用域端点 `GET /api/v1/providers/{id}/radio-catalog` 继续提供
 - 单条与批量入队都会先解析全部 Track，再由 Room actor 整批预校验并追加；任一 ref、Provider、总量或身份限额失败时一条不加。
 - clear 只清空 pending queue；正在播放的 `playback.current` 与 radio 绑定保持不变。空队列 clear 仍返回成功，因此调用在状态语义上幂等；WS 订阅者以收到的 revisioned `queue.patch` 为准。
 - 每个成功命令都经与 WS 相同的领域服务进入同一个 Room actor；其状态变化随后广播给该 Room 的 WS listeners。
+- `stream-tickets` 是唯一允许为待播条目签发票据的入口：它只接受由**当前 scope 映射到该 Room** 的 Integration actor session 调用，且条目必须属于该 actor（`requested_by == actor.id`）；普通 guest/OIDC session、跨 Room Integration actor 和他人条目一律 403。条目可处于当前播放、起播就绪窗口或待播队列；不要求 `Idempotency-Key`，重复调用签发新的短期票据。响应中的 `expires_at` 为 Unix 毫秒，`duration_ms` 来自入队时快照，便于 Client 自行截断/跳过。
 - `{id}`、`{entry_id}`、`{track_ref}` 嵌入 URL 时按路径段转义；不要把 `bili:...?p=...` 的 `?` 当作 URL 查询起点。
 
 合同 A 的错误映射：
@@ -1038,8 +1041,8 @@ Provider 作用域端点 `GET /api/v1/providers/{id}/radio-catalog` 继续提供
 |---|---|
 | 400 / `bad_request` | JSON/字段非法、未知 op、非法 ref/source、`to_index` 越界 |
 | 401 / `unauthorized` | session 缺失、过期、吊销，或 Principal disabled/不存在 |
-| 403 / `forbidden` | 缺 requester/controller，或非所有者尝试移除条目 |
-| 404 / `not_found` | Room、待播 entry 不存在或 Room actor 已关闭 |
+| 403 / `forbidden` | 缺 requester/controller、非所有者尝试移除条目，或非 same-room Integration actor/他人条目申请票据 |
+| 404 / `not_found` | Room、entry（当前/待播/未知）不存在或 Room actor 已关闭 |
 | 409 / `conflict` | 队列总量/身份限额，或 pause/resume/seek 没有可用当前播放、当前状态不允许该迁移 |
 | 502 / `provider_error` | 入队取 Track 时 Provider 失败 |
 | 500 / `internal` | 未分类的服务端错误 |
@@ -1140,7 +1143,7 @@ WS 错误仍使用 `{"type":"error","ref":"...","data":{"code","message"}}`；RE
 
 - 交互式 WebUI/CLI 通常用 REST 做目录/管理，用 WS 加房订阅实时状态并发命令。
 - 收听 Agent 用 WS 快照驱动播放器；只有要接受管理员远程音量/换房时才实现 player plane。
-- Integration Client 的最小流程是：解析外部事件 → 用稳定的 adapter/scope/subject 调 3.6 resolve → 取 `default_room_id` 或 Client 自己选择 Room → 用 `actor_token` 调 6.3 标准 REST（写请求携带由平台事件 ID 派生的 `Idempotency-Key`）→ 把领域 JSON 渲染成聊天/游戏内容。需要实时订阅时，再用同一 `actor_token` 做 WS session 认证。
+- Integration Client 的最小流程是：解析外部事件 → 用稳定的 adapter/scope/subject 调 3.6 resolve → 取 `default_room_id` 或 Client 自己选择 Room → 用 `actor_token` 调 6.3 标准 REST（写请求携带由平台事件 ID 派生的 `Idempotency-Key`）→ 把领域 JSON 渲染成聊天/游戏内容。需要把刚点的歌转发为语音/附件时，可对 `queue` 返回的 `entry_ids` 调 `POST /api/v1/rooms/{id}/stream-tickets` 取得短期 `stream_url`。需要实时订阅时，再用同一 `actor_token` 做 WS session 认证。
 - Client 不得向不存在的 `/im/v1` 发请求，也不得期待 Server 理解诸如“点歌 xxx”的原始文本。
 
 ### 9.1 WS 连接时序

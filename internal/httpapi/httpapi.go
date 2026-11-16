@@ -126,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/rooms/{id}/players", s.listRoomPlayers)
 	mux.HandleFunc("PUT /api/v1/rooms/{id}/players/{player_id}", s.bindRoomPlayer)
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/players/{player_id}", s.unbindRoomPlayer)
+	mux.HandleFunc("POST /api/v1/rooms/{id}/stream-tickets", s.entryStreamTicket)
 	mux.HandleFunc("POST /api/v1/rooms/{id}/queue", s.idempotent(s.queueAdd))
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/queue", s.idempotent(s.queueClear))
 	mux.HandleFunc("DELETE /api/v1/rooms/{id}/queue/{entry_id}", s.idempotent(s.queueRemove))

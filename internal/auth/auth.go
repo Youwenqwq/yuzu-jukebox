@@ -521,18 +521,25 @@ func (m *Manager) renewSession(tokenDigest string, now time.Time) {
 	}
 }
 
+// IssuedTicket 是签发给单个身份的单曲出流票据。
+type IssuedTicket struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
 // IssueTicket 签发某身份拉取某曲目的出流票据。
 // 票据在 TTL 内可复用——客户端的 Range 请求与断线重试都依赖同一 URL。
-func (m *Manager) IssueTicket(identityID, trackRef string) string {
+func (m *Manager) IssueTicket(identityID, trackRef string) IssuedTicket {
 	token := randHex(16)
+	expiresAt := time.Now().Add(m.ticketTTL)
 	m.mu.Lock()
 	m.tickets[token] = ticket{
 		trackRef:   trackRef,
 		identityID: identityID,
-		expiresAt:  time.Now().Add(m.ticketTTL),
+		expiresAt:  expiresAt,
 	}
 	m.mu.Unlock()
-	return token
+	return IssuedTicket{Token: token, ExpiresAt: expiresAt}
 }
 
 // ValidateTicket 校验票据与曲目匹配。

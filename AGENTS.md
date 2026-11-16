@@ -60,6 +60,7 @@ Authoritative contract: [docs/spec-v1.md](docs/spec-v1.md) §3 (auth) and §4.6 
 - Guest/OIDC login issues a `session_token` used as `Authorization: Bearer <token>` for REST; WS accepts the same token to establish a connection identity.
 - Streams use ticket auth in the query param (for `<audio>` tags, no headers); covers need **no auth** (for `<img>` tags).
 - An Integration credential only calls `POST /api/v1/integrations/actors/resolve` to map an external scope/subject to a 5-minute actor session; it carries no Yuzu roles, and authorization always reloads the current Principal and Room grant.
+- A same-room Integration actor session may mint a 5-minute ticket for one of its own queue entries via `POST /api/v1/rooms/{id}/stream-tickets` (`{"entry_id": ...}`), including entries still pending or inside the start readiness window. Ordinary sessions and foreign entries are rejected.
 
 ### Room → Playback Flow
 
@@ -93,6 +94,7 @@ Authoritative sequencing: [docs/spec-v1.md](docs/spec-v1.md) §4 (room session) 
 - External `(integration, adapter, scope)` maps to a default Room; adding `subject` maps to a persistent Principal.
 - Unlinked subjects resolve to stable synthetic guest Principals. Linked OIDC Principals share the same roles and Room grants as WebUI/CLI sessions.
 - Integration adapters translate platform events into standard Room REST/WS. There is no platform-specific `/im/v1` protocol in the server.
+- To forward a just-requested song as chat voice/attachment, adapters call the Integration-only `stream-tickets` endpoint for the returned `entry_id`; never add stream URLs to pending queue projections or accept arbitrary track refs.
 - External write retries use `Idempotency-Key`; never invent client-side deduplication from song metadata or message text.
 
 ### WS Handler Initialization

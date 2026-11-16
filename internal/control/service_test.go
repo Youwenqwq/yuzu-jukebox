@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -391,5 +392,68 @@ func TestParsePolicyRejectsInvalidRadioControl(t *testing.T) {
 	_, err := room.ParsePolicy(`{"radio_control":"everyone"}`)
 	if !errors.Is(err, room.ErrInvalidPolicy) {
 		t.Fatalf("invalid radio_control error = %v, want ErrInvalidPolicy", err)
+	}
+}
+
+func TestServiceEntryStreamTicketIsIntegrationSameRoomOwnerOnly(t *testing.T) {
+	service, _ := newServiceFixture(t)
+	ctx := context.Background()
+	owner := auth.Identity{
+		ID: "ig-owner", Name: "Owner", Kind: "guest",
+		Roles:         []string{auth.RoleListener, auth.RoleRequester},
+		IntegrationID: "bridge", IntegrationRoomID: "room-a",
+	}
+	ids, err := service.QueueAdd(ctx, "room-a", owner, []string{"test:a", "test:b"})
+	if err != nil {
+		t.Fatalf("queue add: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("entry ids = %v", ids)
+	}
+
+	for index, wantRef := range []string{"test:a", "test:b"} {
+		ticket, err := service.EntryStreamTicket(ctx, "room-a", owner, ids[index])
+		if err != nil {
+			t.Fatalf("ticket %d: %v", index, err)
+		}
+		if ticket.EntryID != ids[index] || ticket.TrackRef != wantRef {
+			t.Fatalf("ticket %d = %+v", index, ticket)
+		}
+		if !strings.HasPrefix(ticket.StreamURL, "/stream/v1/"+wantRef+"?ticket=") {
+			t.Fatalf("ticket %d URL = %q", index, ticket.StreamURL)
+		}
+		if time.Until(ticket.ExpiresAt) <= 0 {
+			t.Fatalf("ticket %d already expired", index)
+		}
+	}
+
+	otherSameRoom := auth.Identity{
+		ID: "ig-other", Name: "Other", Kind: "guest",
+		Roles:         []string{auth.RoleListener, auth.RoleRequester},
+		IntegrationID: "bridge", IntegrationRoomID: "room-a",
+	}
+	if _, err := service.EntryStreamTicket(ctx, "room-a", otherSameRoom, ids[0]); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("same-room other actor error = %v, want forbidden", err)
+	}
+
+	ordinary := auth.Identity{
+		ID: "guest", Name: "Guest", Kind: "guest",
+		Roles: []string{auth.RoleListener, auth.RoleRequester},
+	}
+	if _, err := service.EntryStreamTicket(ctx, "room-a", ordinary, ids[0]); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("ordinary session error = %v, want forbidden", err)
+	}
+
+	wrongRoom := auth.Identity{
+		ID: "ig-wrong", Name: "Wrong", Kind: "guest",
+		Roles:         []string{auth.RoleListener, auth.RoleRequester},
+		IntegrationID: "bridge", IntegrationRoomID: "room-b",
+	}
+	if _, err := service.EntryStreamTicket(ctx, "room-a", wrongRoom, ids[0]); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("wrong-room Integration error = %v, want forbidden", err)
+	}
+
+	if _, err := service.EntryStreamTicket(ctx, "room-a", owner, "  "); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("blank entry error = %v, want invalid argument", err)
 	}
 }
